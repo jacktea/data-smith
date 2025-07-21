@@ -105,9 +105,9 @@
 
 ```yaml
 source_db:
-  type: mysql
+  type: postgres
   host: 127.0.0.1
-  port: 3306
+  port: 5433
   user: user
   password: password
   dbname: source_db
@@ -156,4 +156,3 @@ target_db:
 - 接口驱动、配置管理、依赖最小化
 - 核心逻辑需编写单元测试
 - 语义化提交，PR 需关联 issue 并通过 review
-- 详细开发规范见 `.cursorrules`
