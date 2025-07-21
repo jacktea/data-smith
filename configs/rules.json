@@ -1,0 +1,23 @@
+{
+  "rules": [
+    {
+      "table": "air_sys_node"
+    },
+    {
+      "table": "air_sys_property",
+      "comparisonKey": [
+        "id",
+        "parent_id",
+        "attribute_type",
+        "data_type",
+        "selection",
+        "value",
+        "rule",
+        "property_id"
+      ]
+    },
+    {
+      "table": "air_sys_criteria"
+    }
+  ]
+}
