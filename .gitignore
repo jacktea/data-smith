@@ -3,3 +3,5 @@
 datasmith
 .cursorrules
 GEMINI.md
+schema_diff.sql
+data_diff.sql

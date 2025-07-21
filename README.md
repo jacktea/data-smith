@@ -140,10 +140,10 @@ target_db:
 
 ```bash
 # 结构比对
-./datasmith compare schema -c configs/config.yaml
+./datasmith diff-schema -c configs/config.yaml
 
 # 数据比对
-./datasmith compare data -c configs/config.yaml -r configs/rules.json
+./datasmith diff-data -c configs/config.yaml -r configs/rules.json
 ```
 
 ---
