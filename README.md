@@ -141,9 +141,14 @@ target_db:
 ```bash
 # 结构比对
 ./datasmith diff-schema -c configs/config.yaml
-
 # 数据比对
 ./datasmith diff-data -c configs/config.yaml -r configs/rules.json
+# 重置数据库，删除所有数据
+./datasmith reset-db -c configs/config.yaml
+# 执行迁移脚本
+./datasmith migrate-script -c configs/config.yaml -d data/dbscripts
+# 执行迁移脚本, 模拟执行
+./datasmith migrate-script -c configs/config.yaml -d data/dbscripts -n
 ```
 
 ---

@@ -1,6 +1,5 @@
 .DS_Store
 .vscode
-datasmith
 .cursorrules
 GEMINI.md
 schema_diff.sql

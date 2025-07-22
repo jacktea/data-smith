@@ -102,6 +102,7 @@ func ResetDatabase(db conn.DBAdapter) error {
 			return err
 		}
 	}
+	logger.Info("数据库重置成功")
 	return nil
 }
 
