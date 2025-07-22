@@ -136,13 +136,41 @@ target_db:
 }
 ```
 
-### 3. 执行比对
+### 3. 数据或结构比对
 
 ```bash
 # 结构比对
 ./datasmith diff-schema -c configs/config.yaml
 # 数据比对
 ./datasmith diff-data -c configs/config.yaml -r configs/rules.json
+```
+
+### 4. 数据库脚本执行
+
+脚本文件目录：
+
+```
+.
+├── baseline
+│   └── V1.0.0__baseline.sql
+└── versionupdates
+    └── v1
+        └── v1_0
+            └── v1_0_0
+                ├── V1.0.0.10__upgrade.sql
+                ├── V1.0.0.100__upgradesql.sql
+                ├── V1.0.0.101__upgradesqlProduct.sql
+                ├── V1.0.0.102__upgradesql.sql
+                ├── V1.0.0.103__upgradesql.sql
+                ├── V1.0.0.104__upgradesql.sql
+                ├── V1.0.0.105__upgradesqlProduct.sql
+                ├── V1.0.0.106__upgradesql.sql
+                ├── V1.0.0.107__upgradesqlProduct.sql
+                ├── V1.0.0.108__upgradesqlProduct.sql
+                ├── V1.0.0.11__upgrade.sql
+```
+
+```bash
 # 重置数据库，删除所有数据
 ./datasmith reset-db -c configs/config.yaml
 # 执行迁移脚本
