@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/jacktea/data-smith/internal/config"
@@ -60,31 +61,36 @@ func runMigrations(db conn.DBAdapter, dir string, dryRun bool, targetVersion str
 		return err
 	}
 	local.SortMigrations(files)
+	// Read and validate every selected migration before creating or changing the
+	// ledger. This guarantees JSON/unreadable/duplicate inputs fail pre-mutation.
+	if err := migrate.PrepareMigrationFiles(files); err != nil {
+		return err
+	}
 
 	logger.Info("创建或更新配置表")
 	err = migrate.EnsureVersionTable(db)
 	if err != nil {
 		return err
 	}
-	currentVersion, err := migrate.CurrentVersion(db)
+	applied, err := migrate.SuccessfulMigrations(db)
 	if err != nil {
 		return err
 	}
-	logger.Infof("获取当前版本: %s", currentVersion)
 	if targetVersion == "" && len(files) > 0 {
 		targetVersion = files[len(files)-1].Version
 	}
-	if targetVersion != "" && local.CompareVersion(currentVersion, targetVersion) >= 0 {
-		logger.Infof("当前版本: %s, 目标版本: %s, 无需执行迁移", currentVersion, targetVersion)
-		return nil
-	}
 	var pendingFiles []*migrate.MigrationFile
 	for _, f := range files {
-		if local.CompareVersion(f.Version, currentVersion) > 0 {
-			if targetVersion == "" || local.CompareVersion(f.Version, targetVersion) <= 0 {
-				pendingFiles = append(pendingFiles, f)
-			}
+		if targetVersion != "" && local.CompareVersion(f.Version, targetVersion) > 0 {
+			continue
 		}
+		if checksum, ok := applied[f.Version]; ok {
+			if checksum != "" && checksum != f.Checksum {
+				return fmt.Errorf("migration version %q checksum drift: database=%s file=%s (%s)", f.Version, checksum, f.Checksum, f.Path)
+			}
+			continue
+		}
+		pendingFiles = append(pendingFiles, f)
 	}
 	logger.Infof("获取待执行的迁移文件: %d", len(pendingFiles))
 	if dryRun {

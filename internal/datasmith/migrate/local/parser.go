@@ -25,8 +25,8 @@ func ParseMigrationFile(path string) (*migrate.MigrationFile, error) {
 	direction := matches[3] // 可能为"up"、"down"或""
 	extension := matches[4]
 
-	if direction != "" && direction != "up" && direction != "down" {
-		return nil, fmt.Errorf("无效的方向: %s", direction)
+	if direction == "" {
+		direction = "up"
 	}
 
 	if extension != "sql" && extension != "json" {
@@ -55,8 +55,14 @@ func ScanMigrations(dir string) ([]*migrate.MigrationFile, error) {
 			return nil
 		}
 
-		file, err := ParseMigrationFile(path)
-		if err == nil {
+		file, parseErr := ParseMigrationFile(path)
+		if parseErr != nil {
+			return nil
+		}
+		if file.Ext == "json" {
+			return fmt.Errorf("JSON migration is not supported: %s", path)
+		}
+		if file.Ext == "sql" && file.Direction == "up" {
 			files = append(files, file)
 		}
 		return nil
@@ -66,16 +72,26 @@ func ScanMigrations(dir string) ([]*migrate.MigrationFile, error) {
 		return nil, err
 	}
 
+	versions := make(map[string]string, len(files))
+	for _, file := range files {
+		normalized := normalizeVersion(file.Version)
+		if previous, ok := versions[normalized]; ok {
+			return nil, fmt.Errorf("duplicate migration version %q in %s and %s", file.Version, previous, file.Path)
+		}
+		versions[normalized] = file.Path
+	}
+
 	return files, nil
 }
 
 func SortMigrations(files []*migrate.MigrationFile) {
 	sort.Slice(files, func(i, j int) bool {
-		if files[i].Version == files[j].Version {
-			return files[i].Direction == "down" && files[j].Direction == "up"
-		}
 		return CompareVersion(files[i].Version, files[j].Version) < 0
 	})
+}
+
+func normalizeVersion(version string) string {
+	return strings.TrimPrefix(strings.ToLower(version), "v")
 }
 
 func CompareVersion(a, b string) int {
