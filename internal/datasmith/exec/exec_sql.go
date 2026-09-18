@@ -4,15 +4,17 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jacktea/data-smith/internal/config"
 	pkgconfig "github.com/jacktea/data-smith/pkg/config"
 	"github.com/jacktea/data-smith/pkg/conn"
+	"github.com/jacktea/data-smith/pkg/consts"
 	"github.com/jacktea/data-smith/pkg/db"
 	"github.com/jacktea/data-smith/pkg/logger"
-	"github.com/jacktea/data-smith/pkg/utils"
+	"github.com/lib/pq"
 	"github.com/spf13/cobra"
 )
 
@@ -96,8 +98,8 @@ func runExecSQL(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("读取 SQL 文件失败 (%s): %w", filePath, err)
 	}
 
-	sqlContent := strings.TrimSpace(string(sqlBytes))
-	if sqlContent == "" {
+	sqlContent := string(sqlBytes)
+	if strings.TrimSpace(sqlContent) == "" {
 		logger.Infof("SQL 文件为空 (%s)，无需执行", filePath)
 		return nil
 	}
@@ -129,6 +131,49 @@ func resolveDBConfig(cfg *pkgconfig.Config, dbChoice string) (*pkgconfig.ConnCon
 
 // ExecuteSQL 执行指定的 SQL 语句内容
 func ExecuteSQL(adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bool) error {
+	cfg := adapter.GetConfig()
+	options := sqlScannerOptions{nestedBlockComments: true, dollarQuotes: true}
+	if cfg != nil && cfg.Type == consts.DBTypeMySQL {
+		options.hashLineComments = true
+		options.dashDashRequiresSpace = true
+		options.nestedBlockComments = false
+		options.backslashQuoteEscapes = true
+		options.dollarQuotes = false
+		options.modeDependentEscapes = true
+	}
+	scan, err := scanSQLWithOptions(sqlContent, options)
+	if err != nil {
+		if dryRun || useTx {
+			return fmt.Errorf("SQL 扫描失败: %w", err)
+		}
+		scan = sqlScan{diagnosticError: err}
+	}
+	if dryRun || useTx {
+		if scan.hasModeDependentBackslashQuote {
+			return errors.New("事务模式拒绝依赖数据库反斜杠转义模式的引号；请使用成对引号（例如 ''）或 PostgreSQL E'...' 语法")
+		}
+		if cfg != nil && cfg.Type == consts.DBTypeMySQL && scan.hasMySQLExecutableComment {
+			return errors.New("MySQL 事务模式拒绝可执行注释 (/*! ... */ 或 /*M! ... */)，因为无法安全验证其事务行为")
+		}
+		if err := validateNoTransactionControl(scan); err != nil {
+			return fmt.Errorf("事务模式拒绝显式事务控制且不会改写 SQL: %w", err)
+		}
+	}
+	if dryRun {
+		if cfg == nil {
+			return errors.New("数据库配置不可用")
+		}
+		switch cfg.Type {
+		case consts.DBTypeMySQL:
+			if err := validateMySQLDryRun(scan); err != nil {
+				return err
+			}
+		case consts.DBTypePostgres:
+		default:
+			return fmt.Errorf("不支持数据库类型 %q 的 dry-run", cfg.Type)
+		}
+	}
+
 	connDB := adapter.GetConn()
 	if connDB == nil {
 		return errors.New("数据库连接不可用")
@@ -146,9 +191,12 @@ func ExecuteSQL(adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bo
 			_ = tx.Rollback()
 		}()
 
-		cleanedSQL := utils.CleanTransaction(sqlContent)
-		if _, err := tx.Exec(cleanedSQL); err != nil {
-			return fmt.Errorf("模拟执行 SQL 失败: %w", err)
+		if _, err := tx.Exec(sqlContent); err != nil {
+			_ = tx.Rollback()
+			return executionError("模拟执行 SQL 失败，已回滚", err, sqlContent, scan)
+		}
+		if err := tx.Rollback(); err != nil {
+			return fmt.Errorf("模拟执行 SQL 成功但回滚失败: %w", err)
 		}
 
 		logger.Infof("模拟执行成功，所有操作已回滚，耗时: %v", time.Since(start))
@@ -162,10 +210,9 @@ func ExecuteSQL(adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bo
 			return fmt.Errorf("开启事务失败: %w", err)
 		}
 
-		cleanedSQL := utils.CleanTransaction(sqlContent)
-		if _, err := tx.Exec(cleanedSQL); err != nil {
+		if _, err := tx.Exec(sqlContent); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("事务执行 SQL 失败，已回滚: %w", err)
+			return executionError("事务执行 SQL 失败，已回滚", err, sqlContent, scan)
 		}
 
 		if err := tx.Commit(); err != nil {
@@ -178,67 +225,87 @@ func ExecuteSQL(adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bo
 
 	logger.Info("开始执行 SQL...")
 	if _, err := connDB.Exec(sqlContent); err != nil {
-		// 尝试定位出错的语句片段
-		stmts := splitStatements(sqlContent)
-		for idx, stmt := range stmts {
-			// 用只包含单语句的测试尝试复现并定位具体失败语句
-			if dryTx, dryErr := connDB.Begin(); dryErr == nil {
-				if _, sErr := dryTx.Exec(stmt); sErr != nil {
-					_ = dryTx.Rollback()
-					logger.Errorf("第 %d 条 SQL 语句执行失败:\n>>> %s\n", idx+1, stmt)
-					return fmt.Errorf("执行 SQL 失败 (第 %d 条语句): %w", idx+1, sErr)
-				}
-				_ = dryTx.Rollback()
-			}
-		}
-		return fmt.Errorf("执行 SQL 失败: %w", err)
+		return executionError("执行 SQL 失败", err, sqlContent, scan)
 	}
 
 	logger.Infof("SQL 执行成功，耗时: %v", time.Since(start))
 	return nil
 }
 
-func splitStatements(sqlText string) []string {
-	var result []string
-	var current strings.Builder
-	inQuote := false
-	var quoteChar rune
+func executionError(prefix string, driverErr error, sqlText string, scan sqlScan) error {
+	if position := postgresErrorPosition(driverErr); position > 0 {
+		if offset, ok := characterPositionToByteOffset(sqlText, position); ok {
+			line, column := sqlLineColumn(sqlText, offset)
+			for i, statement := range scan.statements {
+				if offset >= statement.start && offset < statement.end {
+					return fmt.Errorf("%s (第 %d 条语句，脚本第 %d 行第 %d 列): %w", prefix, i+1, line, column, driverErr)
+				}
+			}
+			return fmt.Errorf("%s (驱动位置：脚本第 %d 行第 %d 列): %w", prefix, line, column, driverErr)
+		}
+	}
+	if scan.diagnosticError != nil {
+		return fmt.Errorf("%s (scanner 无法安全推导语句位置: %v): %w", prefix, scan.diagnosticError, driverErr)
+	}
 
-	runes := []rune(sqlText)
-	for i := 0; i < len(runes); i++ {
-		r := runes[i]
-		if inQuote {
-			current.WriteRune(r)
-			if r == quoteChar {
-				// 处理转义单引号 ''
-				if r == '\'' && i+1 < len(runes) && runes[i+1] == '\'' {
-					current.WriteRune('\'')
-					i++
-				} else {
-					inQuote = false
-				}
-			}
+	switch len(scan.statements) {
+	case 0:
+		return fmt.Errorf("%s (未扫描到可执行语句): %w", prefix, driverErr)
+	case 1:
+		statement := scan.statements[0]
+		return fmt.Errorf("%s (第 1 条语句，起始于脚本第 %d 行第 %d 列): %w", prefix, statement.startLine, statement.startColumn, driverErr)
+	default:
+		first := scan.statements[0]
+		last := scan.statements[len(scan.statements)-1]
+		return fmt.Errorf("%s (语句范围 1-%d，起始行 %d-%d；驱动未提供精确位置): %w", prefix, len(scan.statements), first.startLine, last.startLine, driverErr)
+	}
+}
+
+func characterPositionToByteOffset(sqlText string, oneBasedPosition int) (int, bool) {
+	if oneBasedPosition <= 0 {
+		return 0, false
+	}
+	wanted := oneBasedPosition - 1
+	character := 0
+	for offset := range sqlText {
+		if character == wanted {
+			return offset, true
+		}
+		character++
+	}
+	if character == wanted {
+		return len(sqlText), true
+	}
+	return 0, false
+}
+
+func postgresErrorPosition(err error) int {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return 0
+	}
+	position, parseErr := strconv.Atoi(pqErr.Position)
+	if parseErr != nil || position <= 0 {
+		return 0
+	}
+	return position
+}
+
+func sqlLineColumn(sqlText string, offset int) (int, int) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(sqlText) {
+		offset = len(sqlText)
+	}
+	line, column := 1, 1
+	for _, character := range sqlText[:offset] {
+		if character == '\n' {
+			line++
+			column = 1
 		} else {
-			if r == '\'' || r == '"' {
-				inQuote = true
-				quoteChar = r
-				current.WriteRune(r)
-			} else if r == ';' {
-				stmt := strings.TrimSpace(current.String())
-				if stmt != "" {
-					result = append(result, stmt+";")
-				}
-				current.Reset()
-			} else {
-				current.WriteRune(r)
-			}
+			column++
 		}
 	}
-	if current.Len() > 0 {
-		stmt := strings.TrimSpace(current.String())
-		if stmt != "" {
-			result = append(result, stmt)
-		}
-	}
-	return result
+	return line, column
 }
