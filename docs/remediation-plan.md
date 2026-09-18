@@ -11,7 +11,7 @@ Execution order is sequential in the shared checkout. Each session must preserve
 - [x] [#4](https://github.com/jacktea/data-smith/issues/4) — Session 3: exact data comparison and safe chunk filtering (completed 2026-09-18)
 - [x] [#5](https://github.com/jacktea/data-smith/issues/5) — Session 4: deterministic, dependency-safe, schema-qualified SQL (completed 2026-09-18)
 - [x] [#6](https://github.com/jacktea/data-smith/issues/6) — Session 5: fail-fast CLI and atomic output files (completed 2026-09-18)
-- [ ] [#7](https://github.com/jacktea/data-smith/issues/7) — Session 6: streaming diff and database performance
+- [x] [#7](https://github.com/jacktea/data-smith/issues/7) — Session 6: streaming diff and database performance (completed 2026-09-18)
 - [ ] [#8](https://github.com/jacktea/data-smith/issues/8) — Session 7: configuration, SSH, connections, and reset safety
 - [ ] [#9](https://github.com/jacktea/data-smith/issues/9) — Session 8: dual-database E2E, CI, coverage, and documentation
 
@@ -149,6 +149,49 @@ Final verification:
 - Static audit: no business `Run:` handlers; only `internal/datasmith/root.go` calls `os.Exit` — PASS
 - Protected artifacts: `datasmith` size/mode/SHA/status exactly match the corrected values above; `CODE_REVIEW_REPORT.md` size/SHA/status are unchanged; staged diff empty.
 
+## Session 6 acceptance evidence
+
+- The `diff-data` CLI now uses `StreamCompareDataDetailedWithTable` / `StreamCompareDataWithChunkFilterAndTable` and an error-returning callback. Forward SQL is emitted from that callback instead of constructing a whole-table `DataDiff`; legacy `DataDiff`-returning APIs remain available for compatibility. A callback write failure stops before another database batch.
+- Each successful table owns a checked rollback spool under a session-specific `.datasmith-diff-spool-*` directory beside the rollback staged output. Spools are synced, closed, merged in reverse successful-rule order, removed, and covered by final `RemoveAll` error propagation. Default fail-fast still relies on the Issue #6 atomic callback to discard every partial staged output. Best-effort uses a bounded per-table forward spool so a failed table cannot publish partial SQL.
+- INSERT and DELETE generation uses the additive `IDataBatchDialect` capability. MySQL and PostgreSQL emit deterministic multi-row statements; UPDATE still receives only `ModifiedCols`. `--dml-batch-size` defaults to 1000 and has a validated hard upper bound of 10000 rows. `TestStreamingBuffersStayBatchBoundedAsDifferencesGrow` feeds 100000 differences and proves the two live DML buffers never exceed `2 × batch-size` references.
+- MySQL and PostgreSQL chunk boundaries now advance by the last key of a bounded `chunkSize+1` page. Production adapter code contains no `OFFSET`, `ROW_NUMBER`, or `row_number`. First and last ranges remain unbounded, and the additive `StatsAwareChunkRanger` reuses the already checked target count/min/max instead of issuing a duplicate statistics query.
+- Source and target table models are cached independently for one CLI run and passed into comparison. For five repeated rules on one table, `TestTableModelCacheReducesRepeatedCLIExtractionQueries` records the old path's 15 extraction calls versus 2 cached calls. Cache lifetime is one command invocation, so stale metadata is not shared across runs.
+- Per-table concurrency remains intentionally sequential (limit 1). This preserves deterministic rule-order forward output, reverse-rule rollback merge, the existing connection budget, immediate fail-fast cancellation, and complete best-effort failure collection without goroutines or channels.
+- Issue #6 behavior is covered on the new path: `TestStreamingFailFastPreservesAtomicOutputPair` proves a mid-table failure leaves both old finals unchanged; the new best-effort test attempts every rule, discards failed-table partial SQL, reports both failures, and leaves no spool artifacts. All prior atomic fault-injection tests also pass.
+
+## Session 6 benchmark evidence
+
+Reproducible command on Darwin/arm64 Apple M4 Pro:
+
+`GOCACHE=/tmp/data-smith-session6-go-cache go test ./internal/datasmith/diff -run '^$' -bench '^BenchmarkDataDiffPipelines$' -benchmem -benchtime=1x -count=3`
+
+| Scenario | Pipeline | Elapsed observed | Total alloc/op | Peak buffered diff rows | SQL bytes/op |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 10k rows / 100 differences | accumulated before | 0.281–0.382 ms | 80.8–81.3 KB | 100 | 11,980 |
+| 10k rows / 100 differences | streaming after | 4.34–36.44 ms | 95.8–99.2 KB | 200 | 4,854 |
+| 100k rows / 100k differences | accumulated before | 110.48–122.14 ms | 85.57 MB | 100,000 | 12,477,886 |
+| 100k rows / 100k differences | streaming after | 67.38–67.86 ms | 46.13–46.17 MB | 2,000 | 5,285,286 |
+
+The low-difference path pays deliberate spool create/sync/remove latency and a small fixed buffer overhead. The high-difference path reduces total allocation about 46%, SQL bytes about 58%, and buffered diff rows from 100000 to the fixed 2000-reference bound. Isolated benchmark binaries measured maximum RSS at 55,017,472 bytes before versus 55,164,928 after for low difference (runtime noise dominates), and 91,947,008 before versus 86,327,296 after for high difference; Darwin peak-memory-footprint was 47,170,136 versus 47,104,600 and 83,968,624 versus 78,381,704 respectively.
+
+## Session 6 verification
+
+Baseline before changes:
+
+- `go test ./... -count=1` — PASS
+- `go test -race ./... -count=1` — PASS
+- `go vet ./...` — PASS
+
+Final verification:
+
+- `GOCACHE=/tmp/data-smith-session6-go-cache go test ./internal/datasmith/diff ./pkg/diff ./pkg/db/mysql ./pkg/db/postgres ./pkg/sql/mysql ./pkg/sql/postgres -count=1` — PASS
+- `GOCACHE=/tmp/data-smith-session6-go-cache go test ./... -count=1` — PASS
+- `GOCACHE=/tmp/data-smith-session6-go-cache go test -race ./... -count=1` — PASS
+- `GOCACHE=/tmp/data-smith-session6-go-cache go vet ./...` — PASS
+- `git diff --check` — PASS
+- Static audit: no `OFFSET`/`ROW_NUMBER` chunk discovery, no business `Run:` handlers, and only `internal/datasmith/root.go` calls `os.Exit` — PASS
+- Protected artifacts retain their exact size/mode/SHA/status; staged diff remains empty.
+
 ## Open risks and later work
 
 - Session 1 uses deterministic SQL-mock regression tests; live PostgreSQL/MySQL migration E2E remains for #9.
@@ -165,8 +208,11 @@ Final verification:
 - PostgreSQL expression-index definitions returned as complete `pg_get_indexdef` SQL remain preserved verbatim for compatibility rather than parsed and rewritten.
 - `GenerateSchemaSQL` remains source-compatible and returns no statements when safe generation rejects a cycle; CLI and error-aware callers use additive `GenerateSchemaSQLSafe` to receive the error.
 - Two independent final paths cannot be replaced by one filesystem-wide atomic primitive. Session 5 compensates every reported rename/sync failure and restores both old files; a process or power loss between the two final renames remains an OS-level crash window. Same-directory temporary files and directory sync minimize that window.
+- Session 6 deliberately keeps table concurrency at one. Parallel comparison may improve latency but would require explicit connection budgets, deterministic output slots, fail-fast cancellation, and bounded best-effort collection; those costs are not justified by Issue #7's acceptance criteria.
+- Low-difference runs are slower in the synthetic benchmark because durable rollback spooling adds file creation, sync, and removal. This is the safety/memory tradeoff; high-difference runs are faster and substantially smaller. Live database performance and concurrent-mutation behavior remain for #9.
+- Keyset boundary discovery assumes a stable ordered key view while it runs. As before, chunk hashing remains opt-in and concurrent changes outside a shared snapshot may invalidate statistics or boundaries.
 - The modified executable `datasmith` (size `7301362`, mode `-rwxr-xr-x`, SHA-256 `efadb73998d2e845b88a5d3465b12a3b21e3c4d82d59c74a1f1202cc7dd56253`, status `M`) and untracked `CODE_REVIEW_REPORT.md` (size `21194`, SHA-256 `9c529456726a93167b326e1a0c07f740ad013dcc42269f0a2b893539d2d3424b`, status `??`) are unrelated user changes and must remain untouched in later sessions. Do not rebuild, truncate, restore, stage, or commit either file; use Go test/vet commands that do not emit the root binary.
 
 ## Next action
 
-Run Session 6 for issue #7 using the complete prompt in `docs/remediation-handoff.md`. Preserve migration behavior from #2, `exec-sql` safety from #3, exact comparison/safe hash behavior from #4, deterministic dependency-safe SQL behavior from #5, and Session 5 fail-fast/atomic-pair semantics. Remaining order is #7 → #8 → #9.
+Run Session 7 for issue #8 using the complete prompt in `docs/remediation-handoff.md`. Preserve all completed #2–#7 behavior, especially Session 6 streaming/spooling/batch bounds/keyset/cache behavior and Session 5 fail-fast/atomic-pair semantics. Remaining order is #8 → #9.

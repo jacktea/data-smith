@@ -36,31 +36,59 @@ func sortedIndexes(indexes map[string]*conn.Index) []*conn.Index {
 }
 
 func (d *mysqlDialect) GenerateInsertSql(tbl *conn.Table, row conn.Record) string {
-	var colNames, values []string
-	for _, col := range tbl.GetColumnsByPosition() {
-		colNames = append(colNames, ident.Quote(ident.Backtick, col.Name))
-		val := row[col.Name]
-		values = append(values, d.escapedValue(col.DataType, val))
+	return d.GenerateInsertBatchSql(tbl, []conn.Record{row})
+}
+
+func (d *mysqlDialect) GenerateInsertBatchSql(tbl *conn.Table, rows []conn.Record) string {
+	if len(rows) == 0 {
+		return ""
 	}
-	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", mysqlTableName(tbl), strings.Join(colNames, ", "), strings.Join(values, ", "))
+	var colNames []string
+	cols := tbl.GetColumnsByPosition()
+	for _, col := range cols {
+		colNames = append(colNames, ident.Quote(ident.Backtick, col.Name))
+	}
+	valueRows := make([]string, 0, len(rows))
+	for _, row := range rows {
+		values := make([]string, 0, len(colNames))
+		for _, col := range cols {
+			values = append(values, d.escapedValue(col.DataType, row[col.Name]))
+		}
+		valueRows = append(valueRows, "("+strings.Join(values, ", ")+")")
+	}
+	return fmt.Sprintf("INSERT INTO %s (%s) VALUES %s;", mysqlTableName(tbl), strings.Join(colNames, ", "), strings.Join(valueRows, ", "))
 }
 
 func (d *mysqlDialect) GenerateDeleteSql(tbl *conn.Table, row conn.Record) string {
-	var where []string
-	for _, k := range tbl.PrimaryKey.Columns {
-		col := tbl.Columns[k]
-		val := row[k]
-		var colType string
-		if col != nil {
-			colType = col.DataType
-		}
-		if val == nil {
-			where = append(where, fmt.Sprintf("%s IS NULL", ident.Quote(ident.Backtick, k)))
-		} else {
-			where = append(where, fmt.Sprintf("%s = %s", ident.Quote(ident.Backtick, k), d.escapedValue(colType, val)))
-		}
+	return d.GenerateDeleteBatchSql(tbl, []conn.Record{row})
+}
+
+func (d *mysqlDialect) GenerateDeleteBatchSql(tbl *conn.Table, rows []conn.Record) string {
+	if len(rows) == 0 {
+		return ""
 	}
-	return fmt.Sprintf("DELETE FROM %s WHERE %s;", mysqlTableName(tbl), strings.Join(where, " AND "))
+	predicates := make([]string, 0, len(rows))
+	for _, row := range rows {
+		var where []string
+		for _, k := range tbl.PrimaryKey.Columns {
+			col := tbl.Columns[k]
+			val := row[k]
+			var colType string
+			if col != nil {
+				colType = col.DataType
+			}
+			if val == nil {
+				where = append(where, fmt.Sprintf("%s IS NULL", ident.Quote(ident.Backtick, k)))
+			} else {
+				where = append(where, fmt.Sprintf("%s = %s", ident.Quote(ident.Backtick, k), d.escapedValue(colType, val)))
+			}
+		}
+		predicates = append(predicates, "("+strings.Join(where, " AND ")+")")
+	}
+	if len(predicates) == 1 {
+		return fmt.Sprintf("DELETE FROM %s WHERE %s;", mysqlTableName(tbl), strings.Trim(predicates[0], "()"))
+	}
+	return fmt.Sprintf("DELETE FROM %s WHERE %s;", mysqlTableName(tbl), strings.Join(predicates, " OR "))
 }
 
 func (d *mysqlDialect) GenerateUpdateSql(tbl *conn.Table, row conn.Record, updateCols []string) string {

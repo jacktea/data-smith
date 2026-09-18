@@ -52,3 +52,22 @@ func TestMySQLDialect_DataSqlGeneration(t *testing.T) {
 		t.Errorf("GenerateDeleteSql mismatch:\ngot:  %s\nwant: %s", delSql, expectedDel)
 	}
 }
+
+func TestMySQLDialect_BoundedBatchDataSQL(t *testing.T) {
+	dialect := NewMySQLDialect()
+	table := &conn.Table{
+		Name: "items",
+		Columns: map[string]*conn.Column{
+			"id":   {Name: "id", DataType: "bigint", Position: 1},
+			"name": {Name: "name", DataType: "varchar", Position: 2},
+		},
+		PrimaryKey: &conn.PrimaryKey{Columns: []string{"id"}},
+	}
+	rows := []conn.Record{{"id": 1, "name": "one"}, {"id": 2, "name": "two"}}
+	if got, want := dialect.GenerateInsertBatchSql(table, rows), "INSERT INTO `items` (`id`, `name`) VALUES (1, 'one'), (2, 'two');"; got != want {
+		t.Fatalf("insert batch\ngot:  %s\nwant: %s", got, want)
+	}
+	if got, want := dialect.GenerateDeleteBatchSql(table, rows), "DELETE FROM `items` WHERE (`id` = 1) OR (`id` = 2);"; got != want {
+		t.Fatalf("delete batch\ngot:  %s\nwant: %s", got, want)
+	}
+}

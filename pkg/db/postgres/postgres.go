@@ -530,6 +530,16 @@ func (p *PostgresAdapter) GetChunkRanges(table string, pk string, chunkSize int)
 	if err != nil {
 		return nil, err
 	}
+	return p.GetChunkRangesWithStats(table, pk, chunkSize, stats)
+}
+
+func (p *PostgresAdapter) GetChunkRangesWithStats(table string, pk string, chunkSize int, stats chunk.ChunkStats) ([]chunk.ChunkRange, error) {
+	if chunkSize <= 0 {
+		return nil, fmt.Errorf("chunk size must be greater than zero")
+	}
+	if strings.TrimSpace(table) == "" || strings.TrimSpace(pk) == "" {
+		return nil, fmt.Errorf("table and primary key are required for chunk ranges")
+	}
 	if stats.Count == 0 {
 		return nil, nil
 	}
@@ -545,47 +555,55 @@ func (p *PostgresAdapter) GetChunkRanges(table string, pk string, chunkSize int)
 	}
 
 	quotedPK := ident.Quote(ident.DoubleQuote, pk)
-	query := fmt.Sprintf(`
-		SELECT pk FROM (
-			SELECT %s as pk, ROW_NUMBER() OVER (ORDER BY %s ASC) as rn
-			FROM %s
-		) t WHERE (rn - 1) %% $1 = 0 ORDER BY pk ASC
-	`, quotedPK, quotedPK, p.quotedTable(table))
-
-	rows, err := p.Conn.Query(query, chunkSize)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var splitPoints []any
-	for rows.Next() {
-		var point any
-		if err := rows.Scan(&point); err != nil {
+	var ranges []chunk.ChunkRange
+	var lower any
+	for index := 0; ; index++ {
+		query := fmt.Sprintf("SELECT %s FROM %s", quotedPK, p.quotedTable(table))
+		args := make([]any, 0, 2)
+		if lower != nil {
+			query += fmt.Sprintf(" WHERE %s >= $1", quotedPK)
+			args = append(args, lower)
+			query += fmt.Sprintf(" ORDER BY %s ASC LIMIT $2", quotedPK)
+		} else {
+			query += fmt.Sprintf(" ORDER BY %s ASC LIMIT $1", quotedPK)
+		}
+		args = append(args, chunkSize+1)
+		rows, err := p.Conn.Query(query, args...)
+		if err != nil {
 			return nil, err
 		}
-		splitPoints = append(splitPoints, point)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	var ranges []chunk.ChunkRange
-	for i := 0; i < len(splitPoints); i++ {
-		isLast := (i == len(splitPoints)-1)
-		var minPK, maxPK any
-		if i > 0 {
-			minPK = splitPoints[i]
+		var count int
+		var boundary any
+		for rows.Next() {
+			var point any
+			if err := rows.Scan(&point); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			count++
+			boundary = point
 		}
+		rowErr := rows.Err()
+		closeErr := rows.Close()
+		if rowErr != nil {
+			return nil, rowErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		if count == 0 {
+			return nil, fmt.Errorf("chunk boundary query returned no rows for non-empty table %s", table)
+		}
+		isLast := count <= chunkSize
+		var upper any
 		if !isLast {
-			maxPK = splitPoints[i+1]
+			upper = boundary
 		}
-		ranges = append(ranges, chunk.ChunkRange{
-			ChunkIndex: i,
-			MinPK:      minPK,
-			MaxPK:      maxPK,
-			IsLast:     isLast,
-		})
+		ranges = append(ranges, chunk.ChunkRange{ChunkIndex: index, MinPK: lower, MaxPK: upper, IsLast: isLast})
+		if isLast {
+			break
+		}
+		lower = boundary
 	}
 	return ranges, nil
 }

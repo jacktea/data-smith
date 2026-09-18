@@ -105,6 +105,26 @@ func TestPostgreDialect_DataSqlGeneration(t *testing.T) {
 	}
 }
 
+func TestPostgreDialect_BoundedBatchDataSQL(t *testing.T) {
+	dialect := NewPostgreDialect()
+	table := &conn.Table{
+		Name:   "items",
+		Schema: "custom",
+		Columns: map[string]*conn.Column{
+			"id":   {Name: "id", DataType: "bigint", Position: 1},
+			"name": {Name: "name", DataType: "text", Position: 2},
+		},
+		PrimaryKey: &conn.PrimaryKey{Columns: []string{"id"}},
+	}
+	rows := []conn.Record{{"id": 1, "name": "one"}, {"id": 2, "name": "two"}}
+	if got, want := dialect.GenerateInsertBatchSql(table, rows), `INSERT INTO "custom"."items" ("id", "name") VALUES (1, 'one'), (2, 'two');`; got != want {
+		t.Fatalf("insert batch\ngot:  %s\nwant: %s", got, want)
+	}
+	if got, want := dialect.GenerateDeleteBatchSql(table, rows), `DELETE FROM "custom"."items" WHERE ("id" = 1) OR ("id" = 2);`; got != want {
+		t.Fatalf("delete batch\ngot:  %s\nwant: %s", got, want)
+	}
+}
+
 func TestPostgreDialect_ForeignKeyAndCommentSql(t *testing.T) {
 	dialect := NewPostgreDialect()
 	table := &conn.Table{

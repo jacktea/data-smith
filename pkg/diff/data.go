@@ -11,6 +11,11 @@ import (
 
 type DetailedDiffHandler func(diffType DiffType, srcRow, tgtRow conn.Record, diffCols []string)
 
+// DetailedDiffErrorHandler is the error-aware streaming callback used by
+// callers that write each difference as it is discovered. Returning an error
+// stops both database iterators immediately.
+type DetailedDiffErrorHandler func(diffType DiffType, srcRow, tgtRow conn.Record, diffCols []string) error
+
 func StreamCompareData(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize int, handle func(diffType DiffType, srcRow, tgtRow conn.Record)) error {
 	if handle == nil {
 		return fmt.Errorf("diff handler is required")
@@ -24,7 +29,24 @@ func StreamCompareDataDetailed(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, b
 	if err := validateCompareInputs(srcDB, tgtDB, rule, batchSize, handle); err != nil {
 		return err
 	}
-	cols, pks, colTypes, err := getTableColumnsAndTypes(tgtDB, rule.GetTable())
+	tbl, err := getTableModel(tgtDB, rule.GetTable())
+	if err != nil {
+		return err
+	}
+	return StreamCompareDataDetailedWithTable(srcDB, tgtDB, rule, tbl, batchSize, func(diffType DiffType, srcRow, tgtRow conn.Record, diffCols []string) error {
+		handle(diffType, srcRow, tgtRow, diffCols)
+		return nil
+	})
+}
+
+// StreamCompareDataDetailedWithTable streams differences while reusing a
+// caller-owned table model. It avoids repeated metadata extraction within one
+// run and propagates callback failures without reading another batch.
+func StreamCompareDataDetailedWithTable(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, tbl *conn.Table, batchSize int, handle DetailedDiffErrorHandler) error {
+	if err := validateCompareInputsWithErrorHandler(srcDB, tgtDB, rule, batchSize, handle); err != nil {
+		return err
+	}
+	cols, pks, colTypes, err := tableColumnsAndTypes(tbl, rule.GetTable())
 	if err != nil {
 		return err
 	}
@@ -81,11 +103,15 @@ func StreamCompareDataDetailed(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, b
 		}
 		if cmp < 0 {
 			// src 存在而 tgt 不存在：目标版本删除了此记录
-			handle(DiffTypeDrop, srcRow, nil, nil)
+			if err := handle(DiffTypeDrop, srcRow, nil, nil); err != nil {
+				return err
+			}
 			srcIdx++
 		} else if cmp > 0 {
 			// tgt 存在而 src 不存在：目标版本新增了此记录
-			handle(DiffTypeAdd, nil, tgtRow, nil)
+			if err := handle(DiffTypeAdd, nil, tgtRow, nil); err != nil {
+				return err
+			}
 			tgtIdx++
 		} else {
 			var isDiff bool
@@ -98,7 +124,9 @@ func StreamCompareDataDetailed(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, b
 				isDiff = !rule.IsEqual(srcRow, tgtRow)
 			}
 			if isDiff {
-				handle(DiffTypeModify, srcRow, tgtRow, diffCols)
+				if err := handle(DiffTypeModify, srcRow, tgtRow, diffCols); err != nil {
+					return err
+				}
 			}
 			srcIdx++
 			tgtIdx++
@@ -137,6 +165,25 @@ func StreamCompareDataWithChunkFilter(srcDB, tgtDB conn.DBAdapter, rule ICompare
 	if chunkSize <= 0 {
 		return fmt.Errorf("chunk size must be greater than zero")
 	}
+	tbl, err := getTableModel(tgtDB, rule.GetTable())
+	if err != nil {
+		return err
+	}
+	return StreamCompareDataWithChunkFilterAndTable(srcDB, tgtDB, rule, tbl, batchSize, chunkSize, func(diffType DiffType, srcRow, tgtRow conn.Record, diffCols []string) error {
+		handle(diffType, srcRow, tgtRow, diffCols)
+		return nil
+	})
+}
+
+// StreamCompareDataWithChunkFilterAndTable is the metadata-reusing,
+// error-aware variant of StreamCompareDataWithChunkFilter.
+func StreamCompareDataWithChunkFilterAndTable(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, tbl *conn.Table, batchSize, chunkSize int, handle DetailedDiffErrorHandler) error {
+	if err := validateCompareInputsWithErrorHandler(srcDB, tgtDB, rule, batchSize, handle); err != nil {
+		return err
+	}
+	if chunkSize <= 0 {
+		return fmt.Errorf("chunk size must be greater than zero")
+	}
 	srcCfg := srcDB.GetConfig()
 	tgtCfg := tgtDB.GetConfig()
 
@@ -144,7 +191,7 @@ func StreamCompareDataWithChunkFilter(srcDB, tgtDB conn.DBAdapter, rule ICompare
 		srcHasher, srcOk := srcDB.(chunk.VerifiedChunkHasher)
 		tgtHasher, tgtOk := tgtDB.(chunk.VerifiedChunkHasher)
 		if srcOk && tgtOk {
-			cols, pks, colTypes, err := getTableColumnsAndTypes(tgtDB, rule.GetTable())
+			cols, pks, colTypes, err := tableColumnsAndTypes(tbl, rule.GetTable())
 			if err != nil {
 				return err
 			}
@@ -166,7 +213,12 @@ func StreamCompareDataWithChunkFilter(srcDB, tgtDB conn.DBAdapter, rule ICompare
 					return nil
 				}
 				if statsMatch {
-					ranges, err := tgtHasher.GetChunkRanges(rule.GetTable(), pk, chunkSize)
+					var ranges []chunk.ChunkRange
+					if ranger, ok := tgtHasher.(chunk.StatsAwareChunkRanger); ok {
+						ranges, err = ranger.GetChunkRangesWithStats(rule.GetTable(), pk, chunkSize, tgtStats)
+					} else {
+						ranges, err = tgtHasher.GetChunkRanges(rule.GetTable(), pk, chunkSize)
+					}
 					if err != nil {
 						return fmt.Errorf("get target chunk ranges: %w", err)
 					}
@@ -197,7 +249,7 @@ func StreamCompareDataWithChunkFilter(srcDB, tgtDB conn.DBAdapter, rule ICompare
 		}
 	}
 
-	return StreamCompareDataDetailed(srcDB, tgtDB, rule, batchSize, handle)
+	return StreamCompareDataDetailedWithTable(srcDB, tgtDB, rule, tbl, batchSize, handle)
 }
 
 func StreamCompareDataToDiffWithChunkFilter(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize, chunkSize int) (*DataDiff, error) {
@@ -306,10 +358,25 @@ func getTableColumnsAndTypes(db conn.DBAdapter, table string) ([]string, []strin
 	if table == "" {
 		return nil, nil, nil, fmt.Errorf("table name is required")
 	}
-	tbl, err := db.ExtractTable(table)
+	tbl, err := getTableModel(db, table)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	return tableColumnsAndTypes(tbl, table)
+}
+
+func getTableModel(db conn.DBAdapter, table string) (*conn.Table, error) {
+	tbl, err := db.ExtractTable(table)
+	if err != nil {
+		return nil, err
+	}
+	if tbl == nil {
+		return nil, fmt.Errorf("table %s not found", table)
+	}
+	return tbl, nil
+}
+
+func tableColumnsAndTypes(tbl *conn.Table, table string) ([]string, []string, map[string]string, error) {
 	if tbl == nil {
 		return nil, nil, nil, fmt.Errorf("table %s not found", table)
 	}
@@ -356,6 +423,25 @@ func getTableColumnsAndTypes(db conn.DBAdapter, table string) ([]string, []strin
 }
 
 func validateCompareInputs(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize int, handle DetailedDiffHandler) error {
+	if batchSize <= 0 {
+		return fmt.Errorf("batch size must be greater than zero")
+	}
+	if srcDB == nil || tgtDB == nil {
+		return fmt.Errorf("source and target database adapters are required")
+	}
+	if rule == nil {
+		return fmt.Errorf("comparison rule is required")
+	}
+	if rule.GetTable() == "" {
+		return fmt.Errorf("comparison table is required")
+	}
+	if handle == nil {
+		return fmt.Errorf("diff handler is required")
+	}
+	return nil
+}
+
+func validateCompareInputsWithErrorHandler(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize int, handle DetailedDiffErrorHandler) error {
 	if batchSize <= 0 {
 		return fmt.Errorf("batch size must be greater than zero")
 	}

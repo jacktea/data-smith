@@ -52,8 +52,10 @@ func TestChunkRangesStartUnboundedAndHashDistinguishesNull(t *testing.T) {
 	adapter, mock := newMockPostgresAdapter(t)
 	statsQuery := regexp.QuoteMeta(`SELECT COUNT(*), MIN("id"), MAX("id") FROM "public"."items"`)
 	mock.ExpectQuery(statsQuery).WillReturnRows(sqlmock.NewRows([]string{"count", "min", "max"}).AddRow(int64(3), int64(1), int64(3)))
-	mock.ExpectQuery(`(?s)SELECT pk FROM .*ROW_NUMBER\(\) OVER.*`).WithArgs(2).
-		WillReturnRows(sqlmock.NewRows([]string{"pk"}).AddRow(int64(1)).AddRow(int64(3)))
+	mock.ExpectQuery(`SELECT "id" FROM "public"\."items" ORDER BY "id" ASC LIMIT \$1`).WithArgs(3).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(1)).AddRow(int64(2)).AddRow(int64(3)))
+	mock.ExpectQuery(`SELECT "id" FROM "public"\."items" WHERE "id" >= \$1 ORDER BY "id" ASC LIMIT \$2`).WithArgs(int64(3), 3).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(3)))
 
 	ranges, err := adapter.GetChunkRanges("items", "id", 2)
 	if err != nil {

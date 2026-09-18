@@ -33,3 +33,11 @@ type VerifiedChunkHasher interface {
 	ChunkHasher
 	GetChunkStats(table string, pk string) (ChunkStats, error)
 }
+
+// StatsAwareChunkRanger lets callers reuse already-validated table statistics
+// instead of issuing a duplicate COUNT/MIN/MAX query while planning ranges.
+// It is additive so third-party VerifiedChunkHasher implementations remain
+// source-compatible.
+type StatsAwareChunkRanger interface {
+	GetChunkRangesWithStats(table string, pk string, chunkSize int, stats ChunkStats) ([]ChunkRange, error)
+}

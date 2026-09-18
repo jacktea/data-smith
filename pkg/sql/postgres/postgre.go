@@ -43,32 +43,59 @@ func sortedIndexes(indexes map[string]*conn.Index) []*conn.Index {
 }
 
 func (d *postgreDialect) GenerateInsertSql(tbl *conn.Table, row conn.Record) string {
-	var colNames, values []string
+	return d.GenerateInsertBatchSql(tbl, []conn.Record{row})
+}
+
+func (d *postgreDialect) GenerateInsertBatchSql(tbl *conn.Table, rows []conn.Record) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	var colNames []string
 	cols := tbl.GetColumnsByPosition()
 	for _, col := range cols {
 		colNames = append(colNames, ident.Quote(ident.DoubleQuote, col.Name))
-		val := row[col.Name]
-		values = append(values, d.escapedValue(col.DataType, val))
 	}
-	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", postgresTableName(tbl), strings.Join(colNames, ", "), strings.Join(values, ", "))
+	valueRows := make([]string, 0, len(rows))
+	for _, row := range rows {
+		values := make([]string, 0, len(cols))
+		for _, col := range cols {
+			values = append(values, d.escapedValue(col.DataType, row[col.Name]))
+		}
+		valueRows = append(valueRows, "("+strings.Join(values, ", ")+")")
+	}
+	return fmt.Sprintf("INSERT INTO %s (%s) VALUES %s;", postgresTableName(tbl), strings.Join(colNames, ", "), strings.Join(valueRows, ", "))
 }
 
 func (d *postgreDialect) GenerateDeleteSql(tbl *conn.Table, row conn.Record) string {
-	var where []string
-	for _, k := range tbl.PrimaryKey.Columns {
-		col := tbl.Columns[k]
-		val := row[k]
-		var colType string
-		if col != nil {
-			colType = col.DataType
-		}
-		if val == nil {
-			where = append(where, fmt.Sprintf("%s IS NULL", ident.Quote(ident.DoubleQuote, k)))
-		} else {
-			where = append(where, fmt.Sprintf("%s = %s", ident.Quote(ident.DoubleQuote, k), d.escapedValue(colType, val)))
-		}
+	return d.GenerateDeleteBatchSql(tbl, []conn.Record{row})
+}
+
+func (d *postgreDialect) GenerateDeleteBatchSql(tbl *conn.Table, rows []conn.Record) string {
+	if len(rows) == 0 {
+		return ""
 	}
-	return fmt.Sprintf("DELETE FROM %s WHERE %s;", postgresTableName(tbl), strings.Join(where, " AND "))
+	predicates := make([]string, 0, len(rows))
+	for _, row := range rows {
+		var where []string
+		for _, k := range tbl.PrimaryKey.Columns {
+			col := tbl.Columns[k]
+			val := row[k]
+			var colType string
+			if col != nil {
+				colType = col.DataType
+			}
+			if val == nil {
+				where = append(where, fmt.Sprintf("%s IS NULL", ident.Quote(ident.DoubleQuote, k)))
+			} else {
+				where = append(where, fmt.Sprintf("%s = %s", ident.Quote(ident.DoubleQuote, k), d.escapedValue(colType, val)))
+			}
+		}
+		predicates = append(predicates, "("+strings.Join(where, " AND ")+")")
+	}
+	if len(predicates) == 1 {
+		return fmt.Sprintf("DELETE FROM %s WHERE %s;", postgresTableName(tbl), strings.Trim(predicates[0], "()"))
+	}
+	return fmt.Sprintf("DELETE FROM %s WHERE %s;", postgresTableName(tbl), strings.Join(predicates, " OR "))
 }
 
 func (d *postgreDialect) GenerateUpdateSql(tbl *conn.Table, row conn.Record, updateCols []string) string {

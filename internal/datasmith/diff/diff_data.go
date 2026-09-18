@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -44,8 +45,12 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 	batchSize, _ := cmd.Flags().GetInt("batch-size")
 	enableChunkHash, _ := cmd.Flags().GetBool("chunk-hash")
 	chunkSize, _ := cmd.Flags().GetInt("chunk-size")
+	dmlBatchSize, _ := cmd.Flags().GetInt("dml-batch-size")
 	bestEffort, _ := cmd.Flags().GetBool("best-effort")
 	if err := validateDiffDataInputs(configPath, rulesPath, batchSize, chunkSize, enableChunkHash); err != nil {
+		return err
+	}
+	if err := validateDMLBatchSize(dmlBatchSize); err != nil {
 		return err
 	}
 
@@ -90,21 +95,20 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 	log.Printf("Forward Diff file: %s\n", diffFile)
 	log.Printf("Rollback Diff file: %s\n", rollbackFile)
 
-	compareTable := func(rule pkgconfig.Rule) (*tableDiffResult, error) {
-		tgtTable, err := tgtDB.ExtractTable(rule.Table)
+	sourceModels := newTableModelCache(srcDB)
+	targetModels := newTableModelCache(tgtDB)
+	prepareTable := func(rule pkgconfig.Rule) (*tableModels, error) {
+		tgtTable, err := targetModels.get(rule.Table)
 		if err != nil {
 			return nil, fmt.Errorf("extract target table: %w", err)
 		}
 		if tgtTable == nil {
 			return nil, fmt.Errorf("extract target table: table not found")
 		}
-		srcTable, err := srcDB.ExtractTable(rule.Table)
+		srcTable, err := sourceModels.get(rule.Table)
 		if err != nil {
 			return nil, fmt.Errorf("extract source table: %w", err)
 		}
-
-		start := time.Now()
-		var diffResult *diff.DataDiff
 		compareRule := diff.CreateCompareRule(tgtTable, rule.ComparisonKey, rule.IgnoreColumns)
 		var effectiveCols []string
 		if allRule, ok := compareRule.(*diff.AllFieldsEqualRule); ok {
@@ -112,44 +116,51 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 		} else {
 			effectiveCols = rule.ComparisonKey
 		}
-
+		return &tableModels{target: tgtTable, source: srcTable, effectiveCols: effectiveCols}, nil
+	}
+	compareTable := func(rule pkgconfig.Rule, models *tableModels, handle diff.DetailedDiffErrorHandler) error {
+		start := time.Now()
+		compareRule := diff.CreateCompareRule(models.target, rule.ComparisonKey, rule.IgnoreColumns)
+		var err error
 		if enableChunkHash {
-			diffResult, err = diff.StreamCompareDataToDiffWithChunkFilter(
+			err = diff.StreamCompareDataWithChunkFilterAndTable(
 				srcDB,
 				tgtDB,
 				compareRule,
+				models.target,
 				batchSize,
 				chunkSize,
+				handle,
 			)
 		} else {
-			diffResult, err = diff.StreamCompareDataToDiff(
+			err = diff.StreamCompareDataDetailedWithTable(
 				srcDB,
 				tgtDB,
 				compareRule,
+				models.target,
 				batchSize,
+				handle,
 			)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("compare data: %w", err)
+			return fmt.Errorf("compare data: %w", err)
 		}
 		log.Printf("Table %s compared in %v\n", rule.Table, time.Since(start))
-		return &tableDiffResult{
-			target:        tgtTable,
-			source:        srcTable,
-			diff:          diffResult,
-			effectiveCols: effectiveCols,
-		}, nil
+		return nil
 	}
 
 	var failures []tableDiffFailure
 	err = writeAtomicPair(diffFile, rollbackFile, func(forward, rollback io.Writer) error {
 		var generateErr error
-		failures, generateErr = generateDataDiffOutputs(
+		failures, generateErr = generateStreamingDataDiffOutputs(
 			forward,
 			rollback,
+			filepath.Dir(rollbackFile),
 			rules.Rules,
 			dbDialect,
+			dmlBatchSize,
 			bestEffort,
+			prepareTable,
 			compareTable,
 		)
 		return generateErr
@@ -179,6 +190,12 @@ func generateDataDiffOutputs(
 	bestEffort bool,
 	compareTable tableDiffFunc,
 ) ([]tableDiffFailure, error) {
+	if _, err := fmt.Fprintln(forward, executeOnSourceHeader); err != nil {
+		return nil, fmt.Errorf("write forward execution target: %w", err)
+	}
+	if _, err := fmt.Fprintln(rollback, executeOnSourceHeader); err != nil {
+		return nil, fmt.Errorf("write rollback execution target: %w", err)
+	}
 	var failures []tableDiffFailure
 	var rollbackList []tableRollbackSQL
 
@@ -340,6 +357,7 @@ func init() {
 	diffDataCmd.Flags().Int("batch-size", 1000, "Batch size for data diff and SQL output")
 	diffDataCmd.Flags().Bool("chunk-hash", false, "Enable probabilistic chunk fingerprints after exact count/min/max checks (opt-in)")
 	diffDataCmd.Flags().Int("chunk-size", 10000, "Chunk size for hash pre-filtering")
+	diffDataCmd.Flags().Int("dml-batch-size", 1000, "Maximum rows per generated multi-row INSERT or DELETE (hard limit 10000)")
 	diffDataCmd.Flags().Bool("best-effort", false, "Continue after table errors and emit an explicitly incomplete report")
 	diffDataCmd.MarkFlagRequired("config")
 	diffDataCmd.MarkFlagRequired("rules")

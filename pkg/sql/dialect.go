@@ -128,6 +128,14 @@ type IDialect interface {
 	GenerateAlterTableCommentSql(t *conn.Table, comment string) string
 }
 
+// IDataBatchDialect is an additive capability for bounded multi-row DML.
+// Keeping it separate preserves source compatibility for external IDialect
+// implementations; callers can fall back to the single-row methods.
+type IDataBatchDialect interface {
+	GenerateInsertBatchSql(tbl *conn.Table, rows []conn.Record) string
+	GenerateDeleteBatchSql(tbl *conn.Table, rows []conn.Record) string
+}
+
 func NewDialect(dbType consts.DBType) IDialect {
 	switch dbType {
 	case consts.DBTypePostgres:

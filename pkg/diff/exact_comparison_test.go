@@ -77,13 +77,16 @@ func TestStreamCompareDataReportsZeroPrimaryKey(t *testing.T) {
 
 type verifiedHashMockDB struct {
 	*mockDB
-	cfg        config.ConnConfig
-	stats      chunk.ChunkStats
-	statsErr   error
-	ranges     []chunk.ChunkRange
-	hash       string
-	batchCalls int
-	hashRanges []chunk.ChunkRange
+	cfg             config.ConnConfig
+	stats           chunk.ChunkStats
+	statsErr        error
+	ranges          []chunk.ChunkRange
+	hash            string
+	batchCalls      int
+	hashRanges      []chunk.ChunkRange
+	statsCalls      int
+	rangeCalls      int
+	statsRangeCalls int
 }
 
 func (m *verifiedHashMockDB) GetConfig() *config.ConnConfig { return &m.cfg }
@@ -94,10 +97,20 @@ func (m *verifiedHashMockDB) GetTableDataBatch(table string, cols, pk []string, 
 }
 
 func (m *verifiedHashMockDB) GetChunkStats(table, pk string) (chunk.ChunkStats, error) {
+	m.statsCalls++
 	return m.stats, m.statsErr
 }
 
 func (m *verifiedHashMockDB) GetChunkRanges(table, pk string, chunkSize int) ([]chunk.ChunkRange, error) {
+	m.rangeCalls++
+	return m.ranges, nil
+}
+
+func (m *verifiedHashMockDB) GetChunkRangesWithStats(table, pk string, chunkSize int, stats chunk.ChunkStats) ([]chunk.ChunkRange, error) {
+	m.statsRangeCalls++
+	if !reflect.DeepEqual(stats, m.stats) {
+		return nil, errors.New("caller did not reuse verified stats")
+	}
 	return m.ranges, nil
 }
 
@@ -135,6 +148,9 @@ func TestChunkHashSkipRequiresStatsAndUsesUnboundedFirstRange(t *testing.T) {
 	}
 	if src.batchCalls != 0 || tgt.batchCalls != 0 {
 		t.Fatalf("row scan occurred: source=%d target=%d", src.batchCalls, tgt.batchCalls)
+	}
+	if src.statsCalls != 1 || tgt.statsCalls != 1 || tgt.statsRangeCalls != 1 || tgt.rangeCalls != 0 {
+		t.Fatalf("unexpected stats/range query counts: src stats=%d target stats=%d stats-aware ranges=%d legacy ranges=%d", src.statsCalls, tgt.statsCalls, tgt.statsRangeCalls, tgt.rangeCalls)
 	}
 	if len(src.hashRanges) == 0 || src.hashRanges[0].MinPK != nil || src.hashRanges[0].MaxPK != int64(1) {
 		t.Fatalf("first hash range was not unbounded below: %#v", src.hashRanges)
@@ -196,5 +212,26 @@ func TestInvalidBatchAndChunkSizesFailBeforeDatabaseWork(t *testing.T) {
 	}
 	if db.batchCalls != 0 || len(db.hashRanges) != 0 {
 		t.Fatal("invalid chunk size reached database work")
+	}
+}
+
+func TestErrorAwareStreamingHandlerStopsBeforeNextBatch(t *testing.T) {
+	rows := []conn.Record{{"id": int64(1), "value": "one"}, {"id": int64(2), "value": "two"}}
+	src := newVerifiedHashMock(rows, chunk.ChunkStats{})
+	tgt := newVerifiedHashMock(nil, chunk.ChunkStats{})
+	table, err := tgt.ExtractTable("t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := CreateCompareRule(table, []string{"value"})
+	wantErr := errors.New("output write failed")
+	err = StreamCompareDataDetailedWithTable(src, tgt, rule, table, 1, func(DiffType, conn.Record, conn.Record, []string) error {
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected handler error, got %v", err)
+	}
+	if src.batchCalls != 1 || tgt.batchCalls != 1 {
+		t.Fatalf("comparison read past callback failure: source batches=%d target batches=%d", src.batchCalls, tgt.batchCalls)
 	}
 }
