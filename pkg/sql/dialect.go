@@ -117,6 +117,15 @@ type IDialect interface {
 	// 返回：
 	// 修改列语句
 	GenerateAlterColumnSql(t *conn.Table, oldCol, newCol *conn.Column) string
+
+	// GenerateAddForeignKeySql 生成创建外键语句
+	GenerateAddForeignKeySql(t *conn.Table, fk *conn.ForeignKey) string
+
+	// GenerateDropForeignKeySql 生成删除外键语句
+	GenerateDropForeignKeySql(t *conn.Table, fk *conn.ForeignKey) string
+
+	// GenerateAlterTableCommentSql 生成修改表注释语句
+	GenerateAlterTableCommentSql(t *conn.Table, comment string) string
 }
 
 func NewDialect(dbType consts.DBType) IDialect {

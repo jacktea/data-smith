@@ -325,5 +325,10 @@ func (c *MySQLTypeConverter) GenerateColumnDDL(col *conn.Column) string {
 		parts = append(parts, col.Extra)
 	}
 
+	// 列注释
+	if col.Comment != nil && *col.Comment != "" {
+		parts = append(parts, fmt.Sprintf("COMMENT '%s'", strings.ReplaceAll(*col.Comment, "'", "''")))
+	}
+
 	return strings.Join(parts, " ")
 }

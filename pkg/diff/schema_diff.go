@@ -9,7 +9,9 @@ type SchemaDiff struct {
 }
 
 type TableDiff struct {
-	Table                *conn.Table
+	SourceTable          *conn.Table
+	TargetTable          *conn.Table
+	Table                *conn.Table // 兼容旧逻辑，代表目标态/操作表
 	ColumnsAdded         []*conn.Column
 	ColumnsDropped       []*conn.Column
 	ColumnsModified      []*ColumnDiff
@@ -21,6 +23,7 @@ type TableDiff struct {
 	ForeignKeysDropped   []*conn.ForeignKey
 	ForeignKeysModified  []*ForeignKeyDiff
 	ViewDefinitionChange *ViewDefinitionDiff
+	CommentChange        *CommentDiff
 }
 
 type ColumnDiff struct {
@@ -46,4 +49,9 @@ type ForeignKeyDiff struct {
 type ViewDefinitionDiff struct {
 	Old *conn.ViewDefinition
 	New *conn.ViewDefinition
+}
+
+type CommentDiff struct {
+	Old string
+	New string
 }

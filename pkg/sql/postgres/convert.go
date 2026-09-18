@@ -94,6 +94,11 @@ func (c *PostgreSQLTypeConverter) initTypeMap() {
 	c.typeMap["path"] = c.handlePath
 	c.typeMap["polygon"] = c.handlePolygon
 	c.typeMap["circle"] = c.handleCircle
+
+	// 位串类型
+	c.typeMap["bit varying"] = c.handleBitVarying
+	c.typeMap["varbit"] = c.handleBitVarying
+	c.typeMap["bit"] = c.handleBit
 }
 
 // 字符类型处理函数
@@ -253,6 +258,20 @@ func (c *PostgreSQLTypeConverter) handlePolygon(col *conn.Column) string {
 
 func (c *PostgreSQLTypeConverter) handleCircle(col *conn.Column) string {
 	return "circle"
+}
+
+func (c *PostgreSQLTypeConverter) handleBitVarying(col *conn.Column) string {
+	if col.CharMaxLen != nil && *col.CharMaxLen > 0 {
+		return fmt.Sprintf("bit varying(%d)", *col.CharMaxLen)
+	}
+	return "bit varying"
+}
+
+func (c *PostgreSQLTypeConverter) handleBit(col *conn.Column) string {
+	if col.CharMaxLen != nil && *col.CharMaxLen > 0 {
+		return fmt.Sprintf("bit(%d)", *col.CharMaxLen)
+	}
+	return "bit(1)"
 }
 
 // ConvertType 转换数据类型

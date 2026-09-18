@@ -56,8 +56,10 @@ func (c *ConnConfig) RemoveExtra(key string) {
 
 // Config defines the main application configuration.
 type Config struct {
-	SourceDB ConnConfig `yaml:"sourceDb"`
-	TargetDB ConnConfig `yaml:"targetDb"`
+	SourceDB      ConnConfig `yaml:"sourceDb"`
+	TargetDB      ConnConfig `yaml:"targetDb"`
+	IncludeTables []string   `yaml:"includeTables"`
+	ExcludeTables []string   `yaml:"excludeTables"`
 }
 
 // Rule defines a single comparison rule.

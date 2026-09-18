@@ -178,9 +178,67 @@ func ExecuteSQL(adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bo
 
 	logger.Info("开始执行 SQL...")
 	if _, err := connDB.Exec(sqlContent); err != nil {
+		// 尝试定位出错的语句片段
+		stmts := splitStatements(sqlContent)
+		for idx, stmt := range stmts {
+			// 用只包含单语句的测试尝试复现并定位具体失败语句
+			if dryTx, dryErr := connDB.Begin(); dryErr == nil {
+				if _, sErr := dryTx.Exec(stmt); sErr != nil {
+					_ = dryTx.Rollback()
+					logger.Errorf("第 %d 条 SQL 语句执行失败:\n>>> %s\n", idx+1, stmt)
+					return fmt.Errorf("执行 SQL 失败 (第 %d 条语句): %w", idx+1, sErr)
+				}
+				_ = dryTx.Rollback()
+			}
+		}
 		return fmt.Errorf("执行 SQL 失败: %w", err)
 	}
 
 	logger.Infof("SQL 执行成功，耗时: %v", time.Since(start))
 	return nil
+}
+
+func splitStatements(sqlText string) []string {
+	var result []string
+	var current strings.Builder
+	inQuote := false
+	var quoteChar rune
+
+	runes := []rune(sqlText)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if inQuote {
+			current.WriteRune(r)
+			if r == quoteChar {
+				// 处理转义单引号 ''
+				if r == '\'' && i+1 < len(runes) && runes[i+1] == '\'' {
+					current.WriteRune('\'')
+					i++
+				} else {
+					inQuote = false
+				}
+			}
+		} else {
+			if r == '\'' || r == '"' {
+				inQuote = true
+				quoteChar = r
+				current.WriteRune(r)
+			} else if r == ';' {
+				stmt := strings.TrimSpace(current.String())
+				if stmt != "" {
+					result = append(result, stmt+";")
+				}
+				current.Reset()
+			} else {
+				current.WriteRune(r)
+			}
+		}
+	}
+	if current.Len() > 0 {
+		stmt := strings.TrimSpace(current.String())
+		if stmt != "" {
+			result = append(result, stmt)
+		}
+	}
+	return result
 }

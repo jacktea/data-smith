@@ -218,16 +218,17 @@ func (a *PostgresAdapter) extractColumns(table *conn.Table) error {
 	colRows, err := a.Conn.Query(`SELECT
 			c.column_name,
 			c.data_type,
+			c.udt_name,
 			c.is_nullable,
 			c.column_default,
 			pgd.description,
-			character_maximum_length,
-			numeric_precision,
-			numeric_scale,
-			ordinal_position
+			c.character_maximum_length,
+			c.numeric_precision,
+			c.numeric_scale,
+			c.ordinal_position
 		FROM
 			information_schema.columns c
-			LEFT JOIN pg_catalog.pg_statio_all_tables as st ON c.table_name = st.relname
+			LEFT JOIN pg_catalog.pg_statio_all_tables as st ON c.table_name = st.relname AND c.table_schema = st.schemaname
 			LEFT JOIN pg_catalog.pg_description pgd ON pgd.objoid=st.relid AND pgd.objsubid=c.ordinal_position
 		WHERE
 			c.table_name = $1 AND c.table_schema = $2
@@ -239,11 +240,12 @@ func (a *PostgresAdapter) extractColumns(table *conn.Table) error {
 	columns := make(map[string]*conn.Column)
 	for colRows.Next() {
 		var col conn.Column
-		var nullable string
+		var dataType, udtName, nullable string
 		var charMaxLen, numericPrec, numericScale sql.NullInt64
 		if err := colRows.Scan(
 			&col.Name,
-			&col.DataType,
+			&dataType,
+			&udtName,
 			&nullable,
 			&col.Default,
 			&col.Comment,
@@ -253,6 +255,14 @@ func (a *PostgresAdapter) extractColumns(table *conn.Table) error {
 			&col.Position,
 		); err != nil {
 			return err
+		}
+		if dataType == "USER-DEFINED" && udtName != "" {
+			col.DataType = udtName
+		} else if dataType == "ARRAY" && udtName != "" {
+			elemType := strings.TrimPrefix(udtName, "_")
+			col.DataType = elemType + "[]"
+		} else {
+			col.DataType = dataType
 		}
 		if charMaxLen.Valid {
 			maxLen := int(charMaxLen.Int64)
@@ -276,14 +286,17 @@ func (a *PostgresAdapter) extractColumns(table *conn.Table) error {
 func (a *PostgresAdapter) extractPrimaryKey(table *conn.Table) error {
 	query := `
 		SELECT 
-			tc.constraint_name,
-			array_agg(kcu.column_name ORDER BY kcu.ordinal_position) as columns
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
-		WHERE tc.table_schema = $1 
-		  AND tc.table_name = $2 
-		  AND tc.constraint_type = 'PRIMARY KEY'
-		GROUP BY tc.constraint_name
+			c.conname,
+			array_agg(a.attname ORDER BY u.attpos) as columns
+		FROM pg_constraint c
+		JOIN pg_namespace n ON n.oid = c.connamespace
+		JOIN pg_class t ON t.oid = c.conrelid
+		JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS u(attnum, attpos) ON true
+		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = u.attnum
+		WHERE n.nspname = $1 
+		  AND t.relname = $2 
+		  AND c.contype = 'p'
+		GROUP BY c.conname
 	`
 	var constraintName string
 	var columns pq.StringArray
@@ -310,6 +323,8 @@ func (a *PostgresAdapter) extractIndexes(table *conn.Table) error {
 			ix.indisprimary,
 			am.amname as method,
 			pg_get_expr(ix.indpred, ix.indrelid) as where_clause,
+			pg_get_expr(ix.indexprs, ix.indrelid) as expr,
+			pg_get_indexdef(ix.indexrelid) as index_def,
 			COALESCE(array_agg(a.attname ORDER BY array_position(ix.indkey, a.attnum)) FILTER (WHERE a.attname IS NOT NULL), '{}') as columns
 		FROM pg_index ix
 		JOIN pg_class i ON i.oid = ix.indexrelid
@@ -318,7 +333,7 @@ func (a *PostgresAdapter) extractIndexes(table *conn.Table) error {
 		JOIN pg_am am ON am.oid = i.relam
 		LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
 		WHERE n.nspname = $1 AND t.relname = $2
-		GROUP BY i.relname, ix.indisunique, ix.indisprimary, am.amname, ix.indpred, ix.indrelid
+		GROUP BY i.relname, ix.indisunique, ix.indisprimary, am.amname, ix.indpred, ix.indexprs, ix.indrelid, ix.indexrelid
 	`, table.Schema, table.Name)
 	if err != nil {
 		return err
@@ -326,7 +341,7 @@ func (a *PostgresAdapter) extractIndexes(table *conn.Table) error {
 	defer idxRows.Close()
 	for idxRows.Next() {
 		var idx conn.Index
-		var whereClause sql.NullString
+		var whereClause, expr, indexDef sql.NullString
 		var columns pq.StringArray
 		if err := idxRows.Scan(
 			&idx.Name,
@@ -334,6 +349,8 @@ func (a *PostgresAdapter) extractIndexes(table *conn.Table) error {
 			&idx.Primary,
 			&idx.Method,
 			&whereClause,
+			&expr,
+			&indexDef,
 			&columns,
 		); err != nil {
 			return err
@@ -341,6 +358,11 @@ func (a *PostgresAdapter) extractIndexes(table *conn.Table) error {
 		idx.Columns = columns
 		if whereClause.Valid {
 			idx.Where = &whereClause.String
+		}
+		if indexDef.Valid && indexDef.String != "" {
+			idx.Expression = &indexDef.String
+		} else if expr.Valid && expr.String != "" {
+			idx.Expression = &expr.String
 		}
 		table.Indexes[idx.Name] = &idx
 	}
@@ -350,23 +372,40 @@ func (a *PostgresAdapter) extractIndexes(table *conn.Table) error {
 func (a *PostgresAdapter) extractForeignKeys(table *conn.Table) error {
 	query := `
 		SELECT 
-			tc.constraint_name,
-			array_agg(kcu.column_name ORDER BY kcu.ordinal_position) as columns,
-			ccu.table_schema as referenced_schema,
-			ccu.table_name as referenced_table,
-			array_agg(ccu.column_name ORDER BY kcu.ordinal_position) as referenced_columns,
-			rc.delete_rule,
-			rc.update_rule
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
-		JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name
-		JOIN information_schema.referential_constraints rc ON rc.constraint_name = tc.constraint_name
-		WHERE tc.table_schema = $1 
-		  AND tc.table_name = $2 
-		  AND tc.constraint_type = 'FOREIGN KEY'
-		GROUP BY tc.constraint_name, ccu.table_schema, ccu.table_name, rc.delete_rule, rc.update_rule
+			c.conname,
+			array_agg(a.attname ORDER BY u.attpos) as columns,
+			ref_ns.nspname as referenced_schema,
+			ref_cls.relname as referenced_table,
+			array_agg(ref_a.attname ORDER BY u.attpos) as referenced_columns,
+			CASE c.confdeltype
+				WHEN 'a' THEN 'NO ACTION'
+				WHEN 'r' THEN 'RESTRICT'
+				WHEN 'c' THEN 'CASCADE'
+				WHEN 'n' THEN 'SET NULL'
+				WHEN 'd' THEN 'SET DEFAULT'
+				ELSE 'NO ACTION'
+			END as on_delete,
+			CASE c.confupdtype
+				WHEN 'a' THEN 'NO ACTION'
+				WHEN 'r' THEN 'RESTRICT'
+				WHEN 'c' THEN 'CASCADE'
+				WHEN 'n' THEN 'SET NULL'
+				WHEN 'd' THEN 'SET DEFAULT'
+				ELSE 'NO ACTION'
+			END as on_update
+		FROM pg_constraint c
+		JOIN pg_namespace n ON n.oid = c.connamespace
+		JOIN pg_class t ON t.oid = c.conrelid
+		JOIN pg_class ref_cls ON ref_cls.oid = c.confrelid
+		JOIN pg_namespace ref_ns ON ref_ns.oid = ref_cls.relnamespace
+		JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS u(attnum, confattnum, attpos) ON true
+		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = u.attnum
+		JOIN pg_attribute ref_a ON ref_a.attrelid = ref_cls.oid AND ref_a.attnum = u.confattnum
+		WHERE n.nspname = $1 
+		  AND t.relname = $2 
+		  AND c.contype = 'f'
+		GROUP BY c.conname, ref_ns.nspname, ref_cls.relname, c.confdeltype, c.confupdtype
 	`
-	// Foreign Keys
 	fkRows, err := a.Conn.Query(query, table.Schema, table.Name)
 	if err != nil {
 		return err
@@ -397,11 +436,13 @@ func (a *PostgresAdapter) extractForeignKeys(table *conn.Table) error {
 func (p *PostgresAdapter) extractViewDefinition(table *conn.Table) error {
 	query := `
 		SELECT 
-			view_definition,
-			is_updatable,
-			check_option
-		FROM information_schema.views
-		WHERE table_schema = $1 AND table_name = $2
+			pg_get_viewdef(c.oid, true),
+			v.is_updatable,
+			v.check_option
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN information_schema.views v ON v.table_schema = n.nspname AND v.table_name = c.relname
+		WHERE n.nspname = $1 AND c.relname = $2
 	`
 
 	var viewDef conn.ViewDefinition

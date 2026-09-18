@@ -255,14 +255,6 @@ func (d *mysqlDialect) GenerateTableDDL(t *conn.Table) string {
 		ddl.WriteString(d.GenerateCreateIndexSql(t, idx))
 	}
 
-	// 添加列注释
-	for _, col := range t.Columns {
-		if col.Comment != nil && *col.Comment != "" {
-			ddl.WriteString(fmt.Sprintf("\n\nALTER TABLE `%s` MODIFY COLUMN `%s` %s COMMENT '%s';",
-				t.Name, col.Name, d.converter.GenerateColumnType(col), strings.ReplaceAll(*col.Comment, "'", "''")))
-		}
-	}
-
 	return ddl.String()
 }
 
@@ -333,6 +325,39 @@ func (d *mysqlDialect) GenerateAlterColumnSql(t *conn.Table, oldCol, newCol *con
 	ddl.WriteString(d.converter.GenerateColumnDDL(newCol))
 	ddl.WriteString(";")
 	return ddl.String()
+}
+
+func (d *mysqlDialect) GenerateAddForeignKeySql(t *conn.Table, fk *conn.ForeignKey) string {
+	var ddl strings.Builder
+	ddl.WriteString(fmt.Sprintf("ALTER TABLE `%s` ADD CONSTRAINT `%s` FOREIGN KEY (", t.Name, fk.Name))
+	quotedCols := make([]string, len(fk.Columns))
+	for i, c := range fk.Columns {
+		quotedCols[i] = fmt.Sprintf("`%s`", c)
+	}
+	ddl.WriteString(strings.Join(quotedCols, ", "))
+	ddl.WriteString(fmt.Sprintf(") REFERENCES `%s` (", fk.ReferencedTable))
+	quotedRefCols := make([]string, len(fk.ReferencedColumns))
+	for i, c := range fk.ReferencedColumns {
+		quotedRefCols[i] = fmt.Sprintf("`%s`", c)
+	}
+	ddl.WriteString(strings.Join(quotedRefCols, ", "))
+	ddl.WriteString(")")
+	if fk.OnDelete != "" && strings.ToUpper(fk.OnDelete) != "NO ACTION" {
+		ddl.WriteString(fmt.Sprintf(" ON DELETE %s", fk.OnDelete))
+	}
+	if fk.OnUpdate != "" && strings.ToUpper(fk.OnUpdate) != "NO ACTION" {
+		ddl.WriteString(fmt.Sprintf(" ON UPDATE %s", fk.OnUpdate))
+	}
+	ddl.WriteString(";")
+	return ddl.String()
+}
+
+func (d *mysqlDialect) GenerateDropForeignKeySql(t *conn.Table, fk *conn.ForeignKey) string {
+	return fmt.Sprintf("ALTER TABLE `%s` DROP FOREIGN KEY `%s`;", t.Name, fk.Name)
+}
+
+func (d *mysqlDialect) GenerateAlterTableCommentSql(t *conn.Table, comment string) string {
+	return fmt.Sprintf("ALTER TABLE `%s` COMMENT = '%s';", t.Name, strings.ReplaceAll(comment, "'", "''"))
 }
 
 func (d *mysqlDialect) escapedValue(dataType string, val any) string {

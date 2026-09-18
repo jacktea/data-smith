@@ -103,3 +103,52 @@ func TestPostgreDialect_DataSqlGeneration(t *testing.T) {
 		t.Errorf("GenerateDeleteSql mismatch:\ngot:  %s\nwant: %s", delSql, expectedDel)
 	}
 }
+
+func TestPostgreDialect_ForeignKeyAndCommentSql(t *testing.T) {
+	dialect := NewPostgreDialect()
+	table := &conn.Table{
+		Name:   "orders",
+		Schema: "public",
+	}
+
+	fk := &conn.ForeignKey{
+		Name:              "fk_orders_user",
+		Columns:           []string{"user_id"},
+		ReferencedSchema:  "public",
+		ReferencedTable:   "users",
+		ReferencedColumns: []string{"id"},
+		OnDelete:          "CASCADE",
+		OnUpdate:          "RESTRICT",
+	}
+
+	// 1. 测试添加外键
+	addFkSql := dialect.GenerateAddForeignKeySql(table, fk)
+	expectedAddFk := `ALTER TABLE "public"."orders" ADD CONSTRAINT "fk_orders_user" FOREIGN KEY ("user_id") REFERENCES "public"."users" ("id") ON DELETE CASCADE ON UPDATE RESTRICT;`
+	if addFkSql != expectedAddFk {
+		t.Errorf("GenerateAddForeignKeySql mismatch:\ngot:  %s\nwant: %s", addFkSql, expectedAddFk)
+	}
+
+	// 2. 测试删除外键
+	dropFkSql := dialect.GenerateDropForeignKeySql(table, fk)
+	expectedDropFk := `ALTER TABLE "public"."orders" DROP CONSTRAINT IF EXISTS "fk_orders_user";`
+	if dropFkSql != expectedDropFk {
+		t.Errorf("GenerateDropForeignKeySql mismatch:\ngot:  %s\nwant: %s", dropFkSql, expectedDropFk)
+	}
+
+	// 3. 测试修改表注释
+	commentSql := dialect.GenerateAlterTableCommentSql(table, "订单主表")
+	expectedComment := `COMMENT ON TABLE "public"."orders" IS '订单主表';`
+	if commentSql != expectedComment {
+		t.Errorf("GenerateAlterTableCommentSql mismatch:\ngot:  %s\nwant: %s", commentSql, expectedComment)
+	}
+
+	// 4. 测试修改列（类型带有 USING）
+	oldCol := &conn.Column{Name: "amount", DataType: "varchar"}
+	newCol := &conn.Column{Name: "amount", DataType: "numeric"}
+	alterColSql := dialect.GenerateAlterColumnSql(table, oldCol, newCol)
+	expectedAlter := `ALTER TABLE "public"."orders" ALTER COLUMN "amount" TYPE numeric USING "amount"::numeric;`
+	if alterColSql != expectedAlter {
+		t.Errorf("GenerateAlterColumnSql mismatch:\ngot:  %s\nwant: %s", alterColSql, expectedAlter)
+	}
+}
+

@@ -65,9 +65,11 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 		if src.ViewDefinition == nil || tgt.ViewDefinition == nil {
 			return nil
 		}
-		if src.ViewDefinition.SelectStatement != tgt.ViewDefinition.SelectStatement {
+		if !equalViewDefinition(src.ViewDefinition, tgt.ViewDefinition) {
 			return &TableDiff{
-				Table: tgt,
+				SourceTable: src,
+				TargetTable: tgt,
+				Table:       tgt,
 				ViewDefinitionChange: &ViewDefinitionDiff{
 					Old: src.ViewDefinition,
 					New: tgt.ViewDefinition,
@@ -76,7 +78,11 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 		}
 		return nil
 	}
-	d := &TableDiff{Table: tgt}
+	d := &TableDiff{
+		SourceTable: src,
+		TargetTable: tgt,
+		Table:       tgt,
+	}
 	// 列
 	srcCols := src.Columns
 	tgtCols := tgt.Columns
@@ -147,10 +153,92 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 			d.ForeignKeysModified = append(d.ForeignKeysModified, &ForeignKeyDiff{Old: srcF, New: tgtF})
 		}
 	}
-	if len(d.ColumnsAdded)+len(d.ColumnsDropped)+len(d.ColumnsModified)+len(d.IndexesAdded)+len(d.IndexesDropped)+len(d.IndexesModified)+len(d.ForeignKeysAdded)+len(d.ForeignKeysDropped)+len(d.ForeignKeysModified) > 0 || d.PrimaryKeyChange != nil {
+	// 表注释
+	if !equalTableComment(src.Comment, tgt.Comment) {
+		d.CommentChange = &CommentDiff{Old: src.Comment, New: tgt.Comment}
+	}
+
+	if len(d.ColumnsAdded)+len(d.ColumnsDropped)+len(d.ColumnsModified)+
+		len(d.IndexesAdded)+len(d.IndexesDropped)+len(d.IndexesModified)+
+		len(d.ForeignKeysAdded)+len(d.ForeignKeysDropped)+len(d.ForeignKeysModified) > 0 ||
+		d.PrimaryKeyChange != nil || d.CommentChange != nil {
 		return d
 	}
 	return nil
+}
+
+var typeAliases = map[string]string{
+	"int4":                        "integer",
+	"int":                         "integer",
+	"integer":                     "integer",
+	"int8":                        "bigint",
+	"bigint":                      "bigint",
+	"int2":                        "smallint",
+	"smallint":                    "smallint",
+	"bool":                        "boolean",
+	"boolean":                     "boolean",
+	"float8":                      "double precision",
+	"double precision":            "double precision",
+	"float4":                      "real",
+	"real":                        "real",
+	"varchar":                     "varchar",
+	"character varying":           "varchar",
+	"char":                        "char",
+	"character":                   "char",
+	"timestamp without time zone": "timestamp",
+	"timestamp":                   "timestamp",
+	"timestamp with time zone":    "timestamptz",
+	"timestamptz":                 "timestamptz",
+	"time without time zone":      "time",
+	"time":                        "time",
+	"time with time zone":         "timetz",
+	"timetz":                      "timetz",
+	"decimal":                     "numeric",
+	"numeric":                     "numeric",
+	"varbit":                      "bit varying",
+	"bit varying":                 "bit varying",
+}
+
+func normalizeDataType(dt string) string {
+	lower := strings.ToLower(strings.TrimSpace(dt))
+	if standard, ok := typeAliases[lower]; ok {
+		return standard
+	}
+	return lower
+}
+
+func normalizeDefault(d *string) string {
+	if d == nil {
+		return ""
+	}
+	val := strings.TrimSpace(*d)
+	if val == "" {
+		return ""
+	}
+	// 去除外层括号，如 ('value'::text) 或 (0)
+	for strings.HasPrefix(val, "(") && strings.HasSuffix(val, ")") {
+		val = strings.TrimSpace(val[1 : len(val)-1])
+	}
+	// 去除 PG 的 ::type 类型强转后缀
+	if idx := strings.Index(val, "::"); idx != -1 {
+		val = strings.TrimSpace(val[:idx])
+	}
+	// 去除外层括号
+	for strings.HasPrefix(val, "(") && strings.HasSuffix(val, ")") {
+		val = strings.TrimSpace(val[1 : len(val)-1])
+	}
+	// 去除首尾单引号
+	if strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'") && len(val) >= 2 {
+		val = val[1 : len(val)-1]
+	}
+	lower := strings.ToLower(val)
+	if lower == "now()" || lower == "current_timestamp" || lower == "current_timestamp()" {
+		return "current_timestamp"
+	}
+	if lower == "null" {
+		return ""
+	}
+	return val
 }
 
 func equalColumn(a, b *conn.Column) bool {
@@ -158,51 +246,51 @@ func equalColumn(a, b *conn.Column) bool {
 		return a == b
 	}
 	// 比较基本字段
-	if a.Name != b.Name || a.DataType != b.DataType || a.Nullable != b.Nullable || a.Extra != b.Extra {
+	if a.Name != b.Name {
 		return false
 	}
-	// 比较Default值
-	if a.Default == nil && b.Default == nil {
-		// 都为nil，相等
-	} else if a.Default == nil || b.Default == nil {
-		// 一个为nil，一个不为nil，不相等
-		return false
-	} else if *a.Default != *b.Default {
-		// 都不为nil，但值不相等
+	if normalizeDataType(a.DataType) != normalizeDataType(b.DataType) {
 		return false
 	}
-	// 比较Comment
+	if a.Nullable != b.Nullable {
+		return false
+	}
+	if a.Extra != b.Extra {
+		return false
+	}
+	// 比较 Default 归一化值
+	if normalizeDefault(a.Default) != normalizeDefault(b.Default) {
+		return false
+	}
+	// 比较 Comment
 	if !equalComment(a.Comment, b.Comment) {
 		return false
 	}
-	// 比较CharMaxLen
-	if a.CharMaxLen == nil && b.CharMaxLen == nil {
-		// 都为nil，相等
-	} else if a.CharMaxLen == nil || b.CharMaxLen == nil {
-		// 一个为nil，一个不为nil，不相等
-		return false
-	} else if *a.CharMaxLen != *b.CharMaxLen {
-		// 都不为nil，但值不相等
-		return false
+	// text 等无限长类型忽略 CharMaxLen 差异
+	normType := normalizeDataType(a.DataType)
+	if normType != "text" && !strings.Contains(normType, "text") {
+		if a.CharMaxLen == nil && b.CharMaxLen == nil {
+			// 相等
+		} else if a.CharMaxLen == nil || b.CharMaxLen == nil {
+			return false
+		} else if *a.CharMaxLen != *b.CharMaxLen {
+			return false
+		}
 	}
-	// 比较NumericPrec
+	// 比较 NumericPrec
 	if a.NumericPrec == nil && b.NumericPrec == nil {
-		// 都为nil，相等
+		// 相等
 	} else if a.NumericPrec == nil || b.NumericPrec == nil {
-		// 一个为nil，一个不为nil，不相等
 		return false
 	} else if *a.NumericPrec != *b.NumericPrec {
-		// 都不为nil，但值不相等
 		return false
 	}
-	// 比较NumericScale
+	// 比较 NumericScale
 	if a.NumericScale == nil && b.NumericScale == nil {
-		// 都为nil，相等
+		// 相等
 	} else if a.NumericScale == nil || b.NumericScale == nil {
-		// 一个为nil，一个不为nil，不相等
 		return false
 	} else if *a.NumericScale != *b.NumericScale {
-		// 都不为nil，但值不相等
 		return false
 	}
 	return true
@@ -212,11 +300,9 @@ func equalIndex(a, b *conn.Index) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	// 比较基本字段
 	if a.Name != b.Name || a.Unique != b.Unique || a.Primary != b.Primary || a.Method != b.Method {
 		return false
 	}
-	// 比较Columns数组
 	if len(a.Columns) != len(b.Columns) {
 		return false
 	}
@@ -225,36 +311,31 @@ func equalIndex(a, b *conn.Index) bool {
 			return false
 		}
 	}
-	// 比较Where条件
 	if a.Where == nil && b.Where == nil {
-		// 都为nil，相等
+		// 相等
 	} else if a.Where == nil || b.Where == nil {
-		// 一个为nil，一个不为nil，不相等
 		return false
 	} else if *a.Where != *b.Where {
-		// 都不为nil，但值不相等
 		return false
 	}
-	// 比较Expression
 	if a.Expression == nil && b.Expression == nil {
-		// 都为nil，相等
+		// 相等
 	} else if a.Expression == nil || b.Expression == nil {
-		// 一个为nil，一个不为nil，不相等
 		return false
 	} else if *a.Expression != *b.Expression {
-		// 都不为nil，但值不相等
 		return false
 	}
 	return true
 }
 
 func equalPrimaryKey(a, b *conn.PrimaryKey) bool {
-	if a == nil || b == nil {
-		return a == b
+	if a == nil && b == nil {
+		return true
 	}
-	if a.Name != b.Name {
+	if a == nil || b == nil {
 		return false
 	}
+	// 主键不以约束名称是否一致判断变更，仅比对列及其顺序
 	if len(a.Columns) != len(b.Columns) {
 		return false
 	}
@@ -270,11 +351,10 @@ func equalForeignKey(a, b *conn.ForeignKey) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	// 比较基本字段
-	if a.Name != b.Name || a.ReferencedSchema != b.ReferencedSchema || a.ReferencedTable != b.ReferencedTable || a.OnDelete != b.OnDelete || a.OnUpdate != b.OnUpdate {
+	if a.Name != b.Name || a.ReferencedSchema != b.ReferencedSchema || a.ReferencedTable != b.ReferencedTable ||
+		a.OnDelete != b.OnDelete || a.OnUpdate != b.OnUpdate {
 		return false
 	}
-	// 比较Columns数组
 	if len(a.Columns) != len(b.Columns) {
 		return false
 	}
@@ -283,7 +363,6 @@ func equalForeignKey(a, b *conn.ForeignKey) bool {
 			return false
 		}
 	}
-	// 比较ReferencedColumns数组
 	if len(a.ReferencedColumns) != len(b.ReferencedColumns) {
 		return false
 	}
@@ -296,15 +375,39 @@ func equalForeignKey(a, b *conn.ForeignKey) bool {
 }
 
 func equalComment(a, b *string) bool {
+	if (a == nil || *a == "") && (b == nil || *b == "") {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	sa := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(*a, "\n", ""), "\r", ""))
+	sb := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(*b, "\n", ""), "\r", ""))
+	return sa == sb
+}
+
+func equalTableComment(a, b string) bool {
+	sa := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(a, "\n", ""), "\r", ""))
+	sb := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(b, "\n", ""), "\r", ""))
+	return sa == sb
+}
+
+func equalViewDefinition(a, b *conn.ViewDefinition) bool {
 	if a == nil && b == nil {
 		return true
 	}
 	if a == nil || b == nil {
 		return false
 	}
-	sa := strings.ReplaceAll(*a, "\n", "")
-	sa = strings.ReplaceAll(sa, "\r", "")
-	sb := strings.ReplaceAll(*b, "\n", "")
-	sb = strings.ReplaceAll(sb, "\r", "")
-	return sa == sb
+	clean := func(s string) string {
+		s = strings.TrimSpace(s)
+		s = strings.TrimSuffix(s, ";")
+		s = strings.ReplaceAll(s, "\n", " ")
+		s = strings.ReplaceAll(s, "\r", " ")
+		for strings.Contains(s, "  ") {
+			s = strings.ReplaceAll(s, "  ", " ")
+		}
+		return strings.TrimSpace(s)
+	}
+	return clean(a.SelectStatement) == clean(b.SelectStatement)
 }
