@@ -12,15 +12,16 @@ import (
 )
 
 type mockDB struct {
-	rows []conn.Record
-	cols []string
-	pk   []string
+	rows     []conn.Record
+	cols     []string
+	pk       []string
+	colTypes map[string]string
 }
 
 func (m *mockDB) ReadSchema() (*conn.DatabaseSchema, error) {
 	tbl := &conn.Table{Columns: map[string]*conn.Column{}}
 	for _, c := range m.cols {
-		tbl.Columns[c] = &conn.Column{Name: c}
+		tbl.Columns[c] = &conn.Column{Name: c, DataType: m.colTypes[c]}
 	}
 	schema := &conn.DatabaseSchema{Tables: map[string]*conn.Table{"t": tbl}}
 	return schema, nil
@@ -62,7 +63,7 @@ func (m *mockDB) ExtractTable(tableName string) (*conn.Table, error) {
 		},
 	}
 	for _, c := range m.cols {
-		tbl.Columns[c] = &conn.Column{Name: c}
+		tbl.Columns[c] = &conn.Column{Name: c, DataType: m.colTypes[c]}
 	}
 	return tbl, nil
 }

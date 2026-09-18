@@ -61,8 +61,8 @@ func (a *MySQLAdapter) ReadSchema() (*conn.DatabaseSchema, error) {
 }
 
 func (a *MySQLAdapter) GetTableDataBatch(table string, cols, pk []string, lastPK []any, limit int) ([]conn.Record, error) {
-	if len(pk) == 0 {
-		return nil, fmt.Errorf("primary key required for batch scan")
+	if err := validateBatchScanInputs(table, cols, pk, lastPK, limit); err != nil {
+		return nil, err
 	}
 	// 构造 SELECT ... FROM table WHERE (pk) > (lastPK) ORDER BY pk LIMIT ?
 	colList := utils.JoinWrap(cols, "`", ", ")
@@ -106,7 +106,7 @@ func (a *MySQLAdapter) GetTableDataBatch(table string, cols, pk []string, lastPK
 		}
 		result = append(result, rec)
 	}
-	return result, nil
+	return result, rows.Err()
 }
 
 func (a *MySQLAdapter) ExtractTable(tableName string) (*conn.Table, error) {
@@ -204,6 +204,9 @@ func (a *MySQLAdapter) queryTables() (map[string]*conn.Table, error) {
 			continue
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return tables, nil
 }
 
@@ -263,6 +266,9 @@ func (a *MySQLAdapter) extractColumns(table *conn.Table) error {
 		}
 		col.Nullable = nullable == "YES"
 		columns[col.Name] = &col
+	}
+	if err := colRows.Err(); err != nil {
+		return err
 	}
 	table.Columns = columns
 	return nil
@@ -325,7 +331,7 @@ func (a *MySQLAdapter) extractIndexes(table *conn.Table) error {
 		idx.Columns = strings.Split(columns, ",")
 		table.Indexes[idx.Name] = &idx
 	}
-	return nil
+	return idxRows.Err()
 }
 
 func (a *MySQLAdapter) extractForeignKeys(table *conn.Table) error {
@@ -371,7 +377,7 @@ func (a *MySQLAdapter) extractForeignKeys(table *conn.Table) error {
 
 		table.ForeignKeys[fk.Name] = &fk
 	}
-	return nil
+	return fkRows.Err()
 }
 
 func (a *MySQLAdapter) extractViewDefinition(table *conn.Table) error {
@@ -426,26 +432,23 @@ func (a *MySQLAdapter) getTableComment(schemaName, tableName string) string {
 
 func (a *MySQLAdapter) GetChunkRanges(table string, pk string, chunkSize int) ([]chunk.ChunkRange, error) {
 	if chunkSize <= 0 {
-		chunkSize = 10000
+		return nil, fmt.Errorf("chunk size must be greater than zero")
 	}
-	var count int64
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM `%s`", table)
-	if err := a.Conn.QueryRow(countQuery).Scan(&count); err != nil {
+	if strings.TrimSpace(table) == "" || strings.TrimSpace(pk) == "" {
+		return nil, fmt.Errorf("table and primary key are required for chunk ranges")
+	}
+	stats, err := a.GetChunkStats(table, pk)
+	if err != nil {
 		return nil, err
 	}
-	if count == 0 {
+	if stats.Count == 0 {
 		return nil, nil
 	}
-	if count <= int64(chunkSize) {
-		var minPK any
-		minQuery := fmt.Sprintf("SELECT `%s` FROM `%s` ORDER BY `%s` ASC LIMIT 1", pk, table, pk)
-		if err := a.Conn.QueryRow(minQuery).Scan(&minPK); err != nil {
-			return nil, err
-		}
+	if stats.Count <= int64(chunkSize) {
 		return []chunk.ChunkRange{
 			{
 				ChunkIndex: 0,
-				MinPK:      minPK,
+				MinPK:      nil,
 				MaxPK:      nil,
 				IsLast:     true,
 			},
@@ -459,7 +462,7 @@ func (a *MySQLAdapter) GetChunkRanges(table string, pk string, chunkSize int) ([
 	}
 	splitPoints = append(splitPoints, minPK)
 
-	for offset := chunkSize; int64(offset) < count; offset += chunkSize {
+	for offset := chunkSize; int64(offset) < stats.Count; offset += chunkSize {
 		var point any
 		query := fmt.Sprintf("SELECT `%s` FROM `%s` ORDER BY `%s` ASC LIMIT 1 OFFSET %d", pk, table, pk, offset)
 		if err := a.Conn.QueryRow(query).Scan(&point); err != nil {
@@ -471,13 +474,16 @@ func (a *MySQLAdapter) GetChunkRanges(table string, pk string, chunkSize int) ([
 	var ranges []chunk.ChunkRange
 	for i := 0; i < len(splitPoints); i++ {
 		isLast := (i == len(splitPoints)-1)
-		var maxPK any
+		var rangeMinPK, maxPK any
+		if i > 0 {
+			rangeMinPK = splitPoints[i]
+		}
 		if !isLast {
 			maxPK = splitPoints[i+1]
 		}
 		ranges = append(ranges, chunk.ChunkRange{
 			ChunkIndex: i,
-			MinPK:      splitPoints[i],
+			MinPK:      rangeMinPK,
 			MaxPK:      maxPK,
 			IsLast:     isLast,
 		})
@@ -485,19 +491,43 @@ func (a *MySQLAdapter) GetChunkRanges(table string, pk string, chunkSize int) ([
 	return ranges, nil
 }
 
+func (a *MySQLAdapter) GetChunkStats(table string, pk string) (chunk.ChunkStats, error) {
+	if strings.TrimSpace(table) == "" || strings.TrimSpace(pk) == "" {
+		return chunk.ChunkStats{}, fmt.Errorf("table and primary key are required for chunk stats")
+	}
+	query := fmt.Sprintf("SELECT COUNT(*), MIN(`%s`), MAX(`%s`) FROM `%s`", pk, pk, table)
+	var stats chunk.ChunkStats
+	if err := a.Conn.QueryRow(query).Scan(&stats.Count, &stats.MinPK, &stats.MaxPK); err != nil {
+		return chunk.ChunkStats{}, err
+	}
+	return stats, nil
+}
+
 func (a *MySQLAdapter) GetChunkHash(table string, cols []string, pk string, minPK, maxPK any, isLast bool) (string, error) {
+	if strings.TrimSpace(table) == "" || strings.TrimSpace(pk) == "" || len(cols) == 0 {
+		return "", fmt.Errorf("table, columns, and primary key are required for chunk hash")
+	}
 	quotedCols := make([]string, len(cols))
 	for i, c := range cols {
-		quotedCols[i] = fmt.Sprintf("COALESCE(CAST(`%s` AS CHAR), '')", c)
+		if strings.TrimSpace(c) == "" {
+			return "", fmt.Errorf("chunk hash column names must not be empty")
+		}
+		quotedCols[i] = fmt.Sprintf("IF(`%s` IS NULL, 'N', CONCAT('V', LENGTH(CAST(`%s` AS CHAR)), ':', CAST(`%s` AS CHAR)))", c, c, c)
 	}
-	concatExpr := fmt.Sprintf("CONCAT_WS('#', %s)", strings.Join(quotedCols, ", "))
+	concatExpr := fmt.Sprintf("CONCAT(%s)", strings.Join(quotedCols, ", '|', "))
 
 	var whereClause string
 	var args []any
-	if isLast || maxPK == nil {
+	switch {
+	case minPK == nil && maxPK == nil:
+		whereClause = "1 = 1"
+	case minPK == nil:
+		whereClause = fmt.Sprintf("`%s` < ?", pk)
+		args = append(args, maxPK)
+	case maxPK == nil:
 		whereClause = fmt.Sprintf("`%s` >= ?", pk)
 		args = append(args, minPK)
-	} else {
+	default:
 		whereClause = fmt.Sprintf("`%s` >= ? AND `%s` < ?", pk, pk)
 		args = append(args, minPK, maxPK)
 	}
@@ -510,4 +540,28 @@ func (a *MySQLAdapter) GetChunkHash(table string, cols []string, pk string, minP
 		return "", err
 	}
 	return hash.String, nil
+}
+
+func validateBatchScanInputs(table string, cols, pk []string, lastPK []any, limit int) error {
+	if limit <= 0 {
+		return fmt.Errorf("batch size must be greater than zero")
+	}
+	if strings.TrimSpace(table) == "" {
+		return fmt.Errorf("table name is required for batch scan")
+	}
+	if len(cols) == 0 {
+		return fmt.Errorf("at least one column is required for batch scan")
+	}
+	if len(pk) == 0 {
+		return fmt.Errorf("primary key required for batch scan")
+	}
+	if len(lastPK) != 0 && len(lastPK) != len(pk) {
+		return fmt.Errorf("last primary key value count must match primary key column count")
+	}
+	for _, name := range append(append([]string(nil), cols...), pk...) {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("column and primary key names must not be empty")
+		}
+	}
+	return nil
 }

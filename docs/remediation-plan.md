@@ -8,7 +8,7 @@ Execution order is sequential in the shared checkout. Each session must preserve
 
 - [x] [#2](https://github.com/jacktea/data-smith/issues/2) — Session 1: migration discovery, ledger, and execution (completed 2026-09-18)
 - [x] [#3](https://github.com/jacktea/data-smith/issues/3) — Session 2: `exec-sql` parsing, transactions, and dry-run (completed 2026-09-18)
-- [ ] [#4](https://github.com/jacktea/data-smith/issues/4) — Session 3: exact data comparison and safe chunk filtering
+- [x] [#4](https://github.com/jacktea/data-smith/issues/4) — Session 3: exact data comparison and safe chunk filtering (completed 2026-09-18)
 - [ ] [#5](https://github.com/jacktea/data-smith/issues/5) — Session 4: deterministic, dependency-safe, schema-qualified SQL
 - [ ] [#6](https://github.com/jacktea/data-smith/issues/6) — Session 5: fail-fast CLI and atomic output files
 - [ ] [#7](https://github.com/jacktea/data-smith/issues/7) — Session 6: streaming diff and database performance
@@ -69,6 +69,31 @@ Final verification:
 - `go test -race ./... -count=1` — PASS
 - `go vet ./...` — PASS
 
+## Session 3 acceptance evidence
+
+- Integer and `BIGINT` comparison now uses `math/big.Int`; decimal/numeric comparison uses `math/big.Rat`; only float/double/real uses the existing absolute tolerance. Tests cover adjacent values above 2^53, `uint64` maximum values, high-precision decimals, trailing-zero normalization, NaN, positive/negative infinity, and the absence of decimal tolerance.
+- `TestStreamCompareDataReportsZeroPrimaryKey` proves source `{0,1}` versus target `{1}` reports dropped primary key `0`. Existing and new tests cover composite keys, NULL versus empty string, and batch boundaries.
+- Every MySQL and PostgreSQL database cursor loop checks `Rows.Err()`. SQL-mock interrupted-cursor tests prove `GetTableDataBatch` returns the original cursor error; the `diff-data` command now returns comparison errors through Cobra `RunE` instead of logging and continuing.
+- Batch size is checked before schema/database work in streaming APIs and before config/rules file reads in the CLI. Chunk size is checked before hash/database work. Table, column, primary-key, and composite last-key inputs are validated before adapter queries.
+- Hash ranges are `[nil, first-boundary) ... [last-boundary, nil)`, so the first range is unbounded below. Hash skipping requires exact source/target count, minimum key, and maximum key equality before every probabilistic chunk fingerprint matches. NULL and empty values have distinct length-prefixed hash encodings.
+- `--chunk-hash` remains disabled by default; its help text identifies the optimization as probabilistic and conditional on exact count/min/max checks. Existing `ChunkHasher` implementations remain source-compatible; only implementations of the additive `VerifiedChunkHasher` interface can take the skip path.
+
+## Session 3 verification
+
+Baseline before changes:
+
+- `go test ./... -count=1` — PASS
+- `go test -race ./... -count=1` — PASS
+- `go vet ./...` — PASS
+
+Final verification:
+
+- `GOCACHE=/tmp/data-smith-go-cache go test ./pkg/diff ./pkg/db/postgres ./pkg/db/mysql ./internal/datasmith/diff -count=1` — PASS
+- `GOCACHE=/tmp/data-smith-go-cache go test ./... -count=1` — PASS
+- `GOCACHE=/tmp/data-smith-go-cache go test -race ./... -count=1` — PASS
+- `GOCACHE=/tmp/data-smith-go-cache go vet ./...` — PASS
+- `git diff --check` — PASS
+
 ## Open risks and later work
 
 - Session 1 uses deterministic SQL-mock regression tests; live PostgreSQL/MySQL migration E2E remains for #9.
@@ -78,8 +103,10 @@ Final verification:
 - The Session 2 scanner is intentionally lexical, not a full SQL grammar. Client-side directives and payload formats such as MySQL `DELIMITER` and PostgreSQL `COPY ... FROM STDIN` are not modeled; transaction/dry-run mode may conservatively reject ambiguous scripts.
 - MySQL dry-run validates command classes, but rollback still requires transactional table engines. It rejects executable comments and mode-dependent backslash quoting; use doubled quotes for portable transactional scripts.
 - Live PostgreSQL/MySQL `exec-sql` E2E remains part of #9; Session 2 uses deterministic SQL-mock transaction and execution-count tests.
+- Chunk fingerprints remain probabilistic: PostgreSQL uses nested MD5 and MySQL uses XOR-combined CRC32. Matching hashes are not an equivalence proof, even after exact count/min/max validation; concurrent writes outside a shared snapshot can also invalidate a comparison. `--chunk-hash` therefore remains opt-in.
+- Session 3 adapter coverage is deterministic SQL-mock plus in-memory comparison tests. Live cross-database comparison and concurrent-mutation E2E remain deferred to #9.
 - The original modified, zero-byte `datasmith` binary and untracked `CODE_REVIEW_REPORT.md` are unrelated user changes and must remain untouched in later sessions. Full-suite tests can overwrite `datasmith`; truncate only that newly generated binary afterward to restore the user's pre-session modified state.
 
 ## Next action
 
-Run Session 3 for issue #4 using the complete prompt in `docs/remediation-handoff.md`. Preserve the migration behavior from #2 and `exec-sql` safety behavior from #3.
+Run Session 4 for issue #5 using the complete prompt in `docs/remediation-handoff.md`. Preserve the migration behavior from #2, `exec-sql` safety behavior from #3, and exact comparison/safe hash behavior from #4.

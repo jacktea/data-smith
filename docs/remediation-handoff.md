@@ -1,71 +1,86 @@
 # DataSmith Remediation Handoff
 
-Latest completed phase: Session 2, issue [#3](https://github.com/jacktea/data-smith/issues/3), on 2026-09-18.
+Latest completed phase: Session 3, issue [#4](https://github.com/jacktea/data-smith/issues/4), on 2026-09-18.
 
-## Session 2 summary
+## Session 3 summary
 
-`exec-sql` now scans SQL without rewriting it. Transaction and dry-run paths reject explicit top-level transaction control, then pass the original script bytes to the driver exactly once. PostgreSQL dry-run executes inside a transaction and explicitly rolls back. MySQL dry-run validates the complete script before `Begin`, permits only transactional DML command classes, and rejects DDL, unsupported commands, executable comments, and mode-dependent backslash quoting.
+Data comparison is now type-aware without converting exact numeric domains to `float64`: integer/`BIGINT` values use `math/big.Int`, decimal/numeric values use `math/big.Rat`, and only float/double/real values use an absolute `1e-9` tolerance. NaN and infinities have stable comparison semantics. NULL remains distinct from an empty value.
 
-Non-transaction execution remains a single raw `Exec`. On failure it wraps the original driver error and reports a PostgreSQL driver position as a Unicode-safe statement/line/column; when no exact position exists it reports a safe statement or statement range without replaying SQL.
+MySQL and PostgreSQL now return `Rows.Err()` from every database cursor loop. Batch, chunk, table, column, primary-key, and composite boundary inputs are validated before the corresponding database operation; the CLI rejects invalid batch/chunk flags before config or rules files are read. Comparison errors now propagate through the `diff-data` Cobra command.
 
-The migration discovery, ledger, locking, checksum, and execution behavior delivered by commit `697b398` for issue #2 was not changed.
+The opt-in chunk-hash path only skips row comparison after exact source/target count, minimum primary key, and maximum primary key checks, followed by matching probabilistic fingerprints for every chunk. The first range is unbounded below and the last is unbounded above. Hash row encodings distinguish NULL, empty values, and concatenation boundaries.
+
+Migration behavior from issue #2/commit `697b398` and `exec-sql` behavior from issue #3/commit `ed79f25` were not changed.
 
 ## Changed files
 
-- `internal/datasmith/exec/exec_sql.go` — raw-script execution, preflight validation, PostgreSQL/MySQL dry-run behavior, single-shot diagnostics, and Unicode-safe PostgreSQL error positions.
-- `internal/datasmith/exec/sql_scanner.go` — lightweight dialect-aware lexical scanner and transaction/MySQL DML validation.
-- `internal/datasmith/exec/exec_sql_safety_test.go` — SQL-mock execution-count, exact-text, transaction, rollback, pre-mutation rejection, and error-location tests.
-- `internal/datasmith/exec/sql_scanner_test.go` — table-driven scanner/validator cases plus fuzz coverage.
-- `docs/remediation-plan.md`, `docs/remediation-handoff.md` — Session 2 evidence, risks, and Session 3 prompt.
+- `pkg/diff/value_comparator.go` — exact integer and arbitrary-precision decimal comparison plus float-only tolerance and NaN/Inf handling.
+- `pkg/diff/data.go` — preflight validation, verified hash statistics, unbounded first range consumption, and hash/cursor error propagation.
+- `pkg/chunk/chunk.go` — additive `ChunkStats` and `VerifiedChunkHasher`; existing `ChunkHasher` remains unchanged.
+- `pkg/db/postgres/postgres.go`, `pkg/db/mysql/mysql.go` — input validation, `Rows.Err()` checks, exact chunk stats, unbounded ranges, and NULL/empty-safe fingerprints.
+- `internal/datasmith/diff/diff_data.go` — flag/rule preflight, `RunE` error propagation, and explicit probabilistic `--chunk-hash` help text.
+- `pkg/diff/data_test.go` — typed mock column metadata.
+- `pkg/diff/exact_comparison_test.go` — BIGINT, unsigned, decimal, NaN/Inf, NULL/empty, low-key, verified-hash, range, and preflight regressions.
+- `pkg/db/postgres/data_safety_test.go`, `pkg/db/mysql/data_safety_test.go` — interrupted cursor and no-query-on-invalid-input regressions; PostgreSQL also covers unbounded hash range SQL and NULL markers.
+- `internal/datasmith/diff/diff_data_validation_test.go` — CLI size and rule-key preflight regressions.
+- `docs/remediation-plan.md`, `docs/remediation-handoff.md` — Session 3 evidence, risks, and Session 4 prompt.
 
-Unrelated and preserved: tracked `datasmith` exists as a modified zero-byte file, and `CODE_REVIEW_REPORT.md` remains untracked. Neither is staged or included in Session 2 work.
+Unrelated and preserved: tracked `datasmith` exists, is zero bytes, and remains status `M`; `CODE_REVIEW_REPORT.md` remains untracked. Neither is staged or included in Session 3 work.
 
 ## Acceptance evidence
 
-- No diagnostic replay: `TestExecuteSQLFailureDoesNotReexecuteSQL` expects exactly one `Exec`, no diagnostic `Begin`, and verifies `errors.Is` against the original driver error.
-- No SQL rewriting: exact SQL-mock expectations in `TestExecuteSQLPostgresDryRunExecutesOriginalSQLAndRollsBack` and `TestExecuteSQLTransactionExecutesOriginalSQLAndCommits` include original whitespace and comments.
-- Safe lexical boundaries: `TestScanSQL`, `TestScanSQLUsesDialectSpecificLineComments`, and `TestScanSQLUsesDialectSpecificBackslashEscapes` cover strings, quoted identifiers, backticks, comments, nested/non-nested block-comment rules, semicolons, tagged/untagged dollar quotes, and transaction words inside inert regions.
-- Explicit transactions rejected before database work: `TestValidateNoTransactionControl` and `TestExecuteSQLRejectsExplicitTransactionBeforeBegin` cover standard, savepoint, PostgreSQL alias/prepared, and MySQL XA controls.
-- PostgreSQL dry-run: one exact-text `tx.Exec`, followed by rollback.
-- MySQL dry-run: `TestExecuteSQLMySQLDryRunRejectsDDLBeforeMutation` proves the full script is rejected before `Begin`; the allowlist test proves transactional DML executes once and rolls back. Executable comments and SQL-mode-dependent quote ambiguity are separately rejected before `Begin`.
-- Safe failure location: exact PostgreSQL character positions map across multibyte text; generic errors retain the driver error and report a safe candidate range. If lexical scanning fails, non-transaction mode still submits the raw script once and explicitly reports that a safe location is unavailable.
+- Adjacent BIGINT values above 2^53: `TestValueComparatorExactNumericSemantics/bigint_beyond_2^53` compares `9007199254740992` and `9007199254740993` as distinct and ordered.
+- Unsigned and decimal precision: the same table covers `uint64(math.MaxUint64)`, high-precision decimal adjacency, trailing-zero equivalence, and proof that decimal values do not receive float tolerance.
+- NaN and infinities: float NaN equals float NaN; equal infinities compare equal; negative infinity orders before positive; numeric `NaN`, `Infinity`, and `+Inf` aliases are covered.
+- Source `{0,1}` versus target `{1}`: `TestStreamCompareDataReportsZeroPrimaryKey` records dropped primary key `0`.
+- Boundary, NULL/empty, and composite keys: verified hash tests assert a nil lower bound for the first chunk; `TestValueComparatorExactNumericSemantics` keeps NULL distinct from empty; existing multi-column primary-key coverage and new mismatched-boundary validation exercise composite keys.
+- Cursor interruption: SQL-mock `RowError` tests for both adapters assert the original error is returned. All cursor loops in both adapters now check `Rows.Err()`; the migration cursor already did. `diff-data` returns comparison failures through `RunE`.
+- Invalid sizes before work: streaming APIs reject non-positive batches before schema extraction, adapter batch methods reject invalid sizes/keys before `Query`, and CLI validation runs before config/rules reads. Chunk size is rejected before stats/range/hash calls.
+- Hash safety: `VerifiedChunkHasher` is required for skipping. Count/min/max mismatch prevents hashing and forces row comparison; equal stats plus matching fingerprints can skip. Source `{0,1}` versus target `{1}` therefore cannot hide key `0`.
 
 ## Exact verification results
 
-Baseline before Session 2 changes:
+Baseline before Session 3 changes:
 
-- `go test ./...` — PASS
-- `go test -race ./...` — PASS
-- `go vet ./...` — PASS
-
-Final Session 2 verification:
-
-- `go test ./internal/datasmith/exec -count=1 -run '^(TestScanSQL|TestScanSQLReportsUnterminatedConstructs|TestScanSQLUsesDialectSpecificLineComments|TestScanSQLUsesDialectSpecificBackslashEscapes|TestValidateNoTransactionControl|TestValidateMySQLDryRun|TestExecuteSQL)' -v` — PASS
-- `go test ./internal/datasmith/exec -run '^$' -fuzz '^FuzzScanSQL$' -fuzztime=2s` — PASS
 - `go test ./... -count=1` — PASS
 - `go test -race ./... -count=1` — PASS
 - `go vet ./...` — PASS
+
+Final Session 3 verification:
+
+- `GOCACHE=/tmp/data-smith-go-cache go test ./pkg/diff ./pkg/db/postgres ./pkg/db/mysql ./internal/datasmith/diff -count=1` — PASS
+- `GOCACHE=/tmp/data-smith-go-cache go test ./... -count=1` — PASS
+- `GOCACHE=/tmp/data-smith-go-cache go test -race ./... -count=1` — PASS
+- `GOCACHE=/tmp/data-smith-go-cache go vet ./...` — PASS
 - `git diff --check` — PASS
 
-## Scanner limits and compatibility
+Protected-file evidence after final verification:
 
-- This is a lexical safety scanner, not a full SQL grammar. It does not model client-side `DELIMITER`, PostgreSQL `COPY ... FROM STDIN` payloads, or every procedural dialect; transaction/dry-run mode rejects ambiguous input rather than altering it.
-- PostgreSQL dollar quotes support `$$` and identifier-like tags. PostgreSQL nested block comments and `E'...'` escapes are recognized.
-- MySQL uses its own `#`, whitespace-sensitive `--`, non-nested block-comment, and backslash rules. Executable version comments are rejected in transactional modes. Because server `NO_BACKSLASH_ESCAPES` cannot be inferred safely without a live session query, mode-dependent quote forms are rejected; doubled quotes remain supported.
-- MySQL dry-run permits only `INSERT`, `UPDATE`, `DELETE`, `REPLACE`, and `WITH` whose top-level command resolves to one of those. Rollback also requires transactional table engines; the command does not inspect table engines.
-- `ExecuteSQL` keeps its exported signature. Non-transaction scripts that the scanner cannot fully classify are still sent once to the driver; only transaction/dry-run requires successful safety scanning.
-- No issue #2 migration API or behavior changed.
+- `datasmith` — present, size `0`, tracked status `M`.
+- `CODE_REVIEW_REPORT.md` — present, size `21194`, untracked status `??`.
+- `git diff --cached --name-only` — empty; nothing was staged.
+
+## Comparison, hash, and compatibility limits
+
+- Float/double/real retains the existing absolute `1e-9` tolerance. Integer and decimal/numeric never use it. A database driver must expose exact integer/decimal data as integer or text/bytes; precision already lost upstream in a `float64` cannot be reconstructed.
+- Decimal/numeric finite values are parsed exactly, including exponents. Special values have the stable order `-Infinity < finite < Infinity < NaN`; two NaNs compare equal for diff purposes.
+- Chunk hashes are probabilistic fingerprints, not an equivalence proof. PostgreSQL uses nested MD5; MySQL uses XOR-combined CRC32, which is weaker and order-insensitive. Exact count/min/max checks rule out common range omissions but not collisions or concurrent changes.
+- Stats, range discovery, and hashes are not read under a shared cross-database snapshot. Concurrent writes can make a run internally inconsistent; leave `--chunk-hash` off when this risk is unacceptable.
+- `--chunk-hash` remains opt-in. Existing third-party `ChunkHasher` implementations still compile, but safely fall back to row comparison unless they also implement the additive `VerifiedChunkHasher` statistics method.
+- Exported comparison and streaming function signatures are unchanged. `CompareValues`/`AreValuesEqual` now intentionally provide exact semantics for integer and decimal types. The built-in MySQL/PostgreSQL adapters add `GetChunkStats` without changing `DBAdapter`.
+- Live PostgreSQL/MySQL comparison E2E remains deferred to issue #9. Session 3 evidence is deterministic in-memory and SQL-mock coverage plus full repository test/race/vet.
 
 ## Blockers and residual risks
 
-- No blocker remains for issue #3.
-- Live PostgreSQL/MySQL coverage is deferred to issue #9; Session 2 evidence is deterministic SQL-mock plus full repository test/race/vet.
-- MySQL storage-engine transactional capability cannot be proven from SQL text alone. Operators must use transactional engines for dry-run rollback guarantees.
+- No blocker remains for issue #4.
+- Schema qualification, identifier quoting, deterministic SQL ordering, dependency ordering, and TABLE↔VIEW transitions are intentionally deferred to issue #5.
+- Fail-fast behavior for other CLI paths and atomic output-file replacement remain issue #6; Session 3 only made `diff-data` comparison/cursor failures observable as command errors.
+- Output files may contain partial results if a later table fails; issue #6 owns atomic output semantics.
 
-## Copy/paste prompt for independent Session 3
+## Copy/paste prompt for independent Session 4 / Issue #5
 
 ```text
-You are the only code execution session for DataSmith remediation Session 3. Work directly in the saved local checkout:
+You are the only code execution session for DataSmith remediation Session 4. Work directly in the saved local checkout:
 
 /Users/xiaogang/github/jacktea/data-smith
 
@@ -73,31 +88,37 @@ GitHub:
 - Epic #1: https://github.com/jacktea/data-smith/issues/1
 - Completed dependency #2: https://github.com/jacktea/data-smith/issues/2
 - Completed dependency #3: https://github.com/jacktea/data-smith/issues/3
-- This task #4: https://github.com/jacktea/data-smith/issues/4
-- Next task #5: https://github.com/jacktea/data-smith/issues/5
+- Completed dependency #4: https://github.com/jacktea/data-smith/issues/4
+- This task #5: https://github.com/jacktea/data-smith/issues/5
+- Next task #6: https://github.com/jacktea/data-smith/issues/6
+
+Committed baseline before Session 3:
+- Issue #2: 697b398 fix: harden migration execution
+- Issue #3: ed79f25 fix: make exec sql handling safe
+Session 3 / Issue #4 changes may still be uncommitted when you start. Preserve them exactly; inspect the working tree and this handoff rather than assuming commit state.
 
 Required baseline and preservation rules:
-1. Read every applicable AGENTS.md (if any), Epic #1, Issue #4, current git status, docs/remediation-plan.md, and docs/remediation-handoff.md before editing.
-2. Preserve all completed #2 and #3 work. Do not revert, rewrite, or broaden migration discovery/ledger/locking/checksum behavior or exec-sql scanner/transaction/dry-run behavior.
-3. The tracked datasmith file must remain present, zero bytes, and status M. CODE_REVIEW_REPORT.md must remain untracked. Do not delete, overwrite, stage, or commit either user artifact. If a full-suite command overwrites datasmith, restore it only to the exact pre-session state: present, zero bytes, M.
+1. Read every applicable AGENTS.md (if any), Epic #1, Issue #5, current git status, docs/remediation-plan.md, and docs/remediation-handoff.md before editing.
+2. Preserve all completed #2, #3, and #4 behavior. Do not revert, rewrite, or broaden migration discovery/ledger/locking/checksum, exec-sql scanner/transaction/dry-run, or exact comparison/verified chunk-hash semantics.
+3. The tracked datasmith file must remain present, zero bytes, and status M. CODE_REVIEW_REPORT.md must remain untracked. Do not delete, overwrite, stage, or commit either user artifact. If a full-suite command overwrites datasmith, restore only its exact protected state: present, zero bytes, M.
 4. Do not create a worktree, switch branches, commit, push, or create a pull request. The scheduler will inspect and decide later Git operations.
 5. Establish go test, race, and vet baselines before changing code and distinguish pre-existing failures from regressions.
 
-Issue #4 scope:
-- Compare integer/BIGINT exactly, decimal/numeric with arbitrary precision, and reserve tolerances for float/double.
-- Cover values beyond 2^53, unsigned integers, high-precision decimals, NaN, and Inf.
-- Check rows.Err() after every database cursor loop.
-- Validate batch size, chunk size, and key inputs before database or file work.
-- Make the first hash chunk unbounded below and validate count/min/max before hash-based skipping.
-- Keep --chunk-hash opt-in and document its probabilistic fingerprint behavior.
-- Add boundary, NULL/empty, composite-key, interrupted-cursor, and hash-range regression tests.
+Issue #5 complete scope:
+- Centralize dialect identifier quoting and qualified table names, including embedded quote escaping.
+- Use qualified names in data reads and INSERT/UPDATE/DELETE generation.
+- Model TABLE↔VIEW transitions as drop + create.
+- Create new tables without foreign keys, then add foreign keys after all tables exist.
+- Topologically order table deletion, foreign keys, and view creation; detect dependency cycles.
+- Stabilize ordering of tables, columns, indexes, foreign keys, and output SQL.
+- Add golden tests for non-public schemas, reserved/mixed-case names, mutual table references, view chains, transitions, and rollback.
 
 Acceptance criteria to prove individually:
-- Adjacent BIGINT values beyond 2^53 never compare equal.
-- Source {0,1} versus target {1} reports primary key 0.
-- Cursor failures propagate as command errors.
-- Invalid batch sizes fail before comparison/database/file work.
-- Focused tests pass.
+- Generated PostgreSQL data SQL works outside public.
+- Added related tables do not depend on Go map iteration order.
+- Repeated generation is byte-for-byte identical.
+- Object type transitions produce executable changes.
+- Focused and golden tests pass.
 - go test ./... passes.
 - go test -race ./... passes.
 - go vet ./... passes.
@@ -105,14 +126,13 @@ Acceptance criteria to prove individually:
 - datasmith and CODE_REVIEW_REPORT.md retain their exact protected states.
 
 Non-goals and constraints:
-- Do not start issue #5.
-- Keep --chunk-hash opt-in; do not represent probabilistic hashes as proof of equality without count/min/max validation.
-- Preserve exported APIs where practical and use no real credentials.
-- If completion requires a live database, external permission, a product decision, or a destructive action, stop and request the user's decision.
+- Do not start issue #6. In particular, do not expand into general CLI fail-fast or atomic output-file work beyond what is strictly required by #5.
+- Preserve exported APIs where practical. Do not weaken #4 exact numeric comparison, count/min/max hash gating, unbounded-first-range behavior, cursor error propagation, or preflight validation.
+- Use no real credentials. If completion requires a live database, external permission, a product decision, or a destructive action, stop and request the user's decision.
 
 Session handoff requirements:
-- Update docs/remediation-plan.md with Session 3 status, acceptance evidence, risks, and remaining #5→#9 order.
-- Replace docs/remediation-handoff.md with the latest Session 3 summary, changed files, exact commands/results, comparison/hash limitations, compatibility notes, blockers/risks, protected-file evidence, and a complete copy/paste prompt for independent Issue #5.
-- Post a concise but complete GitHub Issue #4 update with correctness cases, changed files, exact test commands/results, remaining hash limitations, blockers, and the Issue #5 prompt. Close #4 only if every acceptance criterion is satisfied; otherwise leave it open and state the gaps.
-- Final response must list completed work, changed files, per-criterion evidence, test results, residual risks, Issue #4 status, issue-update link, and the fallback Issue #5 prompt.
+- Update docs/remediation-plan.md with Session 4 status, per-criterion evidence, risks, and remaining #6→#9 order.
+- Replace docs/remediation-handoff.md with the latest Session 4 summary, changed files, exact commands/results, dependency/ordering decisions, compatibility notes, blockers/risks, protected-file evidence, and a complete copy/paste prompt for independent Issue #6.
+- Post a concise but complete GitHub Issue #5 update with dependency decisions, golden-test evidence, exact test commands/results, remaining limitations/blockers, and the Issue #6 prompt. Close #5 only if every acceptance criterion is satisfied; otherwise leave it open and state the gaps.
+- Final response must list completed work, changed files, per-criterion evidence, test results, residual risks, Issue #5 status, issue-update link, and the fallback Issue #6 prompt.
 ```

@@ -11,12 +11,18 @@ import (
 type DetailedDiffHandler func(diffType DiffType, srcRow, tgtRow conn.Record, diffCols []string)
 
 func StreamCompareData(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize int, handle func(diffType DiffType, srcRow, tgtRow conn.Record)) error {
+	if handle == nil {
+		return fmt.Errorf("diff handler is required")
+	}
 	return StreamCompareDataDetailed(srcDB, tgtDB, rule, batchSize, func(diffType DiffType, srcRow, tgtRow conn.Record, diffCols []string) {
 		handle(diffType, srcRow, tgtRow)
 	})
 }
 
 func StreamCompareDataDetailed(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize int, handle DetailedDiffHandler) error {
+	if err := validateCompareInputs(srcDB, tgtDB, rule, batchSize, handle); err != nil {
+		return err
+	}
 	cols, pks, colTypes, err := getTableColumnsAndTypes(tgtDB, rule.GetTable())
 	if err != nil {
 		return err
@@ -124,28 +130,65 @@ func StreamCompareDataToDiff(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, bat
 
 // StreamCompareDataWithChunkFilter 带有分块哈希预过滤的流式数据比对
 func StreamCompareDataWithChunkFilter(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize, chunkSize int, handle DetailedDiffHandler) error {
+	if err := validateCompareInputs(srcDB, tgtDB, rule, batchSize, handle); err != nil {
+		return err
+	}
+	if chunkSize <= 0 {
+		return fmt.Errorf("chunk size must be greater than zero")
+	}
 	srcCfg := srcDB.GetConfig()
 	tgtCfg := tgtDB.GetConfig()
 
 	if srcCfg != nil && tgtCfg != nil && srcCfg.Type == tgtCfg.Type {
-		srcHasher, srcOk := srcDB.(chunk.ChunkHasher)
-		tgtHasher, tgtOk := tgtDB.(chunk.ChunkHasher)
+		srcHasher, srcOk := srcDB.(chunk.VerifiedChunkHasher)
+		tgtHasher, tgtOk := tgtDB.(chunk.VerifiedChunkHasher)
 		if srcOk && tgtOk {
-			cols, pks, _, err := getTableColumnsAndTypes(tgtDB, rule.GetTable())
-			if err == nil && len(pks) == 1 {
-				ranges, err := tgtHasher.GetChunkRanges(rule.GetTable(), pks[0], chunkSize)
-				if err == nil && len(ranges) > 0 {
+			cols, pks, colTypes, err := getTableColumnsAndTypes(tgtDB, rule.GetTable())
+			if err != nil {
+				return err
+			}
+			if len(pks) == 1 {
+				pk := pks[0]
+				srcStats, err := srcHasher.GetChunkStats(rule.GetTable(), pk)
+				if err != nil {
+					return fmt.Errorf("get source chunk stats: %w", err)
+				}
+				tgtStats, err := tgtHasher.GetChunkStats(rule.GetTable(), pk)
+				if err != nil {
+					return fmt.Errorf("get target chunk stats: %w", err)
+				}
+				statsMatch := srcStats.Count == tgtStats.Count &&
+					CompareValues(srcStats.MinPK, tgtStats.MinPK, colTypes[pk]) == 0 &&
+					CompareValues(srcStats.MaxPK, tgtStats.MaxPK, colTypes[pk]) == 0
+				if statsMatch && tgtStats.Count == 0 {
+					log.Printf("Table %s: matching empty-table statistics, skipped row-level scan", rule.GetTable())
+					return nil
+				}
+				if statsMatch {
+					ranges, err := tgtHasher.GetChunkRanges(rule.GetTable(), pk, chunkSize)
+					if err != nil {
+						return fmt.Errorf("get target chunk ranges: %w", err)
+					}
+					if len(ranges) == 0 {
+						return fmt.Errorf("non-empty table %s returned no chunk ranges", rule.GetTable())
+					}
 					allMatched := true
 					for _, r := range ranges {
-						srcHash, err1 := srcHasher.GetChunkHash(rule.GetTable(), cols, pks[0], r.MinPK, r.MaxPK, r.IsLast)
-						tgtHash, err2 := tgtHasher.GetChunkHash(rule.GetTable(), cols, pks[0], r.MinPK, r.MaxPK, r.IsLast)
-						if err1 != nil || err2 != nil || srcHash != tgtHash {
+						srcHash, err := srcHasher.GetChunkHash(rule.GetTable(), cols, pk, r.MinPK, r.MaxPK, r.IsLast)
+						if err != nil {
+							return fmt.Errorf("hash source chunk %d: %w", r.ChunkIndex, err)
+						}
+						tgtHash, err := tgtHasher.GetChunkHash(rule.GetTable(), cols, pk, r.MinPK, r.MaxPK, r.IsLast)
+						if err != nil {
+							return fmt.Errorf("hash target chunk %d: %w", r.ChunkIndex, err)
+						}
+						if srcHash != tgtHash {
 							allMatched = false
 							break
 						}
 					}
 					if allMatched {
-						log.Printf("Table %s: all %d chunks matched hash, skipped row-level scan", rule.GetTable(), len(ranges))
+						log.Printf("Table %s: count/min/max and all %d probabilistic chunk fingerprints matched; skipped row-level scan", rule.GetTable(), len(ranges))
 						return nil
 					}
 				}
@@ -256,6 +299,12 @@ func extractPK(row conn.Record, pk []string) []any {
 
 // getTableColumnsAndTypes 获取表的列、主键及字段类型映射
 func getTableColumnsAndTypes(db conn.DBAdapter, table string) ([]string, []string, map[string]string, error) {
+	if db == nil {
+		return nil, nil, nil, fmt.Errorf("database adapter is required")
+	}
+	if table == "" {
+		return nil, nil, nil, fmt.Errorf("table name is required")
+	}
 	tbl, err := db.ExtractTable(table)
 	if err != nil {
 		return nil, nil, nil, err
@@ -296,6 +345,25 @@ func getTableColumnsAndTypes(db conn.DBAdapter, table string) ([]string, []strin
 		return nil, nil, nil, fmt.Errorf("primary key or not-null unique index required for table %s", table)
 	}
 	return cols, pks, colTypes, nil
+}
+
+func validateCompareInputs(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize int, handle DetailedDiffHandler) error {
+	if batchSize <= 0 {
+		return fmt.Errorf("batch size must be greater than zero")
+	}
+	if srcDB == nil || tgtDB == nil {
+		return fmt.Errorf("source and target database adapters are required")
+	}
+	if rule == nil {
+		return fmt.Errorf("comparison rule is required")
+	}
+	if rule.GetTable() == "" {
+		return fmt.Errorf("comparison table is required")
+	}
+	if handle == nil {
+		return fmt.Errorf("diff handler is required")
+	}
+	return nil
 }
 
 // getTableColumns 获取表的列和主键（保留向后兼容）

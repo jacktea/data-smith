@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 	"time"
@@ -36,28 +37,22 @@ func CompareValues(valA, valB any, colType string) int {
 
 	normA := normalizeBytesToString(valA)
 	normB := normalizeBytesToString(valB)
+	lowerType := strings.ToLower(colType)
 
-	// 1. 若两边均为纯 []byte（且未转为 string），按字节字典序比对
+	// 1. 真正的二进制字段按字节字典序比对。数据库驱动常用 []byte
+	// 返回 numeric/decimal，不能在类型感知比较前走二进制分支。
 	if bA, okA := valA.([]byte); okA {
 		if bB, okB := valB.([]byte); okB {
-			return bytes.Compare(bA, bB)
+			if !isNumericColType(lowerType) && !isTimeColType(lowerType) && !isBoolColType(lowerType) {
+				return bytes.Compare(bA, bB)
+			}
 		}
 	}
 
-	lowerType := strings.ToLower(colType)
-
-	// 2. 数值类型比对（整型、浮点、Decimal、Serial 等）
-	isNumericType := isNumericColType(lowerType)
-	fA, isNumA := tryToFloat(normA)
-	fB, isNumB := tryToFloat(normB)
-	if (isNumericType && isNumA && isNumB) || (isNumA && isNumB && isNumericGoType(normA) && isNumericGoType(normB)) {
-		if math.Abs(fA-fB) < 1e-9 {
-			return 0
-		}
-		if fA < fB {
-			return -1
-		}
-		return 1
+	// 2. 数值类型比对。整数和 decimal/numeric 保持精度；只有
+	// float/double/real 使用 float64 容差。
+	if cmp, ok := compareNumericValues(normA, normB, lowerType); ok {
+		return cmp
 	}
 
 	// 3. 时间类型比对
@@ -123,17 +118,16 @@ func AreValuesEqual(valA, valB any, colType string) bool {
 	// 2. 二进制比对
 	bA, okA := valA.([]byte)
 	bB, okB := valB.([]byte)
-	if okA && okB && !strings.Contains(lowerType, "char") && !strings.Contains(lowerType, "text") && !strings.Contains(lowerType, "json") {
+	if okA && okB && !strings.Contains(lowerType, "char") && !strings.Contains(lowerType, "text") && !strings.Contains(lowerType, "json") && !isNumericColType(lowerType) && !isTimeColType(lowerType) && !isBoolColType(lowerType) {
 		return bytes.Equal(bA, bB)
 	}
 
-	// 3. 数值比较（消除 1.50 与 1.5 的字符串表示差异）
+	// 3. 数值比较（消除 1.50 与 1.5 的字符串表示差异，同时避免
+	// BIGINT 和高精度 decimal 被降为 float64）。
 	normA := normalizeBytesToString(valA)
 	normB := normalizeBytesToString(valB)
-	fA, isNumA := tryToFloat(normA)
-	fB, isNumB := tryToFloat(normB)
-	if isNumA && isNumB && (isNumericColType(lowerType) || (isNumericGoType(normA) && isNumericGoType(normB))) {
-		return math.Abs(fA-fB) < 1e-9
+	if cmp, ok := compareNumericValues(normA, normB, lowerType); ok {
+		return cmp == 0
 	}
 
 	// 4. 时间比较
@@ -164,14 +158,215 @@ func normalizeBytesToString(v any) any {
 }
 
 func isNumericColType(t string) bool {
-	return strings.Contains(t, "int") ||
-		strings.Contains(t, "float") ||
-		strings.Contains(t, "double") ||
-		strings.Contains(t, "decimal") ||
-		strings.Contains(t, "numeric") ||
-		strings.Contains(t, "real") ||
-		strings.Contains(t, "serial") ||
-		strings.Contains(t, "number")
+	return numericColumnKind(t) != numericKindNone
+}
+
+type numericKind uint8
+
+const (
+	numericKindNone numericKind = iota
+	numericKindInteger
+	numericKindDecimal
+	numericKindFloat
+)
+
+func numericColumnKind(t string) numericKind {
+	base := strings.TrimSpace(t)
+	if fields := strings.Fields(base); len(fields) > 0 {
+		base = fields[0]
+	}
+	if i := strings.IndexByte(base, '('); i >= 0 {
+		base = base[:i]
+	}
+	switch {
+	case strings.Contains(base, "float"), base == "double", base == "real":
+		return numericKindFloat
+	case base == "decimal", base == "numeric", base == "number":
+		return numericKindDecimal
+	case base == "integer", strings.HasSuffix(base, "int"), strings.HasSuffix(base, "serial"):
+		return numericKindInteger
+	default:
+		return numericKindNone
+	}
+}
+
+func compareNumericValues(a, b any, colType string) (int, bool) {
+	kind := numericColumnKind(colType)
+	if kind == numericKindNone && isNumericGoType(a) && isNumericGoType(b) {
+		kind = numericKindInteger
+		if isFloatGoType(a) || isFloatGoType(b) {
+			kind = numericKindFloat
+		}
+	}
+
+	switch kind {
+	case numericKindInteger:
+		aInt, okA := tryToBigInt(a)
+		bInt, okB := tryToBigInt(b)
+		if okA && okB {
+			return aInt.Cmp(bInt), true
+		}
+	case numericKindDecimal:
+		return compareExactDecimals(a, b)
+	case numericKindFloat:
+		aFloat, okA := tryToFloat(a)
+		bFloat, okB := tryToFloat(b)
+		if okA && okB {
+			return compareFloats(aFloat, bFloat), true
+		}
+	}
+	return 0, false
+}
+
+func tryToBigInt(v any) (*big.Int, bool) {
+	var s string
+	switch val := v.(type) {
+	case int:
+		s = strconv.FormatInt(int64(val), 10)
+	case int8:
+		s = strconv.FormatInt(int64(val), 10)
+	case int16:
+		s = strconv.FormatInt(int64(val), 10)
+	case int32:
+		s = strconv.FormatInt(int64(val), 10)
+	case int64:
+		s = strconv.FormatInt(val, 10)
+	case uint:
+		s = strconv.FormatUint(uint64(val), 10)
+	case uint8:
+		s = strconv.FormatUint(uint64(val), 10)
+	case uint16:
+		s = strconv.FormatUint(uint64(val), 10)
+	case uint32:
+		s = strconv.FormatUint(uint64(val), 10)
+	case uint64:
+		s = strconv.FormatUint(val, 10)
+	case string:
+		s = strings.TrimSpace(val)
+	default:
+		return nil, false
+	}
+	z, ok := new(big.Int).SetString(s, 10)
+	return z, ok
+}
+
+// compareExactDecimals uses big.Rat for finite decimal/numeric values. The
+// rank also gives PostgreSQL/MySQL special numeric values a stable total order:
+// -Infinity < finite < Infinity < NaN.
+func compareExactDecimals(a, b any) (int, bool) {
+	aRat, aRank, okA := tryToExactDecimal(a)
+	bRat, bRank, okB := tryToExactDecimal(b)
+	if !okA || !okB {
+		return 0, false
+	}
+	if aRank != bRank {
+		if aRank < bRank {
+			return -1, true
+		}
+		return 1, true
+	}
+	if aRank != 1 {
+		return 0, true
+	}
+	return aRat.Cmp(bRat), true
+}
+
+func tryToExactDecimal(v any) (*big.Rat, int, bool) {
+	if rank, ok := specialNumberRank(v); ok {
+		return nil, rank, true
+	}
+	var s string
+	switch val := v.(type) {
+	case int:
+		s = strconv.FormatInt(int64(val), 10)
+	case int8:
+		s = strconv.FormatInt(int64(val), 10)
+	case int16:
+		s = strconv.FormatInt(int64(val), 10)
+	case int32:
+		s = strconv.FormatInt(int64(val), 10)
+	case int64:
+		s = strconv.FormatInt(val, 10)
+	case uint:
+		s = strconv.FormatUint(uint64(val), 10)
+	case uint8:
+		s = strconv.FormatUint(uint64(val), 10)
+	case uint16:
+		s = strconv.FormatUint(uint64(val), 10)
+	case uint32:
+		s = strconv.FormatUint(uint64(val), 10)
+	case uint64:
+		s = strconv.FormatUint(val, 10)
+	case float32:
+		s = strconv.FormatFloat(float64(val), 'g', -1, 32)
+	case float64:
+		s = strconv.FormatFloat(val, 'g', -1, 64)
+	case string:
+		s = strings.TrimSpace(val)
+	default:
+		return nil, 0, false
+	}
+	rat, ok := new(big.Rat).SetString(s)
+	return rat, 1, ok
+}
+
+func specialNumberRank(v any) (int, bool) {
+	var f float64
+	switch val := v.(type) {
+	case float32:
+		f = float64(val)
+	case float64:
+		f = val
+	case string:
+		s := strings.ToLower(strings.TrimSpace(val))
+		switch s {
+		case "-inf", "-infinity":
+			return 0, true
+		case "+inf", "inf", "+infinity", "infinity":
+			return 2, true
+		case "nan", "+nan", "-nan":
+			return 3, true
+		}
+		parsed, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return 0, false
+		}
+		f = parsed
+	default:
+		return 0, false
+	}
+	if math.IsInf(f, -1) {
+		return 0, true
+	}
+	if math.IsInf(f, 1) {
+		return 2, true
+	}
+	if math.IsNaN(f) {
+		return 3, true
+	}
+	return 0, false
+}
+
+func compareFloats(a, b float64) int {
+	if math.IsNaN(a) || math.IsNaN(b) {
+		if math.IsNaN(a) && math.IsNaN(b) {
+			return 0
+		}
+		if math.IsNaN(a) {
+			return 1
+		}
+		return -1
+	}
+	if a == b { // includes equal infinities and both signed zeroes
+		return 0
+	}
+	if !math.IsInf(a, 0) && !math.IsInf(b, 0) && math.Abs(a-b) < 1e-9 {
+		return 0
+	}
+	if a < b {
+		return -1
+	}
+	return 1
 }
 
 func isTimeColType(t string) bool {
@@ -187,6 +382,15 @@ func isBoolColType(t string) bool {
 func isNumericGoType(v any) bool {
 	switch v.(type) {
 	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		return true
+	default:
+		return false
+	}
+}
+
+func isFloatGoType(v any) bool {
+	switch v.(type) {
+	case float32, float64:
 		return true
 	default:
 		return false
