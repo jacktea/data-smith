@@ -60,6 +60,7 @@ func (t *Table) GetColumns() []string {
 	for col := range t.Columns {
 		cols = append(cols, col)
 	}
+	sort.Strings(cols)
 	return cols
 }
 
@@ -69,7 +70,10 @@ func (t *Table) GetColumnsByPosition() []*Column {
 		cols = append(cols, col)
 	}
 	sort.Slice(cols, func(i, j int) bool {
-		return cols[i].Position < cols[j].Position
+		if cols[i].Position != cols[j].Position {
+			return cols[i].Position < cols[j].Position
+		}
+		return cols[i].Name < cols[j].Name
 	})
 	return cols
 }

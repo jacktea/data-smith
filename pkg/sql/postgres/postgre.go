@@ -4,11 +4,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/jacktea/data-smith/pkg/conn"
-	"github.com/jacktea/data-smith/pkg/utils"
+	"github.com/jacktea/data-smith/pkg/sql/ident"
 )
 
 type postgreDialect struct {
@@ -21,15 +22,35 @@ func NewPostgreDialect() *postgreDialect {
 	}
 }
 
+func postgresSchema(schema string) string {
+	if schema == "" {
+		return "public"
+	}
+	return schema
+}
+
+func postgresTableName(t *conn.Table) string {
+	return ident.Qualified(ident.DoubleQuote, postgresSchema(t.Schema), t.Name)
+}
+
+func sortedIndexes(indexes map[string]*conn.Index) []*conn.Index {
+	result := make([]*conn.Index, 0, len(indexes))
+	for _, index := range indexes {
+		result = append(result, index)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result
+}
+
 func (d *postgreDialect) GenerateInsertSql(tbl *conn.Table, row conn.Record) string {
 	var colNames, values []string
 	cols := tbl.GetColumnsByPosition()
 	for _, col := range cols {
-		colNames = append(colNames, fmt.Sprintf("\"%s\"", col.Name))
+		colNames = append(colNames, ident.Quote(ident.DoubleQuote, col.Name))
 		val := row[col.Name]
 		values = append(values, d.escapedValue(col.DataType, val))
 	}
-	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", tbl.Name, strings.Join(colNames, ", "), strings.Join(values, ", "))
+	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", postgresTableName(tbl), strings.Join(colNames, ", "), strings.Join(values, ", "))
 }
 
 func (d *postgreDialect) GenerateDeleteSql(tbl *conn.Table, row conn.Record) string {
@@ -42,12 +63,12 @@ func (d *postgreDialect) GenerateDeleteSql(tbl *conn.Table, row conn.Record) str
 			colType = col.DataType
 		}
 		if val == nil {
-			where = append(where, fmt.Sprintf("\"%s\" IS NULL", k))
+			where = append(where, fmt.Sprintf("%s IS NULL", ident.Quote(ident.DoubleQuote, k)))
 		} else {
-			where = append(where, fmt.Sprintf("\"%s\" = %s", k, d.escapedValue(colType, val)))
+			where = append(where, fmt.Sprintf("%s = %s", ident.Quote(ident.DoubleQuote, k), d.escapedValue(colType, val)))
 		}
 	}
-	return fmt.Sprintf("DELETE FROM %s WHERE %s;", tbl.Name, strings.Join(where, " AND "))
+	return fmt.Sprintf("DELETE FROM %s WHERE %s;", postgresTableName(tbl), strings.Join(where, " AND "))
 }
 
 func (d *postgreDialect) GenerateUpdateSql(tbl *conn.Table, row conn.Record, updateCols []string) string {
@@ -65,7 +86,7 @@ func (d *postgreDialect) GenerateUpdateSql(tbl *conn.Table, row conn.Record, upd
 			continue
 		}
 		val := row[c]
-		set = append(set, fmt.Sprintf("\"%s\" = %s", c, d.escapedValue(col.DataType, val)))
+		set = append(set, fmt.Sprintf("%s = %s", ident.Quote(ident.DoubleQuote, c), d.escapedValue(col.DataType, val)))
 	}
 	if len(set) == 0 {
 		return ""
@@ -78,12 +99,12 @@ func (d *postgreDialect) GenerateUpdateSql(tbl *conn.Table, row conn.Record, upd
 			colType = col.DataType
 		}
 		if val == nil {
-			where = append(where, fmt.Sprintf("\"%s\" IS NULL", k))
+			where = append(where, fmt.Sprintf("%s IS NULL", ident.Quote(ident.DoubleQuote, k)))
 		} else {
-			where = append(where, fmt.Sprintf("\"%s\" = %s", k, d.escapedValue(colType, val)))
+			where = append(where, fmt.Sprintf("%s = %s", ident.Quote(ident.DoubleQuote, k), d.escapedValue(colType, val)))
 		}
 	}
-	return fmt.Sprintf("UPDATE %s SET %s WHERE %s;", tbl.Name, strings.Join(set, ", "), strings.Join(where, " AND "))
+	return fmt.Sprintf("UPDATE %s SET %s WHERE %s;", postgresTableName(tbl), strings.Join(set, ", "), strings.Join(where, " AND "))
 }
 
 func (d *postgreDialect) GenerateCreateIndexSql(t *conn.Table, idx *conn.Index) string {
@@ -111,11 +132,10 @@ func (d *postgreDialect) GenerateCreateIndexSql(t *conn.Table, idx *conn.Index) 
 		ddl.WriteString("UNIQUE ")
 	}
 
-	ddl.WriteString(fmt.Sprintf("INDEX \"%s\" ON ", idx.Name))
-	if t.Schema != "" && t.Schema != "public" {
-		ddl.WriteString(fmt.Sprintf("\"%s\".", t.Schema))
-	}
-	ddl.WriteString(fmt.Sprintf("\"%s\"", t.Name))
+	ddl.WriteString("INDEX ")
+	ddl.WriteString(ident.Quote(ident.DoubleQuote, idx.Name))
+	ddl.WriteString(" ON ")
+	ddl.WriteString(postgresTableName(t))
 
 	if idx.Method != "" && idx.Method != "btree" {
 		ddl.WriteString(fmt.Sprintf(" USING %s", idx.Method))
@@ -125,11 +145,7 @@ func (d *postgreDialect) GenerateCreateIndexSql(t *conn.Table, idx *conn.Index) 
 		ddl.WriteString(fmt.Sprintf(" (%s)", *idx.Expression))
 	} else if len(idx.Columns) > 0 {
 		ddl.WriteString(" (")
-		quotedCols := make([]string, len(idx.Columns))
-		for i, col := range idx.Columns {
-			quotedCols[i] = fmt.Sprintf("\"%s\"", col)
-		}
-		ddl.WriteString(strings.Join(quotedCols, ", "))
+		ddl.WriteString(ident.List(ident.DoubleQuote, idx.Columns, ", "))
 		ddl.WriteString(")")
 	}
 
@@ -144,10 +160,7 @@ func (d *postgreDialect) GenerateCreateIndexSql(t *conn.Table, idx *conn.Index) 
 func (d *postgreDialect) GenerateDropIndexSql(t *conn.Table, idx *conn.Index) string {
 	var ddl strings.Builder
 	ddl.WriteString("DROP INDEX ")
-	if t.Schema != "" && t.Schema != "public" {
-		ddl.WriteString(fmt.Sprintf("\"%s\".", t.Schema))
-	}
-	ddl.WriteString(fmt.Sprintf("\"%s\"", idx.Name))
+	ddl.WriteString(ident.Qualified(ident.DoubleQuote, postgresSchema(t.Schema), idx.Name))
 	ddl.WriteString(";")
 	return ddl.String()
 }
@@ -155,26 +168,23 @@ func (d *postgreDialect) GenerateDropIndexSql(t *conn.Table, idx *conn.Index) st
 func (d *postgreDialect) GenerateAddPrimaryKeySql(t *conn.Table, pk *conn.PrimaryKey) string {
 	var ddl strings.Builder
 	ddl.WriteString("ALTER TABLE ")
-	ddl.WriteString(fmt.Sprintf("\"%s\".", t.Schema))
-	ddl.WriteString(fmt.Sprintf("\"%s\" ADD CONSTRAINT \"%s\" PRIMARY KEY (%s);", t.Name, pk.Name, utils.JoinWrap(pk.Columns, "\"", ", ")))
+	ddl.WriteString(postgresTableName(t))
+	ddl.WriteString(fmt.Sprintf(" ADD CONSTRAINT %s PRIMARY KEY (%s);", ident.Quote(ident.DoubleQuote, pk.Name), ident.List(ident.DoubleQuote, pk.Columns, ", ")))
 	return ddl.String()
 }
 
 func (d *postgreDialect) GenerateDropPrimaryKeySql(t *conn.Table, pk *conn.PrimaryKey) string {
 	var ddl strings.Builder
 	ddl.WriteString("ALTER TABLE ")
-	ddl.WriteString(fmt.Sprintf("\"%s\".", t.Schema))
-	ddl.WriteString(fmt.Sprintf("\"%s\" DROP CONSTRAINT \"%s\";", t.Name, pk.Name))
+	ddl.WriteString(postgresTableName(t))
+	ddl.WriteString(fmt.Sprintf(" DROP CONSTRAINT %s;", ident.Quote(ident.DoubleQuote, pk.Name)))
 	return ddl.String()
 }
 
 func (d *postgreDialect) GenerateDropTableSql(t *conn.Table) string {
 	var ddl strings.Builder
 	ddl.WriteString("DROP TABLE ")
-	if t.Schema != "" && t.Schema != "public" {
-		ddl.WriteString(fmt.Sprintf("\"%s\".", t.Schema))
-	}
-	ddl.WriteString(fmt.Sprintf("\"%s\"", t.Name))
+	ddl.WriteString(postgresTableName(t))
 	ddl.WriteString(";")
 	return ddl.String()
 }
@@ -188,34 +198,12 @@ func (d *postgreDialect) GenerateTableDDL(t *conn.Table) string {
 
 	// CREATE TABLE语句
 	ddl.WriteString("CREATE TABLE ")
-	if t.Schema != "" && t.Schema != "public" {
-		ddl.WriteString(fmt.Sprintf("\"%s\".", t.Schema))
-	}
-	ddl.WriteString(fmt.Sprintf("\"%s\" (\n", t.Name))
-
-	// 按位置排序列
-	type colWithPos struct {
-		col *conn.Column
-		pos int
-	}
-	var sortedCols []colWithPos
-	for _, col := range t.Columns {
-		sortedCols = append(sortedCols, colWithPos{col, col.Position})
-	}
-
-	// 简单排序
-	for i := 0; i < len(sortedCols); i++ {
-		for j := i + 1; j < len(sortedCols); j++ {
-			if sortedCols[i].pos > sortedCols[j].pos {
-				sortedCols[i], sortedCols[j] = sortedCols[j], sortedCols[i]
-			}
-		}
-	}
+	ddl.WriteString(postgresTableName(t))
+	ddl.WriteString(" (\n")
 
 	// 添加列定义
 	var columnDefs []string
-	for _, colPos := range sortedCols {
-		col := colPos.col
+	for _, col := range t.GetColumnsByPosition() {
 		columnDefs = append(columnDefs, d.converter.GenerateColumnDDL(col))
 	}
 
@@ -223,27 +211,38 @@ func (d *postgreDialect) GenerateTableDDL(t *conn.Table) string {
 	if t.PrimaryKey != nil && len(t.PrimaryKey.Columns) > 0 {
 		pkCols := make([]string, len(t.PrimaryKey.Columns))
 		for i, col := range t.PrimaryKey.Columns {
-			pkCols[i] = fmt.Sprintf("\"%s\"", col)
+			pkCols[i] = ident.Quote(ident.DoubleQuote, col)
 		}
-		constraintDef := fmt.Sprintf("  CONSTRAINT \"%s\" PRIMARY KEY (%s)",
-			t.PrimaryKey.Name, strings.Join(pkCols, ", "))
+		constraintDef := fmt.Sprintf("  CONSTRAINT %s PRIMARY KEY (%s)",
+			ident.Quote(ident.DoubleQuote, t.PrimaryKey.Name), strings.Join(pkCols, ", "))
 		columnDefs = append(columnDefs, constraintDef)
 	}
 
-	// 添加外键
-	for _, fk := range t.ForeignKeys {
+	// 添加外键。Schema generator 会为新表传入无外键副本，并在所有表
+	// 都存在之后单独添加；直接调用此 API 仍保留完整 DDL 行为。
+	fkNames := make([]string, 0, len(t.ForeignKeys))
+	for name := range t.ForeignKeys {
+		fkNames = append(fkNames, name)
+	}
+	sort.Strings(fkNames)
+	for _, name := range fkNames {
+		fk := t.ForeignKeys[name]
 		fkCols := make([]string, len(fk.Columns))
 		for i, col := range fk.Columns {
-			fkCols[i] = fmt.Sprintf("\"%s\"", col)
+			fkCols[i] = ident.Quote(ident.DoubleQuote, col)
 		}
 		refCols := make([]string, len(fk.ReferencedColumns))
 		for i, col := range fk.ReferencedColumns {
-			refCols[i] = fmt.Sprintf("\"%s\"", col)
+			refCols[i] = ident.Quote(ident.DoubleQuote, col)
 		}
 
-		constraintDef := fmt.Sprintf("  CONSTRAINT \"%s\" FOREIGN KEY (%s) REFERENCES \"%s\".\"%s\" (%s)",
-			fk.Name, strings.Join(fkCols, ", "),
-			fk.ReferencedSchema, fk.ReferencedTable,
+		refSchema := fk.ReferencedSchema
+		if refSchema == "" {
+			refSchema = postgresSchema(t.Schema)
+		}
+		constraintDef := fmt.Sprintf("  CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
+			ident.Quote(ident.DoubleQuote, fk.Name), strings.Join(fkCols, ", "),
+			ident.Qualified(ident.DoubleQuote, refSchema, fk.ReferencedTable),
 			strings.Join(refCols, ", "))
 
 		if fk.OnDelete != "" {
@@ -260,7 +259,7 @@ func (d *postgreDialect) GenerateTableDDL(t *conn.Table) string {
 	ddl.WriteString("\n);")
 
 	// 添加索引
-	for _, idx := range t.Indexes {
+	for _, idx := range sortedIndexes(t.Indexes) {
 		if idx.Primary {
 			continue // 主键索引已经在表定义中
 		}
@@ -271,17 +270,17 @@ func (d *postgreDialect) GenerateTableDDL(t *conn.Table) string {
 	}
 
 	// 添加列注释
-	for _, col := range t.Columns {
+	for _, col := range t.GetColumnsByPosition() {
 		if col.Comment != nil {
-			ddl.WriteString(fmt.Sprintf("\n\nCOMMENT ON COLUMN \"%s\".\"%s\".\"%s\" IS '%s';",
-				t.Schema, t.Name, col.Name, *col.Comment))
+			ddl.WriteString(fmt.Sprintf("\n\nCOMMENT ON COLUMN %s.%s IS '%s';",
+				postgresTableName(t), ident.Quote(ident.DoubleQuote, col.Name), strings.ReplaceAll(*col.Comment, "'", "''")))
 		}
 	}
 
 	// 添加表注释
 	if t.Comment != "" {
-		ddl.WriteString(fmt.Sprintf("\n\nCOMMENT ON TABLE \"%s\".\"%s\" IS '%s';",
-			t.Schema, t.Name, t.Comment))
+		ddl.WriteString(fmt.Sprintf("\n\nCOMMENT ON TABLE %s IS '%s';",
+			postgresTableName(t), strings.ReplaceAll(t.Comment, "'", "''")))
 	}
 
 	return ddl.String()
@@ -296,10 +295,8 @@ func (d *postgreDialect) GenerateViewDDL(t *conn.Table) string {
 
 	// 基本CREATE VIEW语句
 	ddl.WriteString("CREATE VIEW ")
-	if t.Schema != "" && t.Schema != "public" {
-		ddl.WriteString(fmt.Sprintf("\"%s\".", t.Schema))
-	}
-	ddl.WriteString(fmt.Sprintf("\"%s\" AS\n", t.Name))
+	ddl.WriteString(postgresTableName(t))
+	ddl.WriteString(" AS\n")
 
 	// 添加SELECT语句
 	ddl.WriteString(t.ViewDefinition.SelectStatement)
@@ -313,8 +310,8 @@ func (d *postgreDialect) GenerateViewDDL(t *conn.Table) string {
 
 	// 添加注释
 	if t.ViewDefinition.Comment != "" {
-		ddl.WriteString(fmt.Sprintf("\n\nCOMMENT ON VIEW \"%s\".\"%s\" IS '%s';",
-			t.Schema, t.Name, t.ViewDefinition.Comment))
+		ddl.WriteString(fmt.Sprintf("\n\nCOMMENT ON VIEW %s IS '%s';",
+			postgresTableName(t), strings.ReplaceAll(t.ViewDefinition.Comment, "'", "''")))
 	}
 
 	return ddl.String()
@@ -323,22 +320,17 @@ func (d *postgreDialect) GenerateViewDDL(t *conn.Table) string {
 func (d *postgreDialect) GenerateDropViewSql(t *conn.Table) string {
 	var ddl strings.Builder
 	ddl.WriteString("DROP VIEW ")
-	ddl.WriteString(fmt.Sprintf("\"%s\".", t.Schema))
-	ddl.WriteString(fmt.Sprintf("\"%s\"", t.Name))
+	ddl.WriteString(postgresTableName(t))
 	ddl.WriteString(";")
 	return ddl.String()
 }
 
 func (d *postgreDialect) GenerateAddColumnSql(t *conn.Table, col *conn.Column) string {
 	var ddl strings.Builder
-	schema := t.Schema
-	if schema == "" {
-		schema = "public"
-	}
-	ddl.WriteString(fmt.Sprintf("ALTER TABLE \"%s\".\"%s\" ADD COLUMN %s;", schema, t.Name, d.converter.GenerateColumnDDL(col)))
+	ddl.WriteString(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s;", postgresTableName(t), d.converter.GenerateColumnDDL(col)))
 	if col.Comment != nil && *col.Comment != "" {
-		ddl.WriteString(fmt.Sprintf("\nCOMMENT ON COLUMN \"%s\".\"%s\".\"%s\" IS '%s';",
-			schema, t.Name, col.Name, strings.ReplaceAll(*col.Comment, "'", "''")))
+		ddl.WriteString(fmt.Sprintf("\nCOMMENT ON COLUMN %s.%s IS '%s';",
+			postgresTableName(t), ident.Quote(ident.DoubleQuote, col.Name), strings.ReplaceAll(*col.Comment, "'", "''")))
 	}
 	return ddl.String()
 }
@@ -346,51 +338,47 @@ func (d *postgreDialect) GenerateAddColumnSql(t *conn.Table, col *conn.Column) s
 func (d *postgreDialect) GenerateDropColumnSql(t *conn.Table, col *conn.Column) string {
 	var ddl strings.Builder
 	ddl.WriteString("ALTER TABLE ")
-	ddl.WriteString(fmt.Sprintf("\"%s\".", t.Schema))
-	ddl.WriteString(fmt.Sprintf("\"%s\" DROP COLUMN ", t.Name))
-	ddl.WriteString(fmt.Sprintf("\"%s\"", col.Name))
+	ddl.WriteString(postgresTableName(t))
+	ddl.WriteString(" DROP COLUMN ")
+	ddl.WriteString(ident.Quote(ident.DoubleQuote, col.Name))
 	ddl.WriteString(";")
 	return ddl.String()
 }
 
 func (d *postgreDialect) GenerateAlterColumnSql(t *conn.Table, oldCol, newCol *conn.Column) string {
-	schema := t.Schema
-	if schema == "" {
-		schema = "public"
-	}
-	prefix := fmt.Sprintf("ALTER TABLE \"%s\".\"%s\"", schema, t.Name)
+	prefix := fmt.Sprintf("ALTER TABLE %s", postgresTableName(t))
 	var stmts []string
 
 	// 修改字段名
 	if oldCol.Name != newCol.Name {
-		stmts = append(stmts, fmt.Sprintf("%s RENAME COLUMN \"%s\" TO \"%s\";", prefix, oldCol.Name, newCol.Name))
+		stmts = append(stmts, fmt.Sprintf("%s RENAME COLUMN %s TO %s;", prefix, ident.Quote(ident.DoubleQuote, oldCol.Name), ident.Quote(ident.DoubleQuote, newCol.Name)))
 	}
 	// 修改字段类型
 	oldDataType := d.converter.ConvertType(oldCol)
 	newDataType := d.converter.ConvertType(newCol)
 	if oldDataType != newDataType {
-		suffix := fmt.Sprintf("USING \"%s\"::%s", newCol.Name, newDataType)
-		stmts = append(stmts, fmt.Sprintf("%s ALTER COLUMN \"%s\" TYPE %s %s;", prefix, newCol.Name, newDataType, suffix))
+		suffix := fmt.Sprintf("USING %s::%s", ident.Quote(ident.DoubleQuote, newCol.Name), newDataType)
+		stmts = append(stmts, fmt.Sprintf("%s ALTER COLUMN %s TYPE %s %s;", prefix, ident.Quote(ident.DoubleQuote, newCol.Name), newDataType, suffix))
 	}
 	// 修改默认值
 	if newCol.Default != nil && (oldCol.Default == nil || *newCol.Default != *oldCol.Default) {
-		stmts = append(stmts, fmt.Sprintf("%s ALTER COLUMN \"%s\" SET DEFAULT %s;", prefix, newCol.Name, *newCol.Default))
+		stmts = append(stmts, fmt.Sprintf("%s ALTER COLUMN %s SET DEFAULT %s;", prefix, ident.Quote(ident.DoubleQuote, newCol.Name), *newCol.Default))
 	} else if newCol.Default == nil && oldCol.Default != nil {
-		stmts = append(stmts, fmt.Sprintf("%s ALTER COLUMN \"%s\" DROP DEFAULT;", prefix, newCol.Name))
+		stmts = append(stmts, fmt.Sprintf("%s ALTER COLUMN %s DROP DEFAULT;", prefix, ident.Quote(ident.DoubleQuote, newCol.Name)))
 	}
 	// 修改为空状态
 	if oldCol.Nullable != newCol.Nullable {
 		if newCol.Nullable {
-			stmts = append(stmts, fmt.Sprintf("%s ALTER COLUMN \"%s\" DROP NOT NULL;", prefix, newCol.Name))
+			stmts = append(stmts, fmt.Sprintf("%s ALTER COLUMN %s DROP NOT NULL;", prefix, ident.Quote(ident.DoubleQuote, newCol.Name)))
 		} else {
-			stmts = append(stmts, fmt.Sprintf("%s ALTER COLUMN \"%s\" SET NOT NULL;", prefix, newCol.Name))
+			stmts = append(stmts, fmt.Sprintf("%s ALTER COLUMN %s SET NOT NULL;", prefix, ident.Quote(ident.DoubleQuote, newCol.Name)))
 		}
 	}
 	// 修改注释
 	if newCol.Comment != nil && (oldCol.Comment == nil || *newCol.Comment != *oldCol.Comment) {
-		stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN \"%s\".\"%s\".\"%s\" IS '%s';", schema, t.Name, newCol.Name, strings.ReplaceAll(*newCol.Comment, "'", "''")))
+		stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS '%s';", postgresTableName(t), ident.Quote(ident.DoubleQuote, newCol.Name), strings.ReplaceAll(*newCol.Comment, "'", "''")))
 	} else if newCol.Comment == nil && oldCol.Comment != nil {
-		stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN \"%s\".\"%s\".\"%s\" IS NULL;", schema, t.Name, newCol.Name))
+		stmts = append(stmts, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS NULL;", postgresTableName(t), ident.Quote(ident.DoubleQuote, newCol.Name)))
 	}
 
 	return strings.Join(stmts, "\n")
@@ -398,27 +386,16 @@ func (d *postgreDialect) GenerateAlterColumnSql(t *conn.Table, oldCol, newCol *c
 
 func (d *postgreDialect) GenerateAddForeignKeySql(t *conn.Table, fk *conn.ForeignKey) string {
 	var ddl strings.Builder
-	schema := t.Schema
-	if schema == "" {
-		schema = "public"
-	}
-	ddl.WriteString(fmt.Sprintf("ALTER TABLE \"%s\".\"%s\" ADD CONSTRAINT \"%s\" FOREIGN KEY (", schema, t.Name, fk.Name))
-	quotedCols := make([]string, len(fk.Columns))
-	for i, c := range fk.Columns {
-		quotedCols[i] = fmt.Sprintf("\"%s\"", c)
-	}
-	ddl.WriteString(strings.Join(quotedCols, ", "))
+	schema := postgresSchema(t.Schema)
+	ddl.WriteString(fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (", postgresTableName(t), ident.Quote(ident.DoubleQuote, fk.Name)))
+	ddl.WriteString(ident.List(ident.DoubleQuote, fk.Columns, ", "))
 	ddl.WriteString(") REFERENCES ")
 	refSchema := fk.ReferencedSchema
 	if refSchema == "" {
 		refSchema = schema
 	}
-	ddl.WriteString(fmt.Sprintf("\"%s\".\"%s\" (", refSchema, fk.ReferencedTable))
-	quotedRefCols := make([]string, len(fk.ReferencedColumns))
-	for i, c := range fk.ReferencedColumns {
-		quotedRefCols[i] = fmt.Sprintf("\"%s\"", c)
-	}
-	ddl.WriteString(strings.Join(quotedRefCols, ", "))
+	ddl.WriteString(fmt.Sprintf("%s (", ident.Qualified(ident.DoubleQuote, refSchema, fk.ReferencedTable)))
+	ddl.WriteString(ident.List(ident.DoubleQuote, fk.ReferencedColumns, ", "))
 	ddl.WriteString(")")
 	if fk.OnDelete != "" && strings.ToUpper(fk.OnDelete) != "NO ACTION" {
 		ddl.WriteString(fmt.Sprintf(" ON DELETE %s", fk.OnDelete))
@@ -431,20 +408,12 @@ func (d *postgreDialect) GenerateAddForeignKeySql(t *conn.Table, fk *conn.Foreig
 }
 
 func (d *postgreDialect) GenerateDropForeignKeySql(t *conn.Table, fk *conn.ForeignKey) string {
-	schema := t.Schema
-	if schema == "" {
-		schema = "public"
-	}
-	return fmt.Sprintf("ALTER TABLE \"%s\".\"%s\" DROP CONSTRAINT IF EXISTS \"%s\";", schema, t.Name, fk.Name)
+	return fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT IF EXISTS %s;", postgresTableName(t), ident.Quote(ident.DoubleQuote, fk.Name))
 }
 
 func (d *postgreDialect) GenerateAlterTableCommentSql(t *conn.Table, comment string) string {
-	schema := t.Schema
-	if schema == "" {
-		schema = "public"
-	}
 	escaped := strings.ReplaceAll(comment, "'", "''")
-	return fmt.Sprintf("COMMENT ON TABLE \"%s\".\"%s\" IS '%s';", schema, t.Name, escaped)
+	return fmt.Sprintf("COMMENT ON TABLE %s IS '%s';", postgresTableName(t), escaped)
 }
 
 func (d *postgreDialect) escapedValue(dataType string, val any) string {

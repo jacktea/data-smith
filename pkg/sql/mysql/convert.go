@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/jacktea/data-smith/pkg/conn"
+	"github.com/jacktea/data-smith/pkg/sql/ident"
 )
 
 type TypeHandler func(col *conn.Column) string
@@ -299,7 +300,7 @@ func (c *MySQLTypeConverter) GenerateColumnDDL(col *conn.Column) string {
 	var parts []string
 
 	// 列名（加反引号以处理特殊字符）
-	parts = append(parts, fmt.Sprintf("`%s`", col.Name))
+	parts = append(parts, ident.Quote(ident.Backtick, col.Name))
 
 	// 数据类型
 	dataType := c.ConvertType(col)

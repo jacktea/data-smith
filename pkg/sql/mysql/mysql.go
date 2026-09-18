@@ -4,11 +4,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/jacktea/data-smith/pkg/conn"
-	"github.com/jacktea/data-smith/pkg/utils"
+	"github.com/jacktea/data-smith/pkg/sql/ident"
 )
 
 type mysqlDialect struct {
@@ -21,14 +22,27 @@ func NewMySQLDialect() *mysqlDialect {
 	}
 }
 
+func mysqlTableName(t *conn.Table) string {
+	return ident.Qualified(ident.Backtick, t.Schema, t.Name)
+}
+
+func sortedIndexes(indexes map[string]*conn.Index) []*conn.Index {
+	result := make([]*conn.Index, 0, len(indexes))
+	for _, index := range indexes {
+		result = append(result, index)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result
+}
+
 func (d *mysqlDialect) GenerateInsertSql(tbl *conn.Table, row conn.Record) string {
 	var colNames, values []string
-	for _, col := range tbl.Columns {
-		colNames = append(colNames, fmt.Sprintf("`%s`", col.Name))
+	for _, col := range tbl.GetColumnsByPosition() {
+		colNames = append(colNames, ident.Quote(ident.Backtick, col.Name))
 		val := row[col.Name]
 		values = append(values, d.escapedValue(col.DataType, val))
 	}
-	return fmt.Sprintf("INSERT INTO `%s` (%s) VALUES (%s);", tbl.Name, strings.Join(colNames, ", "), strings.Join(values, ", "))
+	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", mysqlTableName(tbl), strings.Join(colNames, ", "), strings.Join(values, ", "))
 }
 
 func (d *mysqlDialect) GenerateDeleteSql(tbl *conn.Table, row conn.Record) string {
@@ -41,12 +55,12 @@ func (d *mysqlDialect) GenerateDeleteSql(tbl *conn.Table, row conn.Record) strin
 			colType = col.DataType
 		}
 		if val == nil {
-			where = append(where, fmt.Sprintf("`%s` IS NULL", k))
+			where = append(where, fmt.Sprintf("%s IS NULL", ident.Quote(ident.Backtick, k)))
 		} else {
-			where = append(where, fmt.Sprintf("`%s` = %s", k, d.escapedValue(colType, val)))
+			where = append(where, fmt.Sprintf("%s = %s", ident.Quote(ident.Backtick, k), d.escapedValue(colType, val)))
 		}
 	}
-	return fmt.Sprintf("DELETE FROM `%s` WHERE %s;", tbl.Name, strings.Join(where, " AND "))
+	return fmt.Sprintf("DELETE FROM %s WHERE %s;", mysqlTableName(tbl), strings.Join(where, " AND "))
 }
 
 func (d *mysqlDialect) GenerateUpdateSql(tbl *conn.Table, row conn.Record, updateCols []string) string {
@@ -64,7 +78,7 @@ func (d *mysqlDialect) GenerateUpdateSql(tbl *conn.Table, row conn.Record, updat
 			continue
 		}
 		val := row[c]
-		set = append(set, fmt.Sprintf("`%s` = %s", c, d.escapedValue(col.DataType, val)))
+		set = append(set, fmt.Sprintf("%s = %s", ident.Quote(ident.Backtick, c), d.escapedValue(col.DataType, val)))
 	}
 	if len(set) == 0 {
 		return ""
@@ -77,22 +91,22 @@ func (d *mysqlDialect) GenerateUpdateSql(tbl *conn.Table, row conn.Record, updat
 			colType = col.DataType
 		}
 		if val == nil {
-			where = append(where, fmt.Sprintf("`%s` IS NULL", k))
+			where = append(where, fmt.Sprintf("%s IS NULL", ident.Quote(ident.Backtick, k)))
 		} else {
-			where = append(where, fmt.Sprintf("`%s` = %s", k, d.escapedValue(colType, val)))
+			where = append(where, fmt.Sprintf("%s = %s", ident.Quote(ident.Backtick, k), d.escapedValue(colType, val)))
 		}
 	}
-	return fmt.Sprintf("UPDATE `%s` SET %s WHERE %s;", tbl.Name, strings.Join(set, ", "), strings.Join(where, " AND "))
+	return fmt.Sprintf("UPDATE %s SET %s WHERE %s;", mysqlTableName(tbl), strings.Join(set, ", "), strings.Join(where, " AND "))
 }
 
 func (d *mysqlDialect) GenerateCreateIndexSql(t *conn.Table, idx *conn.Index) string {
 	var ddl strings.Builder
 
 	if idx.Primary {
-		ddl.WriteString("ALTER TABLE `")
-		ddl.WriteString(t.Name)
-		ddl.WriteString("` ADD PRIMARY KEY (")
-		ddl.WriteString(utils.JoinWrap(idx.Columns, "`", ", "))
+		ddl.WriteString("ALTER TABLE ")
+		ddl.WriteString(mysqlTableName(t))
+		ddl.WriteString(" ADD PRIMARY KEY (")
+		ddl.WriteString(ident.List(ident.Backtick, idx.Columns, ", "))
 		ddl.WriteString(");")
 		return ddl.String()
 	}
@@ -102,17 +116,12 @@ func (d *mysqlDialect) GenerateCreateIndexSql(t *conn.Table, idx *conn.Index) st
 		ddl.WriteString("UNIQUE ")
 	}
 
-	ddl.WriteString("INDEX `")
-	ddl.WriteString(idx.Name)
-	ddl.WriteString("` ON `")
-	ddl.WriteString(t.Name)
-	ddl.WriteString("` (")
-
-	quotedCols := make([]string, len(idx.Columns))
-	for i, col := range idx.Columns {
-		quotedCols[i] = fmt.Sprintf("`%s`", col)
-	}
-	ddl.WriteString(strings.Join(quotedCols, ", "))
+	ddl.WriteString("INDEX ")
+	ddl.WriteString(ident.Quote(ident.Backtick, idx.Name))
+	ddl.WriteString(" ON ")
+	ddl.WriteString(mysqlTableName(t))
+	ddl.WriteString(" (")
+	ddl.WriteString(ident.List(ident.Backtick, idx.Columns, ", "))
 	ddl.WriteString(")")
 
 	if idx.Where != nil {
@@ -126,39 +135,39 @@ func (d *mysqlDialect) GenerateCreateIndexSql(t *conn.Table, idx *conn.Index) st
 
 func (d *mysqlDialect) GenerateDropIndexSql(t *conn.Table, idx *conn.Index) string {
 	var ddl strings.Builder
-	ddl.WriteString("DROP INDEX `")
-	ddl.WriteString(idx.Name)
-	ddl.WriteString("` ON `")
-	ddl.WriteString(t.Name)
-	ddl.WriteString("`;")
+	ddl.WriteString("DROP INDEX ")
+	ddl.WriteString(ident.Quote(ident.Backtick, idx.Name))
+	ddl.WriteString(" ON ")
+	ddl.WriteString(mysqlTableName(t))
+	ddl.WriteString(";")
 	return ddl.String()
 }
 
 func (d *mysqlDialect) GenerateAddPrimaryKeySql(t *conn.Table, pk *conn.PrimaryKey) string {
 	var ddl strings.Builder
-	ddl.WriteString("ALTER TABLE `")
-	ddl.WriteString(t.Name)
-	ddl.WriteString("` ADD CONSTRAINT `")
-	ddl.WriteString(pk.Name)
-	ddl.WriteString("` PRIMARY KEY (")
-	ddl.WriteString(utils.JoinWrap(pk.Columns, "`", ", "))
+	ddl.WriteString("ALTER TABLE ")
+	ddl.WriteString(mysqlTableName(t))
+	ddl.WriteString(" ADD CONSTRAINT ")
+	ddl.WriteString(ident.Quote(ident.Backtick, pk.Name))
+	ddl.WriteString(" PRIMARY KEY (")
+	ddl.WriteString(ident.List(ident.Backtick, pk.Columns, ", "))
 	ddl.WriteString(");")
 	return ddl.String()
 }
 
 func (d *mysqlDialect) GenerateDropPrimaryKeySql(t *conn.Table, pk *conn.PrimaryKey) string {
 	var ddl strings.Builder
-	ddl.WriteString("ALTER TABLE `")
-	ddl.WriteString(t.Name)
-	ddl.WriteString("` DROP PRIMARY KEY;")
+	ddl.WriteString("ALTER TABLE ")
+	ddl.WriteString(mysqlTableName(t))
+	ddl.WriteString(" DROP PRIMARY KEY;")
 	return ddl.String()
 }
 
 func (d *mysqlDialect) GenerateDropTableSql(t *conn.Table) string {
 	var ddl strings.Builder
-	ddl.WriteString("DROP TABLE `")
-	ddl.WriteString(t.Name)
-	ddl.WriteString("`;")
+	ddl.WriteString("DROP TABLE ")
+	ddl.WriteString(mysqlTableName(t))
+	ddl.WriteString(";")
 	return ddl.String()
 }
 
@@ -170,33 +179,13 @@ func (d *mysqlDialect) GenerateTableDDL(t *conn.Table) string {
 	var ddl strings.Builder
 
 	// CREATE TABLE语句
-	ddl.WriteString("CREATE TABLE `")
-	ddl.WriteString(t.Name)
-	ddl.WriteString("` (\n")
-
-	// 按位置排序列
-	type colWithPos struct {
-		col *conn.Column
-		pos int
-	}
-	var sortedCols []colWithPos
-	for _, col := range t.Columns {
-		sortedCols = append(sortedCols, colWithPos{col, col.Position})
-	}
-
-	// 简单排序
-	for i := 0; i < len(sortedCols); i++ {
-		for j := i + 1; j < len(sortedCols); j++ {
-			if sortedCols[i].pos > sortedCols[j].pos {
-				sortedCols[i], sortedCols[j] = sortedCols[j], sortedCols[i]
-			}
-		}
-	}
+	ddl.WriteString("CREATE TABLE ")
+	ddl.WriteString(mysqlTableName(t))
+	ddl.WriteString(" (\n")
 
 	// 添加列定义
 	var columnDefs []string
-	for _, colPos := range sortedCols {
-		col := colPos.col
+	for _, col := range t.GetColumnsByPosition() {
 		columnDefs = append(columnDefs, d.converter.GenerateColumnDDL(col))
 	}
 
@@ -204,27 +193,38 @@ func (d *mysqlDialect) GenerateTableDDL(t *conn.Table) string {
 	if t.PrimaryKey != nil && len(t.PrimaryKey.Columns) > 0 {
 		pkCols := make([]string, len(t.PrimaryKey.Columns))
 		for i, col := range t.PrimaryKey.Columns {
-			pkCols[i] = fmt.Sprintf("`%s`", col)
+			pkCols[i] = ident.Quote(ident.Backtick, col)
 		}
 		constraintDef := fmt.Sprintf("  PRIMARY KEY (%s)",
 			strings.Join(pkCols, ", "))
 		columnDefs = append(columnDefs, constraintDef)
 	}
 
-	// 添加外键
-	for _, fk := range t.ForeignKeys {
+	// 添加外键。Schema generator 会为新表传入无外键副本，并在所有表
+	// 都存在之后单独添加；直接调用此 API 仍保留完整 DDL 行为。
+	fkNames := make([]string, 0, len(t.ForeignKeys))
+	for name := range t.ForeignKeys {
+		fkNames = append(fkNames, name)
+	}
+	sort.Strings(fkNames)
+	for _, name := range fkNames {
+		fk := t.ForeignKeys[name]
 		fkCols := make([]string, len(fk.Columns))
 		for i, col := range fk.Columns {
-			fkCols[i] = fmt.Sprintf("`%s`", col)
+			fkCols[i] = ident.Quote(ident.Backtick, col)
 		}
 		refCols := make([]string, len(fk.ReferencedColumns))
 		for i, col := range fk.ReferencedColumns {
-			refCols[i] = fmt.Sprintf("`%s`", col)
+			refCols[i] = ident.Quote(ident.Backtick, col)
 		}
 
-		constraintDef := fmt.Sprintf("  CONSTRAINT `%s` FOREIGN KEY (%s) REFERENCES `%s` (%s)",
-			fk.Name, strings.Join(fkCols, ", "),
-			fk.ReferencedTable, strings.Join(refCols, ", "))
+		refSchema := fk.ReferencedSchema
+		if refSchema == "" {
+			refSchema = t.Schema
+		}
+		constraintDef := fmt.Sprintf("  CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
+			ident.Quote(ident.Backtick, fk.Name), strings.Join(fkCols, ", "),
+			ident.Qualified(ident.Backtick, refSchema, fk.ReferencedTable), strings.Join(refCols, ", "))
 
 		if fk.OnDelete != "" {
 			constraintDef += fmt.Sprintf(" ON DELETE %s", fk.OnDelete)
@@ -247,7 +247,7 @@ func (d *mysqlDialect) GenerateTableDDL(t *conn.Table) string {
 	ddl.WriteString(";")
 
 	// 添加索引
-	for _, idx := range t.Indexes {
+	for _, idx := range sortedIndexes(t.Indexes) {
 		if idx.Primary {
 			continue // 主键索引已经在表定义中
 		}
@@ -266,9 +266,9 @@ func (d *mysqlDialect) GenerateViewDDL(t *conn.Table) string {
 	var ddl strings.Builder
 
 	// 基本CREATE VIEW语句
-	ddl.WriteString("CREATE VIEW `")
-	ddl.WriteString(t.Name)
-	ddl.WriteString("` AS\n")
+	ddl.WriteString("CREATE VIEW ")
+	ddl.WriteString(mysqlTableName(t))
+	ddl.WriteString(" AS\n")
 
 	// 添加SELECT语句
 	ddl.WriteString(t.ViewDefinition.SelectStatement)
@@ -282,8 +282,8 @@ func (d *mysqlDialect) GenerateViewDDL(t *conn.Table) string {
 
 	// 添加注释
 	if t.ViewDefinition.Comment != "" {
-		ddl.WriteString(fmt.Sprintf("\n\nALTER VIEW `%s` COMMENT = '%s';",
-			t.Name, strings.ReplaceAll(t.ViewDefinition.Comment, "'", "''")))
+		ddl.WriteString(fmt.Sprintf("\n\nALTER VIEW %s COMMENT = '%s';",
+			mysqlTableName(t), strings.ReplaceAll(t.ViewDefinition.Comment, "'", "''")))
 	}
 
 	return ddl.String()
@@ -291,17 +291,17 @@ func (d *mysqlDialect) GenerateViewDDL(t *conn.Table) string {
 
 func (d *mysqlDialect) GenerateDropViewSql(t *conn.Table) string {
 	var ddl strings.Builder
-	ddl.WriteString("DROP VIEW `")
-	ddl.WriteString(t.Name)
-	ddl.WriteString("`;")
+	ddl.WriteString("DROP VIEW ")
+	ddl.WriteString(mysqlTableName(t))
+	ddl.WriteString(";")
 	return ddl.String()
 }
 
 func (d *mysqlDialect) GenerateAddColumnSql(t *conn.Table, col *conn.Column) string {
 	var ddl strings.Builder
-	ddl.WriteString("ALTER TABLE `")
-	ddl.WriteString(t.Name)
-	ddl.WriteString("` ADD COLUMN ")
+	ddl.WriteString("ALTER TABLE ")
+	ddl.WriteString(mysqlTableName(t))
+	ddl.WriteString(" ADD COLUMN ")
 	ddl.WriteString(d.converter.GenerateColumnDDL(col))
 	ddl.WriteString(";")
 	return ddl.String()
@@ -309,19 +309,19 @@ func (d *mysqlDialect) GenerateAddColumnSql(t *conn.Table, col *conn.Column) str
 
 func (d *mysqlDialect) GenerateDropColumnSql(t *conn.Table, col *conn.Column) string {
 	var ddl strings.Builder
-	ddl.WriteString("ALTER TABLE `")
-	ddl.WriteString(t.Name)
-	ddl.WriteString("` DROP COLUMN `")
-	ddl.WriteString(col.Name)
-	ddl.WriteString("`;")
+	ddl.WriteString("ALTER TABLE ")
+	ddl.WriteString(mysqlTableName(t))
+	ddl.WriteString(" DROP COLUMN ")
+	ddl.WriteString(ident.Quote(ident.Backtick, col.Name))
+	ddl.WriteString(";")
 	return ddl.String()
 }
 
 func (d *mysqlDialect) GenerateAlterColumnSql(t *conn.Table, oldCol, newCol *conn.Column) string {
 	var ddl strings.Builder
-	ddl.WriteString("ALTER TABLE `")
-	ddl.WriteString(t.Name)
-	ddl.WriteString("` MODIFY COLUMN ")
+	ddl.WriteString("ALTER TABLE ")
+	ddl.WriteString(mysqlTableName(t))
+	ddl.WriteString(" MODIFY COLUMN ")
 	ddl.WriteString(d.converter.GenerateColumnDDL(newCol))
 	ddl.WriteString(";")
 	return ddl.String()
@@ -329,18 +329,14 @@ func (d *mysqlDialect) GenerateAlterColumnSql(t *conn.Table, oldCol, newCol *con
 
 func (d *mysqlDialect) GenerateAddForeignKeySql(t *conn.Table, fk *conn.ForeignKey) string {
 	var ddl strings.Builder
-	ddl.WriteString(fmt.Sprintf("ALTER TABLE `%s` ADD CONSTRAINT `%s` FOREIGN KEY (", t.Name, fk.Name))
-	quotedCols := make([]string, len(fk.Columns))
-	for i, c := range fk.Columns {
-		quotedCols[i] = fmt.Sprintf("`%s`", c)
+	ddl.WriteString(fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (", mysqlTableName(t), ident.Quote(ident.Backtick, fk.Name)))
+	ddl.WriteString(ident.List(ident.Backtick, fk.Columns, ", "))
+	refSchema := fk.ReferencedSchema
+	if refSchema == "" {
+		refSchema = t.Schema
 	}
-	ddl.WriteString(strings.Join(quotedCols, ", "))
-	ddl.WriteString(fmt.Sprintf(") REFERENCES `%s` (", fk.ReferencedTable))
-	quotedRefCols := make([]string, len(fk.ReferencedColumns))
-	for i, c := range fk.ReferencedColumns {
-		quotedRefCols[i] = fmt.Sprintf("`%s`", c)
-	}
-	ddl.WriteString(strings.Join(quotedRefCols, ", "))
+	ddl.WriteString(fmt.Sprintf(") REFERENCES %s (", ident.Qualified(ident.Backtick, refSchema, fk.ReferencedTable)))
+	ddl.WriteString(ident.List(ident.Backtick, fk.ReferencedColumns, ", "))
 	ddl.WriteString(")")
 	if fk.OnDelete != "" && strings.ToUpper(fk.OnDelete) != "NO ACTION" {
 		ddl.WriteString(fmt.Sprintf(" ON DELETE %s", fk.OnDelete))
@@ -353,11 +349,11 @@ func (d *mysqlDialect) GenerateAddForeignKeySql(t *conn.Table, fk *conn.ForeignK
 }
 
 func (d *mysqlDialect) GenerateDropForeignKeySql(t *conn.Table, fk *conn.ForeignKey) string {
-	return fmt.Sprintf("ALTER TABLE `%s` DROP FOREIGN KEY `%s`;", t.Name, fk.Name)
+	return fmt.Sprintf("ALTER TABLE %s DROP FOREIGN KEY %s;", mysqlTableName(t), ident.Quote(ident.Backtick, fk.Name))
 }
 
 func (d *mysqlDialect) GenerateAlterTableCommentSql(t *conn.Table, comment string) string {
-	return fmt.Sprintf("ALTER TABLE `%s` COMMENT = '%s';", t.Name, strings.ReplaceAll(comment, "'", "''"))
+	return fmt.Sprintf("ALTER TABLE %s COMMENT = '%s';", mysqlTableName(t), strings.ReplaceAll(comment, "'", "''"))
 }
 
 func (d *mysqlDialect) escapedValue(dataType string, val any) string {

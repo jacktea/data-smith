@@ -3,6 +3,7 @@ package diff
 import (
 	"fmt"
 	"log"
+	"sort"
 
 	"github.com/jacktea/data-smith/pkg/chunk"
 	"github.com/jacktea/data-smith/pkg/conn"
@@ -314,7 +315,8 @@ func getTableColumnsAndTypes(db conn.DBAdapter, table string) ([]string, []strin
 	}
 	var cols []string
 	colTypes := make(map[string]string)
-	for name, col := range tbl.Columns {
+	for _, col := range tbl.GetColumnsByPosition() {
+		name := col.Name
 		cols = append(cols, name)
 		if col != nil {
 			colTypes[name] = col.DataType
@@ -325,7 +327,13 @@ func getTableColumnsAndTypes(db conn.DBAdapter, table string) ([]string, []strin
 		pks = tbl.PrimaryKey.Columns
 	} else if tbl.Indexes != nil {
 		// 回退查找非空唯一索引
-		for _, idx := range tbl.Indexes {
+		indexNames := make([]string, 0, len(tbl.Indexes))
+		for name := range tbl.Indexes {
+			indexNames = append(indexNames, name)
+		}
+		sort.Strings(indexNames)
+		for _, name := range indexNames {
+			idx := tbl.Indexes[name]
 			if idx.Unique && len(idx.Columns) > 0 {
 				allNotNull := true
 				for _, colName := range idx.Columns {

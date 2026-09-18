@@ -1,6 +1,8 @@
 package sql
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/jacktea/data-smith/pkg/conn"
@@ -8,156 +10,493 @@ import (
 	"github.com/jacktea/data-smith/pkg/diff"
 )
 
-// GenerateSchemaSQL 根据差异和目标方言类型生成分阶段、安全的 SQL 脚本序列
-func GenerateSchemaSQL(diff *diff.SchemaDiff, dialect consts.DBType) []string {
+// GenerateSchemaSQL preserves the original API. Callers that need cycle or
+// configuration errors should use GenerateSchemaSQLSafe.
+func GenerateSchemaSQL(schemaDiff *diff.SchemaDiff, dialect consts.DBType) []string {
+	statements, _ := GenerateSchemaSQLSafe(schemaDiff, dialect)
+	return statements
+}
+
+// GenerateSchemaSQLSafe generates deterministic SQL in dependency-safe phases.
+// Tables are created without foreign keys; every foreign key is added only
+// after all table creates have completed. View dependency cycles are rejected
+// because no executable CREATE VIEW ordering exists for them.
+func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) ([]string, error) {
+	if schemaDiff == nil {
+		return nil, fmt.Errorf("schema diff is required")
+	}
 	dbDialect := NewDialect(dialect)
 	if dbDialect == nil {
-		return nil
+		return nil, fmt.Errorf("unsupported SQL dialect %q", dialect)
 	}
 
-	var dropDepSqls []string  // 阶段 1: 解除旧依赖 (Drop Views, Drop FKs, Drop Indexes, Drop PKs, Drop Columns)
-	var alterColSqls []string // 阶段 2: 调整表列结构 (Alter Columns, Add Columns)
-	var buildKeySqls []string // 阶段 3: 建立主键、索引与创建新增表 (Add PKs, Add Indexes, Create Tables)
-	var finalizeSqls []string // 阶段 4: 关联外键、删除旧表、创建视图与更新注释 (Add FKs, Drop Tables, Create Views, Alter Comments)
+	added := sortedTables(schemaDiff.TablesAdded)
+	dropped := sortedTables(schemaDiff.TablesDropped)
+	modified := sortedTableDiffs(schemaDiff.TablesModified)
 
-	addStmt := func(slice *[]string, s string) {
-		if trimmed := strings.TrimSpace(s); trimmed != "" {
-			*slice = append(*slice, trimmed)
+	var dropViews, dropDependencies, dropTables []string
+	var alterColumns, createTables, buildKeys, addForeignKeys, createViews, comments []string
+	add := func(destination *[]string, statement string) {
+		if statement = strings.TrimSpace(statement); statement != "" {
+			*destination = append(*destination, statement)
 		}
 	}
 
-	// 阶段 1.1：删除废弃或待修改的视图
-	for _, tbl := range diff.TablesDropped {
-		if tbl.Type == conn.TableTypeView {
-			addStmt(&dropDepSqls, dbDialect.GenerateDropViewSql(tbl))
+	viewsToDrop := make([]*conn.Table, 0)
+	for _, table := range dropped {
+		if table.Type == conn.TableTypeView {
+			viewsToDrop = append(viewsToDrop, table)
 		}
 	}
-	for _, tdiff := range diff.TablesModified {
-		if tdiff.Table.Type == conn.TableTypeView && tdiff.ViewDefinitionChange != nil {
-			addStmt(&dropDepSqls, dbDialect.GenerateDropViewSql(tdiff.Table))
+	for _, tableDiff := range modified {
+		if tableDiff.ViewDefinitionChange != nil {
+			view := tableDiff.SourceTable
+			if view == nil {
+				view = tableDiff.Table
+			}
+			viewsToDrop = append(viewsToDrop, view)
 		}
+	}
+	orderedDropViews, err := orderViews(viewsToDrop, true)
+	if err != nil {
+		return nil, fmt.Errorf("order dropped views: %w", err)
+	}
+	for _, view := range orderedDropViews {
+		add(&dropViews, dbDialect.GenerateDropViewSql(view))
 	}
 
-	// 阶段 1.2: 对修改表先解除外键、索引、主键与被删列
-	for _, tdiff := range diff.TablesModified {
-		if tdiff.Table.Type == conn.TableTypeView {
+	// Remove constraints owned by tables that will disappear. This makes
+	// mutually-referencing table drops executable before the tables are dropped.
+	for _, table := range dropped {
+		if table.Type != conn.TableTypeTable {
 			continue
 		}
-		tbl := tdiff.Table
-		// 删外键
-		for _, fk := range tdiff.ForeignKeysDropped {
-			addStmt(&dropDepSqls, dbDialect.GenerateDropForeignKeySql(tbl, fk))
-		}
-		for _, fkMod := range tdiff.ForeignKeysModified {
-			if fkMod.Old != nil {
-				addStmt(&dropDepSqls, dbDialect.GenerateDropForeignKeySql(tbl, fkMod.Old))
-			}
-		}
-		// 删索引
-		for _, idx := range tdiff.IndexesDropped {
-			addStmt(&dropDepSqls, dbDialect.GenerateDropIndexSql(tbl, idx))
-		}
-		for _, imod := range tdiff.IndexesModified {
-			if imod.Old != nil {
-				addStmt(&dropDepSqls, dbDialect.GenerateDropIndexSql(tbl, imod.Old))
-			}
-		}
-		// 删主键
-		if tdiff.PrimaryKeyChange != nil && tdiff.PrimaryKeyChange.Old != nil {
-			addStmt(&dropDepSqls, dbDialect.GenerateDropPrimaryKeySql(tbl, tdiff.PrimaryKeyChange.Old))
-		}
-		// 删列
-		for _, col := range tdiff.ColumnsDropped {
-			addStmt(&dropDepSqls, dbDialect.GenerateDropColumnSql(tbl, col))
+		for _, foreignKey := range sortedForeignKeyMap(table.ForeignKeys) {
+			add(&dropDependencies, dbDialect.GenerateDropForeignKeySql(table, foreignKey))
 		}
 	}
-
-	// 阶段 2: 调整表列结构 (修改列类型/默认值/非空，添加新列)
-	for _, tdiff := range diff.TablesModified {
-		if tdiff.Table.Type == conn.TableTypeView {
+	for _, tableDiff := range modified {
+		table := targetTable(tableDiff)
+		if table == nil || table.Type == conn.TableTypeView {
 			continue
 		}
-		tbl := tdiff.Table
-		for _, cmod := range tdiff.ColumnsModified {
-			addStmt(&alterColSqls, dbDialect.GenerateAlterColumnSql(tbl, cmod.Old, cmod.New))
+		for _, foreignKey := range sortedForeignKeys(tableDiff.ForeignKeysDropped) {
+			add(&dropDependencies, dbDialect.GenerateDropForeignKeySql(table, foreignKey))
 		}
-		for _, col := range tdiff.ColumnsAdded {
-			addStmt(&alterColSqls, dbDialect.GenerateAddColumnSql(tbl, col))
-		}
-	}
-
-	// 阶段 3: 建立主键、索引与创建新增表
-	for _, tdiff := range diff.TablesModified {
-		if tdiff.Table.Type == conn.TableTypeView {
-			continue
-		}
-		tbl := tdiff.Table
-		if tdiff.PrimaryKeyChange != nil && tdiff.PrimaryKeyChange.New != nil {
-			addStmt(&buildKeySqls, dbDialect.GenerateAddPrimaryKeySql(tbl, tdiff.PrimaryKeyChange.New))
-		}
-		for _, imod := range tdiff.IndexesModified {
-			if imod.New != nil {
-				addStmt(&buildKeySqls, dbDialect.GenerateCreateIndexSql(tbl, imod.New))
+		for _, change := range sortedForeignKeyDiffs(tableDiff.ForeignKeysModified) {
+			if change.Old != nil {
+				add(&dropDependencies, dbDialect.GenerateDropForeignKeySql(table, change.Old))
 			}
 		}
-		for _, idx := range tdiff.IndexesAdded {
-			addStmt(&buildKeySqls, dbDialect.GenerateCreateIndexSql(tbl, idx))
+		for _, index := range sortedIndexes(tableDiff.IndexesDropped) {
+			add(&dropDependencies, dbDialect.GenerateDropIndexSql(table, index))
 		}
-	}
-	// 创建新增的普通表
-	for _, tbl := range diff.TablesAdded {
-		if tbl.Type != conn.TableTypeView {
-			addStmt(&buildKeySqls, dbDialect.GenerateTableDDL(tbl))
-		}
-	}
-
-	// 阶段 4: 关联外键、删除旧表、创建视图与更新注释
-	for _, tdiff := range diff.TablesModified {
-		if tdiff.Table.Type == conn.TableTypeView {
-			continue
-		}
-		tbl := tdiff.Table
-		for _, fkMod := range tdiff.ForeignKeysModified {
-			if fkMod.New != nil {
-				addStmt(&finalizeSqls, dbDialect.GenerateAddForeignKeySql(tbl, fkMod.New))
+		for _, change := range sortedIndexDiffs(tableDiff.IndexesModified) {
+			if change.Old != nil {
+				add(&dropDependencies, dbDialect.GenerateDropIndexSql(table, change.Old))
 			}
 		}
-		for _, fk := range tdiff.ForeignKeysAdded {
-			addStmt(&finalizeSqls, dbDialect.GenerateAddForeignKeySql(tbl, fk))
+		if tableDiff.PrimaryKeyChange != nil && tableDiff.PrimaryKeyChange.Old != nil {
+			add(&dropDependencies, dbDialect.GenerateDropPrimaryKeySql(table, tableDiff.PrimaryKeyChange.Old))
 		}
-		if tdiff.CommentChange != nil {
-			addStmt(&finalizeSqls, dbDialect.GenerateAlterTableCommentSql(tbl, tdiff.CommentChange.New))
-		}
-	}
-	// 删除废弃的普通表
-	for _, tbl := range diff.TablesDropped {
-		if tbl.Type != conn.TableTypeView {
-			addStmt(&finalizeSqls, dbDialect.GenerateDropTableSql(tbl))
-		}
-	}
-	// 创建新增视图及修改后的视图
-	for _, tbl := range diff.TablesAdded {
-		if tbl.Type == conn.TableTypeView {
-			addStmt(&finalizeSqls, dbDialect.GenerateViewDDL(tbl))
-		}
-	}
-	for _, tdiff := range diff.TablesModified {
-		if tdiff.Table.Type == conn.TableTypeView && tdiff.ViewDefinitionChange != nil {
-			tbl := tdiff.Table
-			addStmt(&finalizeSqls, dbDialect.GenerateViewDDL(&conn.Table{
-				Name:           tbl.Name,
-				Schema:         tbl.Schema,
-				Type:           conn.TableTypeView,
-				ViewDefinition: tdiff.ViewDefinitionChange.New,
-			}))
+		for _, column := range sortedColumns(tableDiff.ColumnsDropped) {
+			add(&dropDependencies, dbDialect.GenerateDropColumnSql(table, column))
 		}
 	}
 
-	var allSqls []string
-	allSqls = append(allSqls, dropDepSqls...)
-	allSqls = append(allSqls, alterColSqls...)
-	allSqls = append(allSqls, buildKeySqls...)
-	allSqls = append(allSqls, finalizeSqls...)
+	for _, table := range orderTablesForDrop(dropped) {
+		add(&dropTables, dbDialect.GenerateDropTableSql(table))
+	}
 
-	return allSqls
+	for _, tableDiff := range modified {
+		table := targetTable(tableDiff)
+		if table == nil || table.Type == conn.TableTypeView {
+			continue
+		}
+		for _, change := range sortedColumnDiffs(tableDiff.ColumnsModified) {
+			add(&alterColumns, dbDialect.GenerateAlterColumnSql(table, change.Old, change.New))
+		}
+		for _, column := range sortedColumns(tableDiff.ColumnsAdded) {
+			add(&alterColumns, dbDialect.GenerateAddColumnSql(table, column))
+		}
+	}
+
+	for _, table := range added {
+		if table.Type == conn.TableTypeTable {
+			add(&createTables, dbDialect.GenerateTableDDL(tableWithoutForeignKeys(table)))
+		}
+	}
+
+	for _, tableDiff := range modified {
+		table := targetTable(tableDiff)
+		if table == nil || table.Type == conn.TableTypeView {
+			continue
+		}
+		if tableDiff.PrimaryKeyChange != nil && tableDiff.PrimaryKeyChange.New != nil {
+			add(&buildKeys, dbDialect.GenerateAddPrimaryKeySql(table, tableDiff.PrimaryKeyChange.New))
+		}
+		for _, change := range sortedIndexDiffs(tableDiff.IndexesModified) {
+			if change.New != nil {
+				add(&buildKeys, dbDialect.GenerateCreateIndexSql(table, change.New))
+			}
+		}
+		for _, index := range sortedIndexes(tableDiff.IndexesAdded) {
+			add(&buildKeys, dbDialect.GenerateCreateIndexSql(table, index))
+		}
+	}
+
+	for _, operation := range orderForeignKeyOperations(collectForeignKeyOperations(added, modified)) {
+		add(&addForeignKeys, dbDialect.GenerateAddForeignKeySql(operation.table, operation.foreignKey))
+	}
+
+	viewsToCreate := make([]*conn.Table, 0)
+	for _, table := range added {
+		if table.Type == conn.TableTypeView {
+			viewsToCreate = append(viewsToCreate, table)
+		}
+	}
+	for _, tableDiff := range modified {
+		if tableDiff.ViewDefinitionChange == nil || tableDiff.ViewDefinitionChange.New == nil {
+			continue
+		}
+		table := targetTable(tableDiff)
+		view := *table
+		view.Type = conn.TableTypeView
+		view.ViewDefinition = tableDiff.ViewDefinitionChange.New
+		viewsToCreate = append(viewsToCreate, &view)
+	}
+	orderedCreateViews, err := orderViews(viewsToCreate, false)
+	if err != nil {
+		return nil, fmt.Errorf("order created views: %w", err)
+	}
+	for _, view := range orderedCreateViews {
+		add(&createViews, dbDialect.GenerateViewDDL(view))
+	}
+
+	for _, tableDiff := range modified {
+		table := targetTable(tableDiff)
+		if table != nil && table.Type == conn.TableTypeTable && tableDiff.CommentChange != nil {
+			add(&comments, dbDialect.GenerateAlterTableCommentSql(table, tableDiff.CommentChange.New))
+		}
+	}
+
+	result := make([]string, 0, len(dropViews)+len(dropDependencies)+len(dropTables)+len(alterColumns)+len(createTables)+len(buildKeys)+len(addForeignKeys)+len(createViews)+len(comments))
+	result = append(result, dropViews...)
+	result = append(result, dropDependencies...)
+	result = append(result, dropTables...)
+	result = append(result, alterColumns...)
+	result = append(result, createTables...)
+	result = append(result, buildKeys...)
+	result = append(result, addForeignKeys...)
+	result = append(result, createViews...)
+	result = append(result, comments...)
+	return result, nil
+}
+
+type foreignKeyOperation struct {
+	table      *conn.Table
+	foreignKey *conn.ForeignKey
+}
+
+func collectForeignKeyOperations(added []*conn.Table, modified []*diff.TableDiff) []foreignKeyOperation {
+	var operations []foreignKeyOperation
+	for _, table := range added {
+		if table.Type != conn.TableTypeTable {
+			continue
+		}
+		for _, foreignKey := range sortedForeignKeyMap(table.ForeignKeys) {
+			operations = append(operations, foreignKeyOperation{table: table, foreignKey: foreignKey})
+		}
+	}
+	for _, tableDiff := range modified {
+		table := targetTable(tableDiff)
+		if table == nil || table.Type == conn.TableTypeView {
+			continue
+		}
+		for _, change := range sortedForeignKeyDiffs(tableDiff.ForeignKeysModified) {
+			if change.New != nil {
+				operations = append(operations, foreignKeyOperation{table: table, foreignKey: change.New})
+			}
+		}
+		for _, foreignKey := range sortedForeignKeys(tableDiff.ForeignKeysAdded) {
+			operations = append(operations, foreignKeyOperation{table: table, foreignKey: foreignKey})
+		}
+	}
+	return operations
+}
+
+func orderForeignKeyOperations(operations []foreignKeyOperation) []foreignKeyOperation {
+	dependencies := make(map[string]map[string]struct{})
+	for _, operation := range operations {
+		key := objectKey(operation.table.Schema, operation.table.Name)
+		if dependencies[key] == nil {
+			dependencies[key] = make(map[string]struct{})
+		}
+		refSchema := operation.foreignKey.ReferencedSchema
+		if refSchema == "" {
+			refSchema = operation.table.Schema
+		}
+		refKey := objectKey(refSchema, operation.foreignKey.ReferencedTable)
+		if refKey != key {
+			dependencies[key][refKey] = struct{}{}
+		}
+	}
+	order, _ := stableDependencyOrder(dependencies)
+	rank := make(map[string]int, len(order))
+	for index, key := range order {
+		rank[key] = index
+	}
+	sort.SliceStable(operations, func(i, j int) bool {
+		leftKey := objectKey(operations[i].table.Schema, operations[i].table.Name)
+		rightKey := objectKey(operations[j].table.Schema, operations[j].table.Name)
+		if rank[leftKey] != rank[rightKey] {
+			return rank[leftKey] < rank[rightKey]
+		}
+		if leftKey != rightKey {
+			return leftKey < rightKey
+		}
+		return operations[i].foreignKey.Name < operations[j].foreignKey.Name
+	})
+	return operations
+}
+
+func orderTablesForDrop(tables []*conn.Table) []*conn.Table {
+	candidates := make(map[string]*conn.Table)
+	dependencies := make(map[string]map[string]struct{})
+	for _, table := range tables {
+		if table.Type != conn.TableTypeTable {
+			continue
+		}
+		key := objectKey(table.Schema, table.Name)
+		candidates[key] = table
+		dependencies[key] = make(map[string]struct{})
+	}
+	for key, table := range candidates {
+		for _, foreignKey := range table.ForeignKeys {
+			refSchema := foreignKey.ReferencedSchema
+			if refSchema == "" {
+				refSchema = table.Schema
+			}
+			refKey := objectKey(refSchema, foreignKey.ReferencedTable)
+			if _, ok := candidates[refKey]; ok && refKey != key {
+				dependencies[key][refKey] = struct{}{}
+			}
+		}
+	}
+	creationOrder, _ := stableDependencyOrder(dependencies)
+	result := make([]*conn.Table, 0, len(creationOrder))
+	for index := len(creationOrder) - 1; index >= 0; index-- {
+		result = append(result, candidates[creationOrder[index]])
+	}
+	return result
+}
+
+func orderViews(views []*conn.Table, reverse bool) ([]*conn.Table, error) {
+	candidates := make(map[string]*conn.Table)
+	aliases := make(map[string][]string)
+	for _, view := range views {
+		if view == nil {
+			continue
+		}
+		key := objectKey(view.Schema, view.Name)
+		candidates[key] = view
+		aliases[view.Name] = append(aliases[view.Name], key)
+		alias := qualifiedAlias(view.Schema, view.Name)
+		aliases[alias] = append(aliases[alias], key)
+	}
+	dependencies := make(map[string]map[string]struct{}, len(candidates))
+	for key, view := range candidates {
+		dependencies[key] = make(map[string]struct{})
+		if view.ViewDefinition == nil {
+			continue
+		}
+		for _, dependency := range view.ViewDefinition.Dependencies {
+			resolved := resolveDependency(dependency, view.Schema, candidates, aliases)
+			if resolved != "" {
+				dependencies[key][resolved] = struct{}{}
+			}
+		}
+	}
+	order, cyclic := stableDependencyOrder(dependencies)
+	if len(cyclic) > 0 {
+		display := make([]string, len(cyclic))
+		for index, key := range cyclic {
+			display[index] = strings.ReplaceAll(key, "\x00", ".")
+		}
+		return nil, fmt.Errorf("view dependency cycle: %s", strings.Join(display, ", "))
+	}
+	result := make([]*conn.Table, 0, len(order))
+	if reverse {
+		for index := len(order) - 1; index >= 0; index-- {
+			result = append(result, candidates[order[index]])
+		}
+		return result, nil
+	}
+	for _, key := range order {
+		result = append(result, candidates[key])
+	}
+	return result, nil
+}
+
+// stableDependencyOrder returns dependencies before dependents. Cyclic nodes
+// are appended in stable order so table/FK cycles can be handled by the
+// surrounding two-phase algorithm; view callers reject the returned cycle.
+func stableDependencyOrder(dependencies map[string]map[string]struct{}) ([]string, []string) {
+	remaining := make(map[string]map[string]struct{}, len(dependencies))
+	for key, values := range dependencies {
+		remaining[key] = make(map[string]struct{})
+		for dependency := range values {
+			if _, ok := dependencies[dependency]; ok {
+				remaining[key][dependency] = struct{}{}
+			}
+		}
+	}
+	var result []string
+	for len(remaining) > 0 {
+		ready := make([]string, 0)
+		for key, values := range remaining {
+			if len(values) == 0 {
+				ready = append(ready, key)
+			}
+		}
+		if len(ready) == 0 {
+			cyclic := make([]string, 0, len(remaining))
+			for key := range remaining {
+				cyclic = append(cyclic, key)
+			}
+			sort.Strings(cyclic)
+			result = append(result, cyclic...)
+			return result, cyclic
+		}
+		sort.Strings(ready)
+		for _, key := range ready {
+			delete(remaining, key)
+			result = append(result, key)
+		}
+		for _, values := range remaining {
+			for _, key := range ready {
+				delete(values, key)
+			}
+		}
+	}
+	return result, nil
+}
+
+func resolveDependency(raw, schema string, candidates map[string]*conn.Table, aliases map[string][]string) string {
+	dependency := strings.TrimSpace(raw)
+	if keys := aliases[dependency]; len(keys) == 1 {
+		return keys[0]
+	}
+	if !strings.Contains(dependency, ".") {
+		key := objectKey(schema, dependency)
+		if _, ok := candidates[key]; ok {
+			return key
+		}
+	}
+	return ""
+}
+
+func tableWithoutForeignKeys(table *conn.Table) *conn.Table {
+	copy := *table
+	copy.ForeignKeys = nil
+	return &copy
+}
+
+func targetTable(tableDiff *diff.TableDiff) *conn.Table {
+	if tableDiff.TargetTable != nil {
+		return tableDiff.TargetTable
+	}
+	return tableDiff.Table
+}
+
+func objectKey(schema, name string) string { return schema + "\x00" + name }
+func qualifiedAlias(schema, name string) string {
+	if schema == "" {
+		return name
+	}
+	return schema + "." + name
+}
+
+func sortedTables(tables []*conn.Table) []*conn.Table {
+	result := append([]*conn.Table(nil), tables...)
+	sort.SliceStable(result, func(i, j int) bool {
+		return objectKey(result[i].Schema, result[i].Name) < objectKey(result[j].Schema, result[j].Name)
+	})
+	return result
+}
+
+func sortedTableDiffs(tableDiffs []*diff.TableDiff) []*diff.TableDiff {
+	result := append([]*diff.TableDiff(nil), tableDiffs...)
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := targetTable(result[i]), targetTable(result[j])
+		return objectKey(left.Schema, left.Name) < objectKey(right.Schema, right.Name)
+	})
+	return result
+}
+
+func sortedColumns(columns []*conn.Column) []*conn.Column {
+	result := append([]*conn.Column(nil), columns...)
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Position != result[j].Position {
+			return result[i].Position < result[j].Position
+		}
+		return result[i].Name < result[j].Name
+	})
+	return result
+}
+
+func sortedColumnDiffs(changes []*diff.ColumnDiff) []*diff.ColumnDiff {
+	result := append([]*diff.ColumnDiff(nil), changes...)
+	sort.SliceStable(result, func(i, j int) bool { return result[i].New.Name < result[j].New.Name })
+	return result
+}
+
+func sortedIndexes(indexes []*conn.Index) []*conn.Index {
+	result := append([]*conn.Index(nil), indexes...)
+	sort.SliceStable(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result
+}
+
+func sortedIndexDiffs(changes []*diff.IndexDiff) []*diff.IndexDiff {
+	result := append([]*diff.IndexDiff(nil), changes...)
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := result[i].New, result[j].New
+		if left == nil {
+			left = result[i].Old
+		}
+		if right == nil {
+			right = result[j].Old
+		}
+		return left.Name < right.Name
+	})
+	return result
+}
+
+func sortedForeignKeys(foreignKeys []*conn.ForeignKey) []*conn.ForeignKey {
+	result := append([]*conn.ForeignKey(nil), foreignKeys...)
+	sort.SliceStable(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result
+}
+
+func sortedForeignKeyMap(foreignKeys map[string]*conn.ForeignKey) []*conn.ForeignKey {
+	result := make([]*conn.ForeignKey, 0, len(foreignKeys))
+	for _, foreignKey := range foreignKeys {
+		result = append(result, foreignKey)
+	}
+	return sortedForeignKeys(result)
+}
+
+func sortedForeignKeyDiffs(changes []*diff.ForeignKeyDiff) []*diff.ForeignKeyDiff {
+	result := append([]*diff.ForeignKeyDiff(nil), changes...)
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := result[i].New, result[j].New
+		if left == nil {
+			left = result[i].Old
+		}
+		if right == nil {
+			right = result[j].Old
+		}
+		return left.Name < right.Name
+	})
+	return result
 }

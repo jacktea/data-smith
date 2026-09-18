@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/jacktea/data-smith/pkg/conn"
@@ -20,47 +21,44 @@ func CompareSchemasWithAdapter(src, tgt conn.DBAdapter) (*SchemaDiff, error) {
 
 func CompareSchemas(src, tgt *conn.DatabaseSchema) *SchemaDiff {
 	diff := &SchemaDiff{}
-	// 表级
 	srcTables := src.Tables
 	tgtTables := tgt.Tables
-	srcTableSet := map[string]struct{}{}
-	tgtTableSet := map[string]struct{}{}
+	names := make([]string, 0, len(srcTables)+len(tgtTables))
+	seen := make(map[string]struct{}, len(srcTables)+len(tgtTables))
 	for name := range srcTables {
-		srcTableSet[name] = struct{}{}
+		seen[name] = struct{}{}
+		names = append(names, name)
 	}
 	for name := range tgtTables {
-		tgtTableSet[name] = struct{}{}
-	}
-	// 新增表（Target 存在，Source 不存在）
-	for name, tbl := range tgtTables {
-		if _, ok := srcTables[name]; !ok {
-			diff.TablesAdded = append(diff.TablesAdded, tbl)
+		if _, ok := seen[name]; !ok {
+			names = append(names, name)
 		}
 	}
-	// 删除表（Source 存在，Target 不存在）
-	for name, tbl := range srcTables {
-		if _, ok := tgtTables[name]; !ok {
-			diff.TablesDropped = append(diff.TablesDropped, tbl)
-		}
-	}
-	// 修改表
-	for name, srcTbl := range srcTables {
-		tgtTbl, ok := tgtTables[name]
-		if !ok {
-			continue
-		}
-		tblDiff := compareTable(srcTbl, tgtTbl)
-		if tblDiff != nil {
-			diff.TablesModified = append(diff.TablesModified, tblDiff)
+	sort.Strings(names)
+	for _, name := range names {
+		srcTbl, srcOK := srcTables[name]
+		tgtTbl, tgtOK := tgtTables[name]
+		switch {
+		case !srcOK:
+			diff.TablesAdded = append(diff.TablesAdded, tgtTbl)
+		case !tgtOK:
+			diff.TablesDropped = append(diff.TablesDropped, srcTbl)
+		case srcTbl.Type != tgtTbl.Type:
+			// Object type transitions cannot be expressed as ALTER. Treat them as
+			// an explicit drop followed by a create of the target object.
+			diff.TablesDropped = append(diff.TablesDropped, srcTbl)
+			diff.TablesAdded = append(diff.TablesAdded, tgtTbl)
+		default:
+			tblDiff := compareTable(srcTbl, tgtTbl)
+			if tblDiff != nil {
+				diff.TablesModified = append(diff.TablesModified, tblDiff)
+			}
 		}
 	}
 	return diff
 }
 
 func compareTable(src, tgt *conn.Table) *TableDiff {
-	if src.Type != tgt.Type {
-		return nil
-	}
 	if src.Type == conn.TableTypeView {
 		if src.ViewDefinition == nil || tgt.ViewDefinition == nil {
 			return nil
@@ -87,19 +85,22 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 	srcCols := src.Columns
 	tgtCols := tgt.Columns
 	// 新增列（Target 存在，Source 不存在）
-	for name, col := range tgtCols {
+	for _, name := range sortedKeys(tgtCols) {
+		col := tgtCols[name]
 		if _, ok := srcCols[name]; !ok {
 			d.ColumnsAdded = append(d.ColumnsAdded, col)
 		}
 	}
 	// 删除列（Source 存在，Target 不存在）
-	for name, col := range srcCols {
+	for _, name := range sortedKeys(srcCols) {
+		col := srcCols[name]
 		if _, ok := tgtCols[name]; !ok {
 			d.ColumnsDropped = append(d.ColumnsDropped, col)
 		}
 	}
 	// 修改列
-	for name, srcCol := range srcCols {
+	for _, name := range sortedKeys(srcCols) {
+		srcCol := srcCols[name]
 		tgtCol, ok := tgtCols[name]
 		if ok && !equalColumn(srcCol, tgtCol) {
 			d.ColumnsModified = append(d.ColumnsModified, &ColumnDiff{Old: srcCol, New: tgtCol})
@@ -109,19 +110,22 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 	srcIdx := src.Indexes
 	tgtIdx := tgt.Indexes
 	// 新增索引（Target 存在，Source 不存在）
-	for name, idx := range tgtIdx {
+	for _, name := range sortedKeys(tgtIdx) {
+		idx := tgtIdx[name]
 		if _, ok := srcIdx[name]; !ok {
 			d.IndexesAdded = append(d.IndexesAdded, idx)
 		}
 	}
 	// 删除索引（Source 存在，Target 不存在）
-	for name, idx := range srcIdx {
+	for _, name := range sortedKeys(srcIdx) {
+		idx := srcIdx[name]
 		if _, ok := tgtIdx[name]; !ok {
 			d.IndexesDropped = append(d.IndexesDropped, idx)
 		}
 	}
 	// 修改索引
-	for name, srcI := range srcIdx {
+	for _, name := range sortedKeys(srcIdx) {
+		srcI := srcIdx[name]
 		tgtI, ok := tgtIdx[name]
 		if ok && !equalIndex(srcI, tgtI) {
 			d.IndexesModified = append(d.IndexesModified, &IndexDiff{Old: srcI, New: tgtI})
@@ -135,19 +139,22 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 	srcFK := src.ForeignKeys
 	tgtFK := tgt.ForeignKeys
 	// 新增外键（Target 存在，Source 不存在）
-	for name, fk := range tgtFK {
+	for _, name := range sortedKeys(tgtFK) {
+		fk := tgtFK[name]
 		if _, ok := srcFK[name]; !ok {
 			d.ForeignKeysAdded = append(d.ForeignKeysAdded, fk)
 		}
 	}
 	// 删除外键（Source 存在，Target 不存在）
-	for name, fk := range srcFK {
+	for _, name := range sortedKeys(srcFK) {
+		fk := srcFK[name]
 		if _, ok := tgtFK[name]; !ok {
 			d.ForeignKeysDropped = append(d.ForeignKeysDropped, fk)
 		}
 	}
 	// 修改外键
-	for name, srcF := range srcFK {
+	for _, name := range sortedKeys(srcFK) {
+		srcF := srcFK[name]
 		tgtF, ok := tgtFK[name]
 		if ok && !equalForeignKey(srcF, tgtF) {
 			d.ForeignKeysModified = append(d.ForeignKeysModified, &ForeignKeyDiff{Old: srcF, New: tgtF})
@@ -165,6 +172,15 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 		return d
 	}
 	return nil
+}
+
+func sortedKeys[T any](values map[string]T) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 var typeAliases = map[string]string{

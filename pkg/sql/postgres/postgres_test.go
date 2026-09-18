@@ -60,7 +60,8 @@ func TestExtractViewDetail(t *testing.T) {
 func TestPostgreDialect_DataSqlGeneration(t *testing.T) {
 	dialect := NewPostgreDialect()
 	table := &conn.Table{
-		Name: "users",
+		Name:   "users",
+		Schema: "public",
 		Columns: map[string]*conn.Column{
 			"id":        {Name: "id", DataType: "int", Position: 1},
 			"name":      {Name: "name", DataType: "varchar", Position: 2},
@@ -84,21 +85,21 @@ func TestPostgreDialect_DataSqlGeneration(t *testing.T) {
 
 	// 1. 测试增量 UPDATE（只更新 name 和 is_active）
 	updateSql := dialect.GenerateUpdateSql(table, row, []string{"name", "is_active"})
-	expectedUpdate := `UPDATE users SET "name" = 'O''Connor', "is_active" = TRUE WHERE "id" = 10;`
+	expectedUpdate := `UPDATE "public"."users" SET "name" = 'O''Connor', "is_active" = TRUE WHERE "id" = 10;`
 	if updateSql != expectedUpdate {
 		t.Errorf("GenerateUpdateSql mismatch:\ngot:  %s\nwant: %s", updateSql, expectedUpdate)
 	}
 
 	// 2. 测试 Bytea 转义
 	updateByteaSql := dialect.GenerateUpdateSql(table, row, []string{"avatar"})
-	expectedByteaUpdate := `UPDATE users SET "avatar" = E'\\xdeadbeef'::bytea WHERE "id" = 10;`
+	expectedByteaUpdate := `UPDATE "public"."users" SET "avatar" = E'\\xdeadbeef'::bytea WHERE "id" = 10;`
 	if updateByteaSql != expectedByteaUpdate {
 		t.Errorf("GenerateUpdateSql bytea mismatch:\ngot:  %s\nwant: %s", updateByteaSql, expectedByteaUpdate)
 	}
 
 	// 3. 测试 DELETE
 	delSql := dialect.GenerateDeleteSql(table, row)
-	expectedDel := `DELETE FROM users WHERE "id" = 10;`
+	expectedDel := `DELETE FROM "public"."users" WHERE "id" = 10;`
 	if delSql != expectedDel {
 		t.Errorf("GenerateDeleteSql mismatch:\ngot:  %s\nwant: %s", delSql, expectedDel)
 	}
@@ -151,4 +152,3 @@ func TestPostgreDialect_ForeignKeyAndCommentSql(t *testing.T) {
 		t.Errorf("GenerateAlterColumnSql mismatch:\ngot:  %s\nwant: %s", alterColSql, expectedAlter)
 	}
 }
-

@@ -9,7 +9,7 @@ Execution order is sequential in the shared checkout. Each session must preserve
 - [x] [#2](https://github.com/jacktea/data-smith/issues/2) — Session 1: migration discovery, ledger, and execution (completed 2026-09-18)
 - [x] [#3](https://github.com/jacktea/data-smith/issues/3) — Session 2: `exec-sql` parsing, transactions, and dry-run (completed 2026-09-18)
 - [x] [#4](https://github.com/jacktea/data-smith/issues/4) — Session 3: exact data comparison and safe chunk filtering (completed 2026-09-18)
-- [ ] [#5](https://github.com/jacktea/data-smith/issues/5) — Session 4: deterministic, dependency-safe, schema-qualified SQL
+- [x] [#5](https://github.com/jacktea/data-smith/issues/5) — Session 4: deterministic, dependency-safe, schema-qualified SQL (completed 2026-09-18)
 - [ ] [#6](https://github.com/jacktea/data-smith/issues/6) — Session 5: fail-fast CLI and atomic output files
 - [ ] [#7](https://github.com/jacktea/data-smith/issues/7) — Session 6: streaming diff and database performance
 - [ ] [#8](https://github.com/jacktea/data-smith/issues/8) — Session 7: configuration, SSH, connections, and reset safety
@@ -94,6 +94,33 @@ Final verification:
 - `GOCACHE=/tmp/data-smith-go-cache go vet ./...` — PASS
 - `git diff --check` — PASS
 
+## Session 4 acceptance evidence
+
+- `pkg/sql/ident` centralizes PostgreSQL double-quote and MySQL backtick quoting, doubles embedded delimiters, and builds schema-qualified names. Both data DML generators and every adapter data-read/hash/range query now use it; PostgreSQL defaults an absent schema to `public`.
+- Schema comparison sorts table, column, index, and foreign-key keys before producing diffs. `Table.GetColumns` and position ordering are deterministic, including name tie-breaking, and unique-index fallback selection is sorted.
+- TABLE↔VIEW changes are represented as a source-object drop plus target-object create. The generator drops old views/tables before any same-name create, making both transition directions executable.
+- New tables are generated from foreign-key-free copies. All tables are created first; only then are new/modified foreign keys emitted. Mutual references are therefore valid and deterministic instead of depending on Go map iteration.
+- Table drops are dependency ordered after owned foreign keys are removed; foreign-key additions place referenced tables before dependents where acyclic and use deterministic ordering inside a cycle; view creation is topological and view deletion reverses that order. View dependency cycles return an actionable error through `GenerateSchemaSQLSafe`, which the schema CLI uses.
+- MySQL and PostgreSQL schema readers populate `ViewDefinition.Dependencies` from `information_schema.view_table_usage`, enabling real view-chain ordering.
+- Golden fixtures cover a non-public schema containing an embedded quote, mixed-case/reserved names, mutual foreign keys, a three-view chain, TABLE↔VIEW in both directions, and rollback. The test repeats forward and rollback generation 30 times and requires byte-for-byte identity. Separate tests cover embedded quote/backtick escaping, map-backed column/index/foreign-key stability, and view-cycle rejection.
+
+## Session 4 verification
+
+Baseline before changes:
+
+- `go test ./... -count=1` — PASS
+- `go test -race ./... -count=1` — PASS
+- `go vet ./...` — PASS
+
+Final verification:
+
+- `go test ./pkg/sql/... ./pkg/diff ./pkg/db/postgres ./pkg/db/mysql ./internal/datasmith/diff -count=1` — PASS
+- `go test ./... -count=1` — PASS
+- `go test -race ./... -count=1` — PASS
+- `go vet ./...` — PASS
+- `git diff --check` — PASS
+- Protected artifacts: `datasmith` exists, size `0`, status `M`; `CODE_REVIEW_REPORT.md` exists, size `21194`, status `??`; staged diff empty.
+
 ## Open risks and later work
 
 - Session 1 uses deterministic SQL-mock regression tests; live PostgreSQL/MySQL migration E2E remains for #9.
@@ -105,8 +132,13 @@ Final verification:
 - Live PostgreSQL/MySQL `exec-sql` E2E remains part of #9; Session 2 uses deterministic SQL-mock transaction and execution-count tests.
 - Chunk fingerprints remain probabilistic: PostgreSQL uses nested MD5 and MySQL uses XOR-combined CRC32. Matching hashes are not an equivalence proof, even after exact count/min/max validation; concurrent writes outside a shared snapshot can also invalidate a comparison. `--chunk-hash` therefore remains opt-in.
 - Session 3 adapter coverage is deterministic SQL-mock plus in-memory comparison tests. Live cross-database comparison and concurrent-mutation E2E remain deferred to #9.
+- Session 4 validates SQL generation with deterministic unit/golden tests, not live PostgreSQL/MySQL execution. Dual-database apply → empty diff → rollback remains #9.
+- View ordering depends on dependency metadata visible through `information_schema.view_table_usage`; objects hidden by database permissions cannot be ordered from metadata that the connection cannot see.
+- PostgreSQL expression-index definitions returned as complete `pg_get_indexdef` SQL remain preserved verbatim for compatibility rather than parsed and rewritten.
+- `GenerateSchemaSQL` remains source-compatible and returns no statements when safe generation rejects a cycle; CLI and error-aware callers use additive `GenerateSchemaSQLSafe` to receive the error.
+- General Cobra `RunE` conversion, fail-fast table handling, best-effort reporting, and atomic output replacement are intentionally deferred to #6.
 - The original modified, zero-byte `datasmith` binary and untracked `CODE_REVIEW_REPORT.md` are unrelated user changes and must remain untouched in later sessions. Full-suite tests can overwrite `datasmith`; truncate only that newly generated binary afterward to restore the user's pre-session modified state.
 
 ## Next action
 
-Run Session 4 for issue #5 using the complete prompt in `docs/remediation-handoff.md`. Preserve the migration behavior from #2, `exec-sql` safety behavior from #3, and exact comparison/safe hash behavior from #4.
+Run Session 5 for issue #6 using the complete prompt in `docs/remediation-handoff.md`. Preserve migration behavior from #2, `exec-sql` safety from #3, exact comparison/safe hash behavior from #4, and deterministic dependency-safe SQL behavior from #5. Remaining order is #6 → #7 → #8 → #9.

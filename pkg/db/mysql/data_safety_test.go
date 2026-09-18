@@ -23,7 +23,7 @@ func TestGetTableDataBatchPropagatesCursorError(t *testing.T) {
 	adapter, mock := newMockMySQLAdapter(t)
 	wantErr := errors.New("cursor interrupted")
 	rows := sqlmock.NewRows([]string{"id"}).AddRow(int64(1)).AddRow(int64(2)).RowError(1, wantErr)
-	mock.ExpectQuery("SELECT .* FROM `items` .*").WithArgs(2).WillReturnRows(rows)
+	mock.ExpectQuery("SELECT .* FROM `test`\\.`items` .*").WithArgs(2).WillReturnRows(rows)
 
 	_, err := adapter.GetTableDataBatch("items", []string{"id"}, []string{"id"}, nil, 2)
 	if !errors.Is(err, wantErr) {

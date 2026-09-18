@@ -10,13 +10,21 @@ import (
 	"github.com/jacktea/data-smith/pkg/config"
 	"github.com/jacktea/data-smith/pkg/conn"
 	"github.com/jacktea/data-smith/pkg/db/base"
-	"github.com/jacktea/data-smith/pkg/utils"
+	"github.com/jacktea/data-smith/pkg/sql/ident"
 
 	"github.com/lib/pq"
 )
 
 type PostgresAdapter struct {
 	base.BaseAdapter
+}
+
+func (a *PostgresAdapter) quotedTable(table string) string {
+	schema := a.Cfg.TableSchema
+	if schema == "" {
+		schema = "public"
+	}
+	return ident.Qualified(ident.DoubleQuote, schema, table)
 }
 
 func NewPostgresAdapter(cfg *config.ConnConfig) (*PostgresAdapter, error) {
@@ -70,8 +78,8 @@ func (a *PostgresAdapter) GetTableDataBatch(table string, cols, pk []string, las
 		return nil, err
 	}
 	// 构造 SELECT ... FROM table WHERE (pk) > (lastPK) ORDER BY pk LIMIT $N
-	colList := utils.JoinWrap(cols, "\"", ", ")
-	pkList := utils.JoinWrap(pk, "\"", ", ")
+	colList := ident.List(ident.DoubleQuote, cols, ", ")
+	pkList := ident.List(ident.DoubleQuote, pk, ", ")
 	orderBy := pkList
 	where := ""
 	var args []any
@@ -90,7 +98,7 @@ func (a *PostgresAdapter) GetTableDataBatch(table string, cols, pk []string, las
 		}
 		where += ")"
 	}
-	query := fmt.Sprintf("SELECT %s FROM \"%s\" %s ORDER BY %s LIMIT $%d", colList, table, where, orderBy, argIdx)
+	query := fmt.Sprintf("SELECT %s FROM %s %s ORDER BY %s LIMIT $%d", colList, a.quotedTable(table), where, orderBy, argIdx)
 	args = append(args, limit)
 	rows, err := a.Conn.Query(query, args...)
 	if err != nil {
@@ -467,6 +475,25 @@ func (p *PostgresAdapter) extractViewDefinition(table *conn.Table) error {
 	if checkOption.Valid {
 		viewDef.CheckOption = checkOption.String
 	}
+	dependencyRows, err := p.Conn.Query(`
+		SELECT table_schema, table_name
+		FROM information_schema.view_table_usage
+		WHERE view_schema = $1 AND view_name = $2
+		ORDER BY table_schema, table_name`, table.Schema, table.Name)
+	if err != nil {
+		return err
+	}
+	defer dependencyRows.Close()
+	for dependencyRows.Next() {
+		var schema, name string
+		if err := dependencyRows.Scan(&schema, &name); err != nil {
+			return err
+		}
+		viewDef.Dependencies = append(viewDef.Dependencies, schema+"."+name)
+	}
+	if err := dependencyRows.Err(); err != nil {
+		return err
+	}
 
 	table.ViewDefinition = &viewDef
 
@@ -517,12 +544,13 @@ func (p *PostgresAdapter) GetChunkRanges(table string, pk string, chunkSize int)
 		}, nil
 	}
 
+	quotedPK := ident.Quote(ident.DoubleQuote, pk)
 	query := fmt.Sprintf(`
 		SELECT pk FROM (
-			SELECT "%s" as pk, ROW_NUMBER() OVER (ORDER BY "%s" ASC) as rn
-			FROM "%s"
+			SELECT %s as pk, ROW_NUMBER() OVER (ORDER BY %s ASC) as rn
+			FROM %s
 		) t WHERE (rn - 1) %% $1 = 0 ORDER BY pk ASC
-	`, pk, pk, table)
+	`, quotedPK, quotedPK, p.quotedTable(table))
 
 	rows, err := p.Conn.Query(query, chunkSize)
 	if err != nil {
@@ -566,7 +594,8 @@ func (p *PostgresAdapter) GetChunkStats(table string, pk string) (chunk.ChunkSta
 	if strings.TrimSpace(table) == "" || strings.TrimSpace(pk) == "" {
 		return chunk.ChunkStats{}, fmt.Errorf("table and primary key are required for chunk stats")
 	}
-	query := fmt.Sprintf("SELECT COUNT(*), MIN(\"%s\"), MAX(\"%s\") FROM \"%s\"", pk, pk, table)
+	quotedPK := ident.Quote(ident.DoubleQuote, pk)
+	query := fmt.Sprintf("SELECT COUNT(*), MIN(%s), MAX(%s) FROM %s", quotedPK, quotedPK, p.quotedTable(table))
 	var stats chunk.ChunkStats
 	if err := p.Conn.QueryRow(query).Scan(&stats.Count, &stats.MinPK, &stats.MaxPK); err != nil {
 		return chunk.ChunkStats{}, err
@@ -583,34 +612,36 @@ func (p *PostgresAdapter) GetChunkHash(table string, cols []string, pk string, m
 		if strings.TrimSpace(c) == "" {
 			return "", fmt.Errorf("chunk hash column names must not be empty")
 		}
-		quotedCols[i] = fmt.Sprintf("CASE WHEN \"%s\" IS NULL THEN 'N' ELSE 'V' || octet_length(\"%s\"::text)::text || ':' || \"%s\"::text END", c, c, c)
+		quoted := ident.Quote(ident.DoubleQuote, c)
+		quotedCols[i] = fmt.Sprintf("CASE WHEN %s IS NULL THEN 'N' ELSE 'V' || octet_length(%s::text)::text || ':' || %s::text END", quoted, quoted, quoted)
 	}
 	concatExpr := strings.Join(quotedCols, " || '|' || ")
 
 	var whereClause string
 	var args []any
+	quotedPK := ident.Quote(ident.DoubleQuote, pk)
 	switch {
 	case minPK == nil && maxPK == nil:
 		whereClause = "TRUE"
 	case minPK == nil:
-		whereClause = fmt.Sprintf("\"%s\" < $1", pk)
+		whereClause = fmt.Sprintf("%s < $1", quotedPK)
 		args = append(args, maxPK)
 	case maxPK == nil:
-		whereClause = fmt.Sprintf("\"%s\" >= $1", pk)
+		whereClause = fmt.Sprintf("%s >= $1", quotedPK)
 		args = append(args, minPK)
 	default:
-		whereClause = fmt.Sprintf("\"%s\" >= $1 AND \"%s\" < $2", pk, pk)
+		whereClause = fmt.Sprintf("%s >= $1 AND %s < $2", quotedPK, quotedPK)
 		args = append(args, minPK, maxPK)
 	}
 
 	query := fmt.Sprintf(`
-		SELECT COALESCE(md5(string_agg(md5(row_data), '' ORDER BY "%s")), '')
+		SELECT COALESCE(md5(string_agg(md5(row_data), '' ORDER BY %s)), '')
 		FROM (
-			SELECT (%s) AS row_data, "%s"
-			FROM "%s"
+			SELECT (%s) AS row_data, %s
+			FROM %s
 			WHERE %s
 		) t
-	`, pk, concatExpr, pk, table, whereClause)
+	`, quotedPK, concatExpr, quotedPK, p.quotedTable(table), whereClause)
 
 	var hash sql.NullString
 	err := p.Conn.QueryRow(query, args...).Scan(&hash)

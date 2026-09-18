@@ -73,8 +73,16 @@ var diffSchemaCmd = &cobra.Command{
 		printDiffSummary(forwardDiff)
 
 		// 生成 SQL 脚本 (使用 Source 端方言，在 Source 端执行)
-		forwardSQLs := sql.GenerateSchemaSQL(forwardDiff, cfg.SourceDB.Type)
-		rollbackSQLs := sql.GenerateSchemaSQL(rollbackDiff, cfg.SourceDB.Type)
+		forwardSQLs, err := sql.GenerateSchemaSQLSafe(forwardDiff, cfg.SourceDB.Type)
+		if err != nil {
+			log.Println("Error generating forward schema SQL:", err)
+			os.Exit(1)
+		}
+		rollbackSQLs, err := sql.GenerateSchemaSQLSafe(rollbackDiff, cfg.SourceDB.Type)
+		if err != nil {
+			log.Println("Error generating rollback schema SQL:", err)
+			os.Exit(1)
+		}
 
 		diffDir, err := os.Getwd()
 		if err != nil {

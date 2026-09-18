@@ -1,0 +1,22 @@
+DROP VIEW "sales""Ops"."Rebuild";
+DROP TABLE "sales""Ops"."Convert";
+CREATE TABLE "sales""Ops"."Alpha" (
+"ID" int4 NOT NULL,
+  CONSTRAINT "Alpha_pk" PRIMARY KEY ("ID")
+);
+CREATE TABLE "sales""Ops"."Beta" (
+"ID" int4 NOT NULL,
+  CONSTRAINT "Beta_pk" PRIMARY KEY ("ID")
+);
+CREATE TABLE "sales""Ops"."Rebuild" (
+"ID" int4 NOT NULL,
+  CONSTRAINT "Rebuild_pk" PRIMARY KEY ("ID")
+);
+ALTER TABLE "sales""Ops"."Alpha" ADD CONSTRAINT "Alpha_to_Beta" FOREIGN KEY ("ID") REFERENCES "sales""Ops"."Beta" ("ID");
+ALTER TABLE "sales""Ops"."Beta" ADD CONSTRAINT "Beta_to_Alpha" FOREIGN KEY ("ID") REFERENCES "sales""Ops"."Alpha" ("ID");
+CREATE VIEW "sales""Ops"."BaseView" AS
+SELECT * FROM "sales""Ops"."Alpha";
+CREATE VIEW "sales""Ops"."Convert" AS
+SELECT * FROM "sales""Ops"."BaseView";
+CREATE VIEW "sales""Ops"."Summary" AS
+SELECT * FROM "sales""Ops"."Convert";

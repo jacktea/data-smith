@@ -24,7 +24,7 @@ func TestGetTableDataBatchPropagatesCursorError(t *testing.T) {
 	adapter, mock := newMockPostgresAdapter(t)
 	wantErr := errors.New("cursor interrupted")
 	rows := sqlmock.NewRows([]string{"id"}).AddRow(int64(1)).AddRow(int64(2)).RowError(1, wantErr)
-	mock.ExpectQuery(`SELECT .* FROM "items" .*`).WithArgs(2).WillReturnRows(rows)
+	mock.ExpectQuery(`SELECT .* FROM "public"\."items" .*`).WithArgs(2).WillReturnRows(rows)
 
 	_, err := adapter.GetTableDataBatch("items", []string{"id"}, []string{"id"}, nil, 2)
 	if !errors.Is(err, wantErr) {
@@ -50,7 +50,7 @@ func TestGetTableDataBatchRejectsInvalidInputsBeforeQuery(t *testing.T) {
 
 func TestChunkRangesStartUnboundedAndHashDistinguishesNull(t *testing.T) {
 	adapter, mock := newMockPostgresAdapter(t)
-	statsQuery := regexp.QuoteMeta(`SELECT COUNT(*), MIN("id"), MAX("id") FROM "items"`)
+	statsQuery := regexp.QuoteMeta(`SELECT COUNT(*), MIN("id"), MAX("id") FROM "public"."items"`)
 	mock.ExpectQuery(statsQuery).WillReturnRows(sqlmock.NewRows([]string{"count", "min", "max"}).AddRow(int64(3), int64(1), int64(3)))
 	mock.ExpectQuery(`(?s)SELECT pk FROM .*ROW_NUMBER\(\) OVER.*`).WithArgs(2).
 		WillReturnRows(sqlmock.NewRows([]string{"pk"}).AddRow(int64(1)).AddRow(int64(3)))

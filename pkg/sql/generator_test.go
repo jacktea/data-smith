@@ -97,13 +97,13 @@ func TestGenerateSchemaSQL_FourStageOrdering(t *testing.T) {
 	// DROP CONSTRAINT fk_old 必须早于 DROP COLUMN old_col
 	// DROP INDEX idx_old 必须早于 DROP COLUMN old_col
 	posDropFk := strings.Index(fullScript, "DROP CONSTRAINT IF EXISTS \"fk_old\"")
-	posDropIdx := strings.Index(fullScript, "DROP INDEX \"idx_old\"")
+	posDropIdx := strings.Index(fullScript, "DROP INDEX \"public\".\"idx_old\"")
 	posDropCol := strings.Index(fullScript, "DROP COLUMN \"old_col\"")
 	posAlterCol := strings.Index(fullScript, "ALTER COLUMN \"email\"")
 	posAddCol := strings.Index(fullScript, "ADD COLUMN \"age\"")
-	posCreateTbl := strings.Index(fullScript, "CREATE TABLE \"new_table\"")
+	posCreateTbl := strings.Index(fullScript, "CREATE TABLE \"public\".\"new_table\"")
 	posAddFk := strings.Index(fullScript, "ADD CONSTRAINT \"fk_new\"")
-	posDropTbl := strings.Index(fullScript, "DROP TABLE \"old_table\"")
+	posDropTbl := strings.Index(fullScript, "DROP TABLE \"public\".\"old_table\"")
 	posComment := strings.Index(fullScript, "COMMENT ON TABLE \"public\".\"users\"")
 
 	if posDropFk == -1 || posDropIdx == -1 || posDropCol == -1 || posAlterCol == -1 ||
@@ -119,12 +119,12 @@ func TestGenerateSchemaSQL_FourStageOrdering(t *testing.T) {
 	if !(posDropCol < posAlterCol && posAlterCol < posAddCol) {
 		t.Errorf("expected drop col < alter col < add col")
 	}
-	// 阶段 3（建表）在 阶段 2 之后
-	if !(posAddCol < posCreateTbl) {
-		t.Errorf("expected add col < create table")
+	// 删除旧对象必须在结构修改和创建新对象之前，确保类型转换可执行。
+	if !(posDropTbl < posAlterCol && posAddCol < posCreateTbl) {
+		t.Errorf("expected drop table < alter column and add column < create table")
 	}
-	// 阶段 4（加外键、删旧表、加注释）在 阶段 3 之后
-	if !(posCreateTbl < posAddFk && posCreateTbl < posDropTbl && posCreateTbl < posComment) {
-		t.Errorf("expected create table < add fk / drop table / comment")
+	// 所有表建好后才添加外键，注释最后生成。
+	if !(posCreateTbl < posAddFk && posCreateTbl < posComment) {
+		t.Errorf("expected create table < add fk / comment")
 	}
 }
