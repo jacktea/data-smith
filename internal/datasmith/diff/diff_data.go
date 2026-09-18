@@ -2,6 +2,7 @@ package diff
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/jacktea/data-smith/internal/config"
 	pkgconfig "github.com/jacktea/data-smith/pkg/config"
+	"github.com/jacktea/data-smith/pkg/conn"
 	"github.com/jacktea/data-smith/pkg/db"
 	"github.com/jacktea/data-smith/pkg/diff"
 	"github.com/jacktea/data-smith/pkg/sql"
@@ -22,12 +24,27 @@ var diffDataCmd = &cobra.Command{
 	RunE:  runDiffData,
 }
 
+type tableDiffFailure struct {
+	table string
+	err   error
+}
+
+type tableDiffResult struct {
+	target        *conn.Table
+	source        *conn.Table
+	diff          *diff.DataDiff
+	effectiveCols []string
+}
+
+type tableDiffFunc func(pkgconfig.Rule) (*tableDiffResult, error)
+
 func runDiffData(cmd *cobra.Command, args []string) error {
 	configPath, _ := cmd.Flags().GetString("config")
 	rulesPath, _ := cmd.Flags().GetString("rules")
 	batchSize, _ := cmd.Flags().GetInt("batch-size")
 	enableChunkHash, _ := cmd.Flags().GetBool("chunk-hash")
 	chunkSize, _ := cmd.Flags().GetInt("chunk-size")
+	bestEffort, _ := cmd.Flags().GetBool("best-effort")
 	if err := validateDiffDataInputs(configPath, rulesPath, batchSize, chunkSize, enableChunkHash); err != nil {
 		return err
 	}
@@ -73,31 +90,18 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 	log.Printf("Forward Diff file: %s\n", diffFile)
 	log.Printf("Rollback Diff file: %s\n", rollbackFile)
 
-	sqlFile, err := os.Create(diffFile)
-	if err != nil {
-		return fmt.Errorf("create sql file: %w", err)
-	}
-	defer sqlFile.Close()
-
-	rollbackSqlFile, err := os.Create(rollbackFile)
-	if err != nil {
-		return fmt.Errorf("create rollback sql file: %w", err)
-	}
-	defer rollbackSqlFile.Close()
-
-	type tableRollbackSQL struct {
-		tableName string
-		sqls      []string
-	}
-	var rollbackList []tableRollbackSQL
-
-	for _, rule := range rules.Rules {
+	compareTable := func(rule pkgconfig.Rule) (*tableDiffResult, error) {
 		tgtTable, err := tgtDB.ExtractTable(rule.Table)
-		if err != nil || tgtTable == nil {
-			log.Printf("Error extracting table %s: %v\n", rule.Table, err)
-			continue
+		if err != nil {
+			return nil, fmt.Errorf("extract target table: %w", err)
 		}
-		srcTable, _ := srcDB.ExtractTable(rule.Table)
+		if tgtTable == nil {
+			return nil, fmt.Errorf("extract target table: table not found")
+		}
+		srcTable, err := srcDB.ExtractTable(rule.Table)
+		if err != nil {
+			return nil, fmt.Errorf("extract source table: %w", err)
+		}
 
 		start := time.Now()
 		var diffResult *diff.DataDiff
@@ -126,69 +130,165 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 			)
 		}
 		if err != nil {
-			return fmt.Errorf("compare data for table %s: %w", rule.Table, err)
+			return nil, fmt.Errorf("compare data: %w", err)
 		}
-		log.Printf("Time taken: %v\n", time.Since(start))
+		log.Printf("Table %s compared in %v\n", rule.Table, time.Since(start))
+		return &tableDiffResult{
+			target:        tgtTable,
+			source:        srcTable,
+			diff:          diffResult,
+			effectiveCols: effectiveCols,
+		}, nil
+	}
 
-		// 1. 写入正向升级 SQL
-		sqlFile.WriteString(fmt.Sprintf("--- diff %s \n", rule.Table))
-		for _, row := range diffResult.Dropped {
-			sqlFile.WriteString(dbDialect.GenerateDeleteSql(tgtTable, row) + "\n")
+	var failures []tableDiffFailure
+	err = writeAtomicPair(diffFile, rollbackFile, func(forward, rollback io.Writer) error {
+		var generateErr error
+		failures, generateErr = generateDataDiffOutputs(
+			forward,
+			rollback,
+			rules.Rules,
+			dbDialect,
+			bestEffort,
+			compareTable,
+		)
+		return generateErr
+	})
+	if err != nil {
+		return err
+	}
+	if len(failures) > 0 {
+		log.Printf("WARNING: data diff is INCOMPLETE (--best-effort); %d table(s) failed:", len(failures))
+		for _, failure := range failures {
+			log.Printf("  - %s: %v", failure.table, failure.err)
 		}
-		for _, row := range diffResult.Added {
-			sqlFile.WriteString(dbDialect.GenerateInsertSql(tgtTable, row) + "\n")
-		}
-		for _, row := range diffResult.Modified {
-			colsToUpdate := row.ModifiedCols
-			if len(colsToUpdate) == 0 {
-				colsToUpdate = effectiveCols
+	}
+	return nil
+}
+
+type tableRollbackSQL struct {
+	tableName string
+	sqls      []string
+}
+
+func generateDataDiffOutputs(
+	forward io.Writer,
+	rollback io.Writer,
+	rules []pkgconfig.Rule,
+	dialect sql.IDialect,
+	bestEffort bool,
+	compareTable tableDiffFunc,
+) ([]tableDiffFailure, error) {
+	var failures []tableDiffFailure
+	var rollbackList []tableRollbackSQL
+
+	for _, rule := range rules {
+		result, err := compareTable(rule)
+		if err != nil {
+			failure := tableDiffFailure{table: rule.Table, err: err}
+			failures = append(failures, failure)
+			if !bestEffort {
+				return failures, fmt.Errorf("diff table %s: %w", rule.Table, err)
 			}
-			sqlStr := dbDialect.GenerateUpdateSql(tgtTable, row.New, colsToUpdate)
-			if sqlStr != "" {
-				sqlFile.WriteString(sqlStr + "\n")
-			}
+			continue
 		}
 
-		// 2. 收集当前表反向还原 SQL
-		var tblRollback []string
-		// 反向步骤 1: 将修改的字段还原为 Old 值
-		for _, row := range diffResult.Modified {
-			colsToUpdate := row.ModifiedCols
-			if len(colsToUpdate) == 0 {
-				colsToUpdate = effectiveCols
-			}
-			sqlStr := dbDialect.GenerateUpdateSql(tgtTable, row.Old, colsToUpdate)
-			if sqlStr != "" {
-				tblRollback = append(tblRollback, sqlStr)
-			}
+		if err := writeDataDiffTable(forward, rule.Table, result, dialect); err != nil {
+			return failures, fmt.Errorf("write forward diff for table %s: %w", rule.Table, err)
 		}
-		// 反向步骤 2: 将正向新增的数据 DELETE 掉（按 tgtRow 主键）
-		for _, row := range diffResult.Added {
-			tblRollback = append(tblRollback, dbDialect.GenerateDeleteSql(tgtTable, row))
-		}
-		// 反向步骤 3: 将正向删除的数据 INSERT 插回（按 srcRow 完整数据）
-		for _, row := range diffResult.Dropped {
-			tblForInsert := tgtTable
-			if srcTable != nil {
-				tblForInsert = srcTable
-			}
-			tblRollback = append(tblRollback, dbDialect.GenerateInsertSql(tblForInsert, row))
-		}
+		rollbackList = append(rollbackList, buildTableRollback(rule.Table, result, dialect))
+	}
 
-		if len(tblRollback) > 0 {
-			rollbackList = append(rollbackList, tableRollbackSQL{
-				tableName: rule.Table,
-				sqls:      tblRollback,
-			})
+	for i := len(rollbackList) - 1; i >= 0; i-- {
+		table := rollbackList[i]
+		if len(table.sqls) == 0 {
+			continue
+		}
+		if _, err := fmt.Fprintf(rollback, "--- rollback %s \n", table.tableName); err != nil {
+			return failures, err
+		}
+		for _, statement := range table.sqls {
+			if _, err := fmt.Fprintln(rollback, statement); err != nil {
+				return failures, err
+			}
 		}
 	}
 
-	// 3. 逆序写入回滚 SQL（表级倒序回滚，规避外键依赖冲突）
-	for i := len(rollbackList) - 1; i >= 0; i-- {
-		tb := rollbackList[i]
-		rollbackSqlFile.WriteString(fmt.Sprintf("--- rollback %s \n", tb.tableName))
-		for _, s := range tb.sqls {
-			rollbackSqlFile.WriteString(s + "\n")
+	if err := writeCompletionReport(forward, bestEffort, failures); err != nil {
+		return failures, fmt.Errorf("write forward completion report: %w", err)
+	}
+	if err := writeCompletionReport(rollback, bestEffort, failures); err != nil {
+		return failures, fmt.Errorf("write rollback completion report: %w", err)
+	}
+	return failures, nil
+}
+
+func writeDataDiffTable(writer io.Writer, table string, result *tableDiffResult, dialect sql.IDialect) error {
+	if _, err := fmt.Fprintf(writer, "--- diff %s \n", table); err != nil {
+		return err
+	}
+	for _, row := range result.diff.Dropped {
+		if _, err := fmt.Fprintln(writer, dialect.GenerateDeleteSql(result.target, row)); err != nil {
+			return err
+		}
+	}
+	for _, row := range result.diff.Added {
+		if _, err := fmt.Fprintln(writer, dialect.GenerateInsertSql(result.target, row)); err != nil {
+			return err
+		}
+	}
+	for _, row := range result.diff.Modified {
+		colsToUpdate := row.ModifiedCols
+		if len(colsToUpdate) == 0 {
+			colsToUpdate = result.effectiveCols
+		}
+		if statement := dialect.GenerateUpdateSql(result.target, row.New, colsToUpdate); statement != "" {
+			if _, err := fmt.Fprintln(writer, statement); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func buildTableRollback(table string, result *tableDiffResult, dialect sql.IDialect) tableRollbackSQL {
+	rollback := tableRollbackSQL{tableName: table}
+	for _, row := range result.diff.Modified {
+		colsToUpdate := row.ModifiedCols
+		if len(colsToUpdate) == 0 {
+			colsToUpdate = result.effectiveCols
+		}
+		if statement := dialect.GenerateUpdateSql(result.target, row.Old, colsToUpdate); statement != "" {
+			rollback.sqls = append(rollback.sqls, statement)
+		}
+	}
+	for _, row := range result.diff.Added {
+		rollback.sqls = append(rollback.sqls, dialect.GenerateDeleteSql(result.target, row))
+	}
+	for _, row := range result.diff.Dropped {
+		tableForInsert := result.target
+		if result.source != nil {
+			tableForInsert = result.source
+		}
+		rollback.sqls = append(rollback.sqls, dialect.GenerateInsertSql(tableForInsert, row))
+	}
+	return rollback
+}
+
+func writeCompletionReport(writer io.Writer, bestEffort bool, failures []tableDiffFailure) error {
+	if len(failures) == 0 {
+		_, err := fmt.Fprintln(writer, "-- DATASMITH RESULT: COMPLETE")
+		return err
+	}
+	if !bestEffort {
+		return fmt.Errorf("internal error: failures cannot be published without --best-effort")
+	}
+	if _, err := fmt.Fprintf(writer, "-- DATASMITH RESULT: INCOMPLETE (--best-effort); %d TABLE(S) FAILED\n", len(failures)); err != nil {
+		return err
+	}
+	for _, failure := range failures {
+		if _, err := fmt.Fprintf(writer, "-- FAILED TABLE %s: %v\n", failure.table, failure.err); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -240,6 +340,7 @@ func init() {
 	diffDataCmd.Flags().Int("batch-size", 1000, "Batch size for data diff and SQL output")
 	diffDataCmd.Flags().Bool("chunk-hash", false, "Enable probabilistic chunk fingerprints after exact count/min/max checks (opt-in)")
 	diffDataCmd.Flags().Int("chunk-size", 10000, "Chunk size for hash pre-filtering")
+	diffDataCmd.Flags().Bool("best-effort", false, "Continue after table errors and emit an explicitly incomplete report")
 	diffDataCmd.MarkFlagRequired("config")
 	diffDataCmd.MarkFlagRequired("rules")
 }

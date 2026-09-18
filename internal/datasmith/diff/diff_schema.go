@@ -2,6 +2,7 @@ package diff
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -19,92 +20,89 @@ import (
 var diffSchemaCmd = &cobra.Command{
 	Use:   "diff-schema",
 	Short: "Compare database schemas and generate forward diff and rollback SQL scripts",
-	Run: func(cmd *cobra.Command, args []string) {
-		configPath, _ := cmd.Flags().GetString("config")
+	RunE:  runDiffSchema,
+}
 
-		cfg, err := config.LoadConfig(configPath)
-		if err != nil {
-			log.Println("Error loading config:", err)
-			os.Exit(1)
+func runDiffSchema(cmd *cobra.Command, args []string) error {
+	configPath, _ := cmd.Flags().GetString("config")
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	srcDB, err := db.NewDBAdapter(&cfg.SourceDB)
+	if err != nil {
+		return fmt.Errorf("connect to source DB: %w", err)
+	}
+	defer srcDB.Close()
+	tgtDB, err := db.NewDBAdapter(&cfg.TargetDB)
+	if err != nil {
+		return fmt.Errorf("connect to target DB: %w", err)
+	}
+	defer tgtDB.Close()
+
+	start := time.Now()
+	log.Printf("Start reading schemas from source (%s) and target (%s)...\n", cfg.SourceDB.Type, cfg.TargetDB.Type)
+
+	srcSchema, err := srcDB.ReadSchema()
+	if err != nil {
+		return fmt.Errorf("read source schema: %w", err)
+	}
+	tgtSchema, err := tgtDB.ReadSchema()
+	if err != nil {
+		return fmt.Errorf("read target schema: %w", err)
+	}
+
+	// 表过滤支持
+	if len(cfg.IncludeTables) > 0 || len(cfg.ExcludeTables) > 0 {
+		srcSchema.Tables = filterTables(srcSchema.Tables, cfg.IncludeTables, cfg.ExcludeTables)
+		tgtSchema.Tables = filterTables(tgtSchema.Tables, cfg.IncludeTables, cfg.ExcludeTables)
+	}
+
+	// 1. 正向比较 (Source -> Target): 目标是将 Source 升级为 Target
+	forwardDiff := diff.CompareSchemas(srcSchema, tgtSchema)
+
+	// 2. 逆向比较 (Target -> Source): 目标是将已升级的 Source 回滚还原
+	rollbackDiff := diff.CompareSchemas(tgtSchema, srcSchema)
+
+	log.Printf("Schemas compared successfully, time taken: %v\n", time.Since(start))
+
+	// 打印结构化差异概览
+	printDiffSummary(forwardDiff)
+
+	// 生成 SQL 脚本 (使用 Source 端方言，在 Source 端执行)
+	forwardSQLs, err := sql.GenerateSchemaSQLSafe(forwardDiff, cfg.SourceDB.Type)
+	if err != nil {
+		return fmt.Errorf("generate forward schema SQL: %w", err)
+	}
+	rollbackSQLs, err := sql.GenerateSchemaSQLSafe(rollbackDiff, cfg.SourceDB.Type)
+	if err != nil {
+		return fmt.Errorf("generate rollback schema SQL: %w", err)
+	}
+
+	diffDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get current working directory: %w", err)
+	}
+
+	diffFile := fmt.Sprintf("%s/schema_diff.sql", diffDir)
+	rollbackFile := fmt.Sprintf("%s/schema_diff_rollback.sql", diffDir)
+
+	if err := writeAtomicPair(diffFile, rollbackFile, func(forward, rollback io.Writer) error {
+		if err := writeSQLStatements(forward, forwardSQLs); err != nil {
+			return fmt.Errorf("write forward schema SQL: %w", err)
 		}
-
-		srcDB, err := db.NewDBAdapter(&cfg.SourceDB)
-		if err != nil {
-			log.Println("Error connecting to source DB:", err)
-			os.Exit(1)
+		if err := writeSQLStatements(rollback, rollbackSQLs); err != nil {
+			return fmt.Errorf("write rollback schema SQL: %w", err)
 		}
-		defer srcDB.Close()
-		tgtDB, err := db.NewDBAdapter(&cfg.TargetDB)
-		if err != nil {
-			log.Println("Error connecting to target DB:", err)
-			os.Exit(1)
-		}
-		defer tgtDB.Close()
-
-		start := time.Now()
-		log.Printf("Start reading schemas from source (%s) and target (%s)...\n", cfg.SourceDB.Type, cfg.TargetDB.Type)
-
-		srcSchema, err := srcDB.ReadSchema()
-		if err != nil {
-			log.Println("Error reading source schema:", err)
-			os.Exit(1)
-		}
-		tgtSchema, err := tgtDB.ReadSchema()
-		if err != nil {
-			log.Println("Error reading target schema:", err)
-			os.Exit(1)
-		}
-
-		// 表过滤支持
-		if len(cfg.IncludeTables) > 0 || len(cfg.ExcludeTables) > 0 {
-			srcSchema.Tables = filterTables(srcSchema.Tables, cfg.IncludeTables, cfg.ExcludeTables)
-			tgtSchema.Tables = filterTables(tgtSchema.Tables, cfg.IncludeTables, cfg.ExcludeTables)
-		}
-
-		// 1. 正向比较 (Source -> Target): 目标是将 Source 升级为 Target
-		forwardDiff := diff.CompareSchemas(srcSchema, tgtSchema)
-
-		// 2. 逆向比较 (Target -> Source): 目标是将已升级的 Source 回滚还原
-		rollbackDiff := diff.CompareSchemas(tgtSchema, srcSchema)
-
-		log.Printf("Schemas compared successfully, time taken: %v\n", time.Since(start))
-
-		// 打印结构化差异概览
-		printDiffSummary(forwardDiff)
-
-		// 生成 SQL 脚本 (使用 Source 端方言，在 Source 端执行)
-		forwardSQLs, err := sql.GenerateSchemaSQLSafe(forwardDiff, cfg.SourceDB.Type)
-		if err != nil {
-			log.Println("Error generating forward schema SQL:", err)
-			os.Exit(1)
-		}
-		rollbackSQLs, err := sql.GenerateSchemaSQLSafe(rollbackDiff, cfg.SourceDB.Type)
-		if err != nil {
-			log.Println("Error generating rollback schema SQL:", err)
-			os.Exit(1)
-		}
-
-		diffDir, err := os.Getwd()
-		if err != nil {
-			log.Println("Error getting current working directory:", err)
-			os.Exit(1)
-		}
-
-		diffFile := fmt.Sprintf("%s/schema_diff.sql", diffDir)
-		rollbackFile := fmt.Sprintf("%s/schema_diff_rollback.sql", diffDir)
-
-		if err := writeSqlFile(diffFile, forwardSQLs); err != nil {
-			log.Println("Error writing diff SQL file:", err)
-			os.Exit(1)
-		}
-		log.Printf("Forward diff SQL generated: %s (to be executed on SOURCE)\n", diffFile)
-
-		if err := writeSqlFile(rollbackFile, rollbackSQLs); err != nil {
-			log.Println("Error writing rollback SQL file:", err)
-			os.Exit(1)
-		}
-		log.Printf("Rollback SQL generated: %s (to restore SOURCE back to original state)\n", rollbackFile)
-	},
+		return nil
+	}); err != nil {
+		return err
+	}
+	log.Printf("Forward diff SQL generated: %s (to be executed on SOURCE)\n", diffFile)
+	log.Printf("Rollback SQL generated: %s (to restore SOURCE back to original state)\n", rollbackFile)
+	return nil
 }
 
 func filterTables(tables map[string]*conn.Table, includes, excludes []string) map[string]*conn.Table {
@@ -206,14 +204,15 @@ func printDiffSummary(d *diff.SchemaDiff) {
 }
 
 func writeSqlFile(filepath string, sqls []string) error {
-	f, err := os.Create(filepath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+	return writeAtomicFile(filepath, func(writer io.Writer) error {
+		return writeSQLStatements(writer, sqls)
+	})
+}
+
+func writeSQLStatements(writer io.Writer, sqls []string) error {
 	for _, s := range sqls {
 		if s != "" {
-			if _, err := f.WriteString(s + "\n"); err != nil {
+			if _, err := fmt.Fprintln(writer, s); err != nil {
 				return err
 			}
 		}

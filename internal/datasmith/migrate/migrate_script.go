@@ -2,7 +2,6 @@ package migrate
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/jacktea/data-smith/internal/config"
 	"github.com/jacktea/data-smith/internal/datasmith/migrate/local"
@@ -16,19 +15,17 @@ import (
 var migrateScript = &cobra.Command{
 	Use:   "migrate-script",
 	Short: "Migration script to target database",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		configPath, _ := cmd.Flags().GetString("config")
 
 		cfg, err := config.LoadConfig(configPath)
 		if err != nil {
-			logger.Errorf("Error loading config: %v", err)
-			os.Exit(1)
+			return fmt.Errorf("load config: %w", err)
 		}
 
 		tgtDB, err := db.NewDBAdapter(&cfg.TargetDB)
 		if err != nil {
-			logger.Errorf("Error connecting to target DB: %v", err)
-			os.Exit(1)
+			return fmt.Errorf("connect to target DB: %w", err)
 		}
 		defer tgtDB.Close()
 
@@ -36,12 +33,10 @@ var migrateScript = &cobra.Command{
 		dir, _ := cmd.Flags().GetString("dir")
 		targetVersion, _ := cmd.Flags().GetString("version")
 
-		err = runMigrations(tgtDB, dir, dryRun, targetVersion)
-		if err != nil {
-			logger.Errorf("Error running migrations: %v", err)
-			os.Exit(1)
+		if err := runMigrations(tgtDB, dir, dryRun, targetVersion); err != nil {
+			return fmt.Errorf("run migrations: %w", err)
 		}
-
+		return nil
 	},
 }
 

@@ -39,12 +39,7 @@ Examples:
 
   # 启用显式事务执行 (成功后提交，失败回滚)
   datasmith exec-sql -c configs/config.yaml -f data_diff.sql --tx`,
-	Run: func(cmd *cobra.Command, args []string) {
-		if err := runExecSQL(cmd, args); err != nil {
-			logger.Errorf("执行失败: %v", err)
-			os.Exit(1)
-		}
-	},
+	RunE: runExecSQL,
 }
 
 func init() {

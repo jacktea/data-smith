@@ -10,7 +10,7 @@ Execution order is sequential in the shared checkout. Each session must preserve
 - [x] [#3](https://github.com/jacktea/data-smith/issues/3) — Session 2: `exec-sql` parsing, transactions, and dry-run (completed 2026-09-18)
 - [x] [#4](https://github.com/jacktea/data-smith/issues/4) — Session 3: exact data comparison and safe chunk filtering (completed 2026-09-18)
 - [x] [#5](https://github.com/jacktea/data-smith/issues/5) — Session 4: deterministic, dependency-safe, schema-qualified SQL (completed 2026-09-18)
-- [ ] [#6](https://github.com/jacktea/data-smith/issues/6) — Session 5: fail-fast CLI and atomic output files
+- [x] [#6](https://github.com/jacktea/data-smith/issues/6) — Session 5: fail-fast CLI and atomic output files (completed 2026-09-18)
 - [ ] [#7](https://github.com/jacktea/data-smith/issues/7) — Session 6: streaming diff and database performance
 - [ ] [#8](https://github.com/jacktea/data-smith/issues/8) — Session 7: configuration, SSH, connections, and reset safety
 - [ ] [#9](https://github.com/jacktea/data-smith/issues/9) — Session 8: dual-database E2E, CI, coverage, and documentation
@@ -119,7 +119,35 @@ Final verification:
 - `go test -race ./... -count=1` — PASS
 - `go vet ./...` — PASS
 - `git diff --check` — PASS
-- Protected artifacts: `datasmith` exists, size `0`, status `M`; `CODE_REVIEW_REPORT.md` exists, size `21194`, status `??`; staged diff empty.
+- Current protected-artifact correction: `datasmith` is the user's executable, size `7301362`, mode `-rwxr-xr-x`, SHA-256 `efadb73998d2e845b88a5d3465b12a3b21e3c4d82d59c74a1f1202cc7dd56253`, status `M`; `CODE_REVIEW_REPORT.md` is size `21194`, SHA-256 `9c529456726a93167b326e1a0c07f740ad013dcc42269f0a2b893539d2d3424b`, status `??`; staged diff is empty. This supersedes the obsolete zero-byte description.
+
+## Session 5 acceptance evidence
+
+- All Cobra business handlers use `RunE` and return wrapped errors. Static audit finds no `Run:` handlers under `internal`/`cmd`; the only `os.Exit` is the process-root mapping in `internal/datasmith/root.go`.
+- `diff-data` is fail-fast by default. A target/source extraction or comparison failure returns an error before final files are published. `TestGenerateDataDiffOutputsFailsFastByDefault` proves the second table is not attempted after the first failure.
+- `diff-data --best-effort` continues through every rule, records failures in input order, logs every failed table, and appends `DATASMITH RESULT: INCOMPLETE (--best-effort)` plus every table/error to both forward and rollback outputs. `TestGenerateDataDiffOutputsBestEffortListsEveryFailedTable` covers the complete report.
+- Data and schema forward/rollback outputs are written to same-directory temporary files through a shared atomic-output layer. Every SQL write is checked, buffered writers are flushed, files are synced and closed, and parent directories are synced before success is reported.
+- Forward/rollback publication is treated as a pair. Existing finals are moved to same-directory backups before publication; any reported publish or directory-sync failure removes incomplete outputs and restores both previous files. Backups and session temporary files are cleaned without touching unrelated files.
+- `TestAtomicPairPropagatesImmediateWriteError`, `TestAtomicPairPropagatesOutputFailuresAndPreservesFinals`, `TestAtomicPairCallbackWriteErrorPreservesFinals`, and `TestAtomicPairSecondRenameFailureRestoresBothFinals` inject write, flush, sync, close, generation, and second-rename failures and require old forward/rollback bytes to remain unchanged with no temporary artifacts. `TestAtomicPairSuccessReplacesBothFinals` proves the success path replaces both.
+- Existing command defaults remain unchanged except the intentional default fail-fast behavior. `--best-effort` is additive and defaults to false; the legacy internal `writeSqlFile` helper remains as an error-returning compatibility wrapper over atomic single-file output.
+
+## Session 5 verification
+
+Baseline before changes:
+
+- `go test ./... -count=1` — PASS
+- `go test -race ./... -count=1` — PASS
+- `go vet ./...` — PASS
+
+Final verification:
+
+- `go test ./internal/datasmith/diff -run 'AtomicPair|GenerateDataDiffOutputs|Validate' -count=1 -v` — PASS
+- `go test ./... -count=1` — PASS
+- `go test -race ./... -count=1` — PASS
+- `go vet ./...` — PASS
+- `git diff --check` — PASS
+- Static audit: no business `Run:` handlers; only `internal/datasmith/root.go` calls `os.Exit` — PASS
+- Protected artifacts: `datasmith` size/mode/SHA/status exactly match the corrected values above; `CODE_REVIEW_REPORT.md` size/SHA/status are unchanged; staged diff empty.
 
 ## Open risks and later work
 
@@ -136,9 +164,9 @@ Final verification:
 - View ordering depends on dependency metadata visible through `information_schema.view_table_usage`; objects hidden by database permissions cannot be ordered from metadata that the connection cannot see.
 - PostgreSQL expression-index definitions returned as complete `pg_get_indexdef` SQL remain preserved verbatim for compatibility rather than parsed and rewritten.
 - `GenerateSchemaSQL` remains source-compatible and returns no statements when safe generation rejects a cycle; CLI and error-aware callers use additive `GenerateSchemaSQLSafe` to receive the error.
-- General Cobra `RunE` conversion, fail-fast table handling, best-effort reporting, and atomic output replacement are intentionally deferred to #6.
-- The original modified, zero-byte `datasmith` binary and untracked `CODE_REVIEW_REPORT.md` are unrelated user changes and must remain untouched in later sessions. Full-suite tests can overwrite `datasmith`; truncate only that newly generated binary afterward to restore the user's pre-session modified state.
+- Two independent final paths cannot be replaced by one filesystem-wide atomic primitive. Session 5 compensates every reported rename/sync failure and restores both old files; a process or power loss between the two final renames remains an OS-level crash window. Same-directory temporary files and directory sync minimize that window.
+- The modified executable `datasmith` (size `7301362`, mode `-rwxr-xr-x`, SHA-256 `efadb73998d2e845b88a5d3465b12a3b21e3c4d82d59c74a1f1202cc7dd56253`, status `M`) and untracked `CODE_REVIEW_REPORT.md` (size `21194`, SHA-256 `9c529456726a93167b326e1a0c07f740ad013dcc42269f0a2b893539d2d3424b`, status `??`) are unrelated user changes and must remain untouched in later sessions. Do not rebuild, truncate, restore, stage, or commit either file; use Go test/vet commands that do not emit the root binary.
 
 ## Next action
 
-Run Session 5 for issue #6 using the complete prompt in `docs/remediation-handoff.md`. Preserve migration behavior from #2, `exec-sql` safety from #3, exact comparison/safe hash behavior from #4, and deterministic dependency-safe SQL behavior from #5. Remaining order is #6 → #7 → #8 → #9.
+Run Session 6 for issue #7 using the complete prompt in `docs/remediation-handoff.md`. Preserve migration behavior from #2, `exec-sql` safety from #3, exact comparison/safe hash behavior from #4, deterministic dependency-safe SQL behavior from #5, and Session 5 fail-fast/atomic-pair semantics. Remaining order is #7 → #8 → #9.
