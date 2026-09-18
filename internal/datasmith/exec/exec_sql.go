@@ -25,27 +25,27 @@ var execSQLCmd = &cobra.Command{
 	Long: `Execute a SQL file against either the source or target database defined in the configuration file.
 
 Examples:
-  # 执行 SQL 文件到目标数据库 (默认)
-  datasmith exec-sql -c configs/config.yaml -f data_diff.sql -d target
+  # diff-data / diff-schema 生成的正向和回滚 SQL 都在源数据库执行
+  datasmith exec-sql -c configs/config.yaml -f data_diff.sql -d source
 
-  # 执行 SQL 文件到源数据库
+  # 执行回滚 SQL 到源数据库
   datasmith exec-sql -c configs/config.yaml -f data_diff_rollback.sql -d source
 
-  # 通过位置参数传入 SQL 文件
-  datasmith exec-sql -c configs/config.yaml data_diff.sql
+  # 执行自定义 SQL 到目标数据库
+  datasmith exec-sql -c configs/config.yaml -f custom.sql -d target
 
   # 模拟执行 (事务中执行后自动回滚)
-  datasmith exec-sql -c configs/config.yaml -f schema_diff.sql -n
+  datasmith exec-sql -c configs/config.yaml -f schema_diff.sql -d source -n
 
   # 启用显式事务执行 (成功后提交，失败回滚)
-  datasmith exec-sql -c configs/config.yaml -f data_diff.sql --tx`,
+  datasmith exec-sql -c configs/config.yaml -f data_diff.sql -d source --tx`,
 	RunE: runExecSQL,
 }
 
 func init() {
 	execSQLCmd.Flags().StringP("config", "c", "", "Path to config file")
 	execSQLCmd.Flags().StringP("file", "f", "", "Path to SQL file")
-	execSQLCmd.Flags().StringP("db", "d", "target", "Database to execute against: 'source' or 'target'")
+	execSQLCmd.Flags().StringP("db", "d", "", "Database to execute against (required): 'source' or 'target'")
 	execSQLCmd.Flags().Bool("source", false, "Execute against source database (shortcut for -d source)")
 	execSQLCmd.Flags().Bool("target", false, "Execute against target database (shortcut for -d target)")
 	execSQLCmd.Flags().BoolP("dry-run", "n", false, "Dry run mode (execute inside a transaction and rollback)")
@@ -71,11 +71,10 @@ func runExecSQL(cmd *cobra.Command, args []string) error {
 		return errors.New("请指定 SQL 文件路径 (通过 -f/--file 参数或位置参数)")
 	}
 
-	// 判定选择的数据库
-	if sourceFlag {
-		dbChoice = "source"
-	} else if targetFlag {
-		dbChoice = "target"
+	// 数据库是破坏性操作的关键目标，禁止静默使用默认值。
+	dbChoice, err := selectDBChoice(dbChoice, sourceFlag, targetFlag)
+	if err != nil {
+		return err
 	}
 
 	cfg, err := config.LoadConfig(configPath)
@@ -98,6 +97,9 @@ func runExecSQL(cmd *cobra.Command, args []string) error {
 		logger.Infof("SQL 文件为空 (%s)，无需执行", filePath)
 		return nil
 	}
+	if err := validateDeclaredDatabase(sqlContent, dbLabel); err != nil {
+		return fmt.Errorf("拒绝执行 SQL 文件 %s: %w", filePath, err)
+	}
 
 	logger.Infof("准备执行 SQL 文件: %s (大小: %d 字节)", filePath, len(sqlBytes))
 	logger.Infof("目标数据库 [%s]: 类型=%s, 地址=%s:%d, 库名=%s, Schema=%s",
@@ -110,6 +112,65 @@ func runExecSQL(cmd *cobra.Command, args []string) error {
 	defer adapter.Close()
 
 	return ExecuteSQL(adapter, sqlContent, dryRun, useTx)
+}
+
+const executeOnMarker = "-- DATASMITH EXECUTE-ON:"
+
+func selectDBChoice(dbChoice string, sourceFlag, targetFlag bool) (string, error) {
+	choice := strings.ToLower(strings.TrimSpace(dbChoice))
+	if sourceFlag && targetFlag {
+		return "", errors.New("--source 与 --target 不能同时使用")
+	}
+	if sourceFlag {
+		if choice != "" && choice != "source" && choice != "src" {
+			return "", fmt.Errorf("数据库参数冲突: -d %s 与 --source", dbChoice)
+		}
+		return "source", nil
+	}
+	if targetFlag {
+		if choice != "" && choice != "target" && choice != "tgt" {
+			return "", fmt.Errorf("数据库参数冲突: -d %s 与 --target", dbChoice)
+		}
+		return "target", nil
+	}
+	if choice == "" {
+		return "", errors.New("必须通过 -d source、-d target、--source 或 --target 明确指定执行数据库")
+	}
+	return choice, nil
+}
+
+func validateDeclaredDatabase(sqlContent, dbLabel string) error {
+	declared := declaredDatabase(sqlContent)
+	if declared == "" {
+		return nil
+	}
+	if declared != "source" && declared != "target" {
+		return fmt.Errorf("无效的 %s 标记值 %q", executeOnMarker, declared)
+	}
+	if declared != strings.ToLower(strings.TrimSpace(dbLabel)) {
+		return fmt.Errorf("脚本声明只能在 %s 数据库执行，当前选择为 %s", declared, dbLabel)
+	}
+	return nil
+}
+
+func declaredDatabase(sqlContent string) string {
+	const maxHeaderLines = 20
+	for index, line := range strings.Split(sqlContent, "\n") {
+		if index >= maxHeaderLines {
+			break
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if len(trimmed) >= len(executeOnMarker) && strings.EqualFold(trimmed[:len(executeOnMarker)], executeOnMarker) {
+			return strings.ToLower(strings.TrimSpace(trimmed[len(executeOnMarker):]))
+		}
+		if !strings.HasPrefix(trimmed, "--") {
+			break
+		}
+	}
+	return ""
 }
 
 // resolveDBConfig 解析待操作的数据库配置

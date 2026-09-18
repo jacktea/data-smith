@@ -90,6 +90,12 @@ func runDiffSchema(cmd *cobra.Command, args []string) error {
 	rollbackFile := fmt.Sprintf("%s/schema_diff_rollback.sql", diffDir)
 
 	if err := writeAtomicPair(diffFile, rollbackFile, func(forward, rollback io.Writer) error {
+		if _, err := fmt.Fprintln(forward, executeOnSourceHeader); err != nil {
+			return fmt.Errorf("write forward execution target: %w", err)
+		}
+		if _, err := fmt.Fprintln(rollback, executeOnSourceHeader); err != nil {
+			return fmt.Errorf("write rollback execution target: %w", err)
+		}
 		if err := writeSQLStatements(forward, forwardSQLs); err != nil {
 			return fmt.Errorf("write forward schema SQL: %w", err)
 		}

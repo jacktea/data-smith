@@ -152,20 +152,20 @@ target_db:
 可在配置文件中定义的源数据库 (`source`) 或目标数据库 (`target`) 上执行 SQL 脚本（如比对生成的差异 SQL、回滚 SQL 或自定义脚本）：
 
 ```bash
-# 执行 SQL 文件到目标数据库 (默认 target)
-./datasmith exec-sql -c configs/config.yaml -f data_diff.sql -d target
+# diff-data / diff-schema 的正向 SQL 在源数据库执行
+./datasmith exec-sql -c configs/config.yaml -f data_diff.sql -d source
 
-# 执行 SQL 文件到源数据库 (source)
+# 回滚 SQL 也在源数据库执行，用于恢复 source 的原始状态
 ./datasmith exec-sql -c configs/config.yaml -f data_diff_rollback.sql -d source
 
-# 通过位置参数传入 SQL 文件
-./datasmith exec-sql -c configs/config.yaml data_diff.sql
+# 自定义 SQL 可显式执行到目标数据库；-d/--source/--target 必须选择其一
+./datasmith exec-sql -c configs/config.yaml -f custom.sql -d target
 
 # 模拟执行 (在事务中执行后自动回滚，验证脚本正确性)
-./datasmith exec-sql -c configs/config.yaml -f schema_diff.sql -n
+./datasmith exec-sql -c configs/config.yaml -f schema_diff.sql -d source -n
 
 # 启用事务执行 (全部成功后提交，遇错自动回滚)
-./datasmith exec-sql -c configs/config.yaml -f data_diff.sql --tx
+./datasmith exec-sql -c configs/config.yaml -f data_diff.sql -d source --tx
 ```
 
 ### 5. 数据库版本迁移与重置
