@@ -3,8 +3,10 @@ package postgres
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/jacktea/data-smith/pkg/chunk"
 	"github.com/jacktea/data-smith/pkg/config"
 	"github.com/jacktea/data-smith/pkg/conn"
 	"github.com/jacktea/data-smith/pkg/db/base"
@@ -308,7 +310,7 @@ func (a *PostgresAdapter) extractIndexes(table *conn.Table) error {
 			ix.indisprimary,
 			am.amname as method,
 			pg_get_expr(ix.indpred, ix.indrelid) as where_clause,
-			array_agg(a.attname ORDER BY array_position(ix.indkey, a.attnum)) as columns
+			COALESCE(array_agg(a.attname ORDER BY array_position(ix.indkey, a.attnum)) FILTER (WHERE a.attname IS NOT NULL), '{}') as columns
 		FROM pg_index ix
 		JOIN pg_class i ON i.oid = ix.indexrelid
 		JOIN pg_class t ON t.oid = ix.indrelid
@@ -441,4 +443,105 @@ func (p *PostgresAdapter) getTableComment(schemaName, tableName string) string {
 		return comment.String
 	}
 	return ""
+}
+
+func (p *PostgresAdapter) GetChunkRanges(table string, pk string, chunkSize int) ([]chunk.ChunkRange, error) {
+	if chunkSize <= 0 {
+		chunkSize = 10000
+	}
+	var count int64
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM \"%s\"", table)
+	if err := p.Conn.QueryRow(countQuery).Scan(&count); err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	if count <= int64(chunkSize) {
+		var minPK any
+		minQuery := fmt.Sprintf("SELECT \"%s\" FROM \"%s\" ORDER BY \"%s\" ASC LIMIT 1", pk, table, pk)
+		if err := p.Conn.QueryRow(minQuery).Scan(&minPK); err != nil {
+			return nil, err
+		}
+		return []chunk.ChunkRange{
+			{
+				ChunkIndex: 0,
+				MinPK:      minPK,
+				MaxPK:      nil,
+				IsLast:     true,
+			},
+		}, nil
+	}
+
+	query := fmt.Sprintf(`
+		SELECT pk FROM (
+			SELECT "%s" as pk, ROW_NUMBER() OVER (ORDER BY "%s" ASC) as rn
+			FROM "%s"
+		) t WHERE (rn - 1) %% $1 = 0 ORDER BY pk ASC
+	`, pk, pk, table)
+
+	rows, err := p.Conn.Query(query, chunkSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var splitPoints []any
+	for rows.Next() {
+		var point any
+		if err := rows.Scan(&point); err != nil {
+			return nil, err
+		}
+		splitPoints = append(splitPoints, point)
+	}
+
+	var ranges []chunk.ChunkRange
+	for i := 0; i < len(splitPoints); i++ {
+		isLast := (i == len(splitPoints)-1)
+		var maxPK any
+		if !isLast {
+			maxPK = splitPoints[i+1]
+		}
+		ranges = append(ranges, chunk.ChunkRange{
+			ChunkIndex: i,
+			MinPK:      splitPoints[i],
+			MaxPK:      maxPK,
+			IsLast:     isLast,
+		})
+	}
+	return ranges, nil
+}
+
+func (p *PostgresAdapter) GetChunkHash(table string, cols []string, pk string, minPK, maxPK any, isLast bool) (string, error) {
+	quotedCols := make([]string, len(cols))
+	for i, c := range cols {
+		quotedCols[i] = fmt.Sprintf("COALESCE(\"%s\"::text, '')", c)
+	}
+	concatExpr := strings.Join(quotedCols, " || '#' || ")
+
+	var whereClause string
+	var args []any
+	if isLast || maxPK == nil {
+		whereClause = fmt.Sprintf("\"%s\" >= $1", pk)
+		args = append(args, minPK)
+	} else {
+		whereClause = fmt.Sprintf("\"%s\" >= $1 AND \"%s\" < $2", pk, pk)
+		args = append(args, minPK, maxPK)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT COALESCE(md5(string_agg(md5(row_data), '' ORDER BY "%s")), '')
+		FROM (
+			SELECT (%s) AS row_data, "%s"
+			FROM "%s"
+			WHERE %s
+		) t
+	`, pk, concatExpr, pk, table, whereClause)
+
+	var hash sql.NullString
+	err := p.Conn.QueryRow(query, args...).Scan(&hash)
+	if err != nil {
+		return "", err
+	}
+	return hash.String, nil
 }

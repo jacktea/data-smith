@@ -4,20 +4,45 @@
       "table": "air_sys_node"
     },
     {
-      "table": "air_sys_property",
-      "comparisonKey": [
-        "id",
-        "parent_id",
-        "attribute_type",
-        "data_type",
-        "selection",
-        "value",
-        "rule",
-        "property_id"
-      ]
+      "table": "air_sys_property"
     },
     {
-      "table": "air_sys_criteria"
+      "table": "air_sys_language"
+    },
+    {
+      "table": "air_sys_list_item"
+    },
+    {
+      "table": "air_sys_list_obj"
+    },
+    {
+      "table": "air_sys_mobile_app_user"
+    },
+    {
+      "table": "air_sys_object_acl"
+    },
+    {
+      "table": "air_sys_privilege_applied_to"
+    },
+    {
+      "table": "air_sys_query"
+    },
+    {
+      "table": "air_sys_query_attributes"
+    },
+    {
+      "table": "air_sys_relation_ships"
+    },
+    {
+      "table": "air_sys_tab_class_attrs_attr"
+    },
+    {
+      "table": "air_sys_i18n_resource",
+      "ignoreColumns": [
+        "lock_version",
+        "updated_time",
+        "created_time"
+      ]
     }
   ]
 }

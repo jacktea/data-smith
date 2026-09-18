@@ -1,20 +1,20 @@
-sourceDb:
-  type: postgres
-  host: 192.168.11.220
-  port: 5432
-  user: airedge
-  password: air20220401
-  dbname: airedge2.1db
-  tableSchema: public
+# sourceDb:
+#   type: postgres
+#   host: 192.168.11.220
+#   port: 5432
+#   user: airedge
+#   password: air20220401
+#   dbname: airedge2.1db
+#   tableSchema: public
 
-targetDb:
-  type: postgres
-  host: 192.168.11.220
-  port: 5433
-  user: airedge
-  password: air20220401
-  dbname: airedge2.1db
-  tableSchema: public
+# targetDb:
+#   type: postgres
+#   host: 192.168.11.220
+#   port: 5433
+#   user: airedge
+#   password: air20220401
+#   dbname: airedge2.1db
+#   tableSchema: public
 # targetDb:
 #   type: postgres
 #   host: localhost
@@ -23,3 +23,21 @@ targetDb:
 #   password: air20220401
 #   dbname: airedge2.1db
 #   tableSchema: public
+
+sourceDb:
+  type: postgres
+  host: localhost
+  port: 5432
+  user: postgres
+  password: postgres
+  dbname: airedge3.6db
+  tableSchema: public
+
+targetDb:
+  type: postgres
+  host: localhost
+  port: 5432
+  user: postgres
+  password: postgres
+  dbname: airedge3.7db
+  tableSchema: public

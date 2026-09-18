@@ -1,9 +1,11 @@
 package postgres
 
 import (
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jacktea/data-smith/pkg/conn"
 	"github.com/jacktea/data-smith/pkg/utils"
@@ -35,10 +37,14 @@ func (d *postgreDialect) GenerateDeleteSql(tbl *conn.Table, row conn.Record) str
 	for _, k := range tbl.PrimaryKey.Columns {
 		col := tbl.Columns[k]
 		val := row[k]
+		var colType string
+		if col != nil {
+			colType = col.DataType
+		}
 		if val == nil {
 			where = append(where, fmt.Sprintf("\"%s\" IS NULL", k))
 		} else {
-			where = append(where, fmt.Sprintf("\"%s\" = %v", k, d.escapedValue(col.DataType, val)))
+			where = append(where, fmt.Sprintf("\"%s\" = %s", k, d.escapedValue(colType, val)))
 		}
 	}
 	return fmt.Sprintf("DELETE FROM %s WHERE %s;", tbl.Name, strings.Join(where, " AND "))
@@ -55,16 +61,26 @@ func (d *postgreDialect) GenerateUpdateSql(tbl *conn.Table, row conn.Record, upd
 			continue
 		}
 		col := tbl.Columns[c]
+		if col == nil {
+			continue
+		}
 		val := row[c]
 		set = append(set, fmt.Sprintf("\"%s\" = %s", c, d.escapedValue(col.DataType, val)))
+	}
+	if len(set) == 0 {
+		return ""
 	}
 	for _, k := range pks {
 		col := tbl.Columns[k]
 		val := row[k]
+		var colType string
+		if col != nil {
+			colType = col.DataType
+		}
 		if val == nil {
 			where = append(where, fmt.Sprintf("\"%s\" IS NULL", k))
 		} else {
-			where = append(where, fmt.Sprintf("\"%s\" = %v", k, d.escapedValue(col.DataType, val)))
+			where = append(where, fmt.Sprintf("\"%s\" = %s", k, d.escapedValue(colType, val)))
 		}
 	}
 	return fmt.Sprintf("UPDATE %s SET %s WHERE %s;", tbl.Name, strings.Join(set, ", "), strings.Join(where, " AND "))
@@ -368,27 +384,68 @@ func (d *postgreDialect) escapedValue(dataType string, val any) string {
 	dt := strings.ToLower(dataType)
 	if val == nil {
 		return "NULL"
-	} else if strings.Contains(dt, "char") || strings.Contains(dt, "text") || strings.Contains(dt, "json") {
-		// 将值转换为字符串并进行转义
-		strVal := fmt.Sprintf("%v", val)
-		// 转义反斜杠：\ -> \\
-		escaped := strings.ReplaceAll(strVal, "\\", "\\\\")
-		// 转义单引号：' -> ''
-		escaped = strings.ReplaceAll(escaped, "'", "''")
-		// 转义换行符：\n -> \\n
-		escaped = strings.ReplaceAll(escaped, "\n", "\\n")
-		// 转义回车符：\r -> \\r
-		escaped = strings.ReplaceAll(escaped, "\r", "\\r")
-		// 转义制表符：\t -> \\t
-		escaped = strings.ReplaceAll(escaped, "\t", "\\t")
-		// 转义退格符：\b -> \\b
-		escaped = strings.ReplaceAll(escaped, "\b", "\\b")
-		// 转义换页符：\f -> \\f
-		escaped = strings.ReplaceAll(escaped, "\f", "\\f")
-		return fmt.Sprintf("'%s'", escaped)
-	} else if strings.Contains(dt, "date") || strings.Contains(dt, "time") || strings.Contains(dt, "uuid") {
-		return fmt.Sprintf("'%v'", val)
-	} else {
-		return fmt.Sprintf("%v", val)
 	}
+
+	// 1. BYTEA 二进制类型
+	if strings.Contains(dt, "bytea") {
+		switch v := val.(type) {
+		case []byte:
+			return fmt.Sprintf("E'\\\\x%s'::bytea", hex.EncodeToString(v))
+		case string:
+			if strings.HasPrefix(v, "\\x") {
+				return fmt.Sprintf("'%s'::bytea", v)
+			}
+			return fmt.Sprintf("E'\\\\x%s'::bytea", hex.EncodeToString([]byte(v)))
+		}
+	}
+
+	// 2. 布尔类型
+	if strings.Contains(dt, "bool") {
+		switch v := val.(type) {
+		case bool:
+			if v {
+				return "TRUE"
+			}
+			return "FALSE"
+		case int, int8, int16, int32, int64:
+			if fmt.Sprintf("%v", v) != "0" {
+				return "TRUE"
+			}
+			return "FALSE"
+		case string:
+			s := strings.ToLower(strings.TrimSpace(v))
+			if s == "true" || s == "t" || s == "1" {
+				return "TRUE"
+			}
+			return "FALSE"
+		}
+	}
+
+	// 3. 时间与日期类型
+	if strings.Contains(dt, "date") || strings.Contains(dt, "time") {
+		if t, ok := val.(time.Time); ok {
+			return fmt.Sprintf("'%s'", t.Format("2006-01-02 15:04:05.000000-07"))
+		}
+		strVal := fmt.Sprintf("%v", val)
+		return fmt.Sprintf("'%s'", strings.ReplaceAll(strVal, "'", "''"))
+	}
+
+	// 4. 字符串、文本与 JSON 类型
+	if strings.Contains(dt, "char") || strings.Contains(dt, "text") || strings.Contains(dt, "json") || strings.Contains(dt, "uuid") {
+		var strVal string
+		if b, ok := val.([]byte); ok {
+			strVal = string(b)
+		} else {
+			strVal = fmt.Sprintf("%v", val)
+		}
+		// PostgreSQL 普通字符串字面量遵循标准 SQL，反斜杠是普通字符，仅需转义单引号
+		escaped := strings.ReplaceAll(strVal, "'", "''")
+		return fmt.Sprintf("'%s'", escaped)
+	}
+
+	// 5. 其他类型（整型、浮点、数值）
+	if b, ok := val.([]byte); ok {
+		return string(b)
+	}
+	return fmt.Sprintf("%v", val)
 }

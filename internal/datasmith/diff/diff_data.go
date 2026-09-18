@@ -21,6 +21,8 @@ var diffDataCmd = &cobra.Command{
 		configPath, _ := cmd.Flags().GetString("config")
 		rulesPath, _ := cmd.Flags().GetString("rules")
 		batchSize, _ := cmd.Flags().GetInt("batch-size")
+		enableChunkHash, _ := cmd.Flags().GetBool("chunk-hash")
+		chunkSize, _ := cmd.Flags().GetInt("chunk-size")
 
 		cfg, err := config.LoadConfig(configPath)
 		if err != nil {
@@ -48,14 +50,23 @@ var diffDataCmd = &cobra.Command{
 
 		dbDialect := sql.NewDialect(cfg.TargetDB.Type)
 
-		// diff dir 设定为当前程序的执行目录
+		diffFile, _ := cmd.Flags().GetString("output")
+		rollbackFile, _ := cmd.Flags().GetString("rollback-output")
+
 		diffDir, err := os.Getwd()
 		if err != nil {
 			log.Println("Error getting current working directory:", err)
 			os.Exit(1)
 		}
-		diffFile := fmt.Sprintf("%s/data_diff.sql", diffDir)
-		log.Printf("Diff file: %s\n", diffFile)
+		if diffFile == "" {
+			diffFile = fmt.Sprintf("%s/data_diff.sql", diffDir)
+		}
+		if rollbackFile == "" {
+			rollbackFile = fmt.Sprintf("%s/data_diff_rollback.sql", diffDir)
+		}
+		log.Printf("Forward Diff file: %s\n", diffFile)
+		log.Printf("Rollback Diff file: %s\n", rollbackFile)
+
 		sqlFile, err := os.Create(diffFile)
 		if err != nil {
 			log.Println("Error creating sql file:", err)
@@ -63,60 +74,119 @@ var diffDataCmd = &cobra.Command{
 		}
 		defer sqlFile.Close()
 
+		rollbackSqlFile, err := os.Create(rollbackFile)
+		if err != nil {
+			log.Println("Error creating rollback sql file:", err)
+			os.Exit(1)
+		}
+		defer rollbackSqlFile.Close()
+
+		type tableRollbackSQL struct {
+			tableName string
+			sqls      []string
+		}
+		var rollbackList []tableRollbackSQL
+
 		for _, rule := range rules.Rules {
 			tgtTable, err := tgtDB.ExtractTable(rule.Table)
 			if err != nil || tgtTable == nil {
 				log.Printf("Error extracting table %s: %v\n", rule.Table, err)
 				continue
 			}
-			log.Printf("Start comparing data for table %s\n", rule.Table)
-			sqlFile.WriteString(fmt.Sprintf("--- diff %s \n", rule.Table))
+			srcTable, _ := srcDB.ExtractTable(rule.Table)
+
 			start := time.Now()
-			diff, err := diff.StreamCompareDataToDiff(
-				srcDB,
-				tgtDB,
-				diff.CreateCompareRule(tgtTable, rule.ComparisonKey),
-				batchSize,
-			)
+			var diffResult *diff.DataDiff
+			compareRule := diff.CreateCompareRule(tgtTable, rule.ComparisonKey, rule.IgnoreColumns)
+			var effectiveCols []string
+			if allRule, ok := compareRule.(*diff.AllFieldsEqualRule); ok {
+				effectiveCols = allRule.Columns
+			} else {
+				effectiveCols = rule.ComparisonKey
+			}
+
+			if enableChunkHash {
+				diffResult, err = diff.StreamCompareDataToDiffWithChunkFilter(
+					srcDB,
+					tgtDB,
+					compareRule,
+					batchSize,
+					chunkSize,
+				)
+			} else {
+				diffResult, err = diff.StreamCompareDataToDiff(
+					srcDB,
+					tgtDB,
+					compareRule,
+					batchSize,
+				)
+			}
 			if err != nil {
 				log.Printf("Error comparing data for table %s: %v\n", rule.Table, err)
 				continue
 			}
 			log.Printf("Time taken: %v\n", time.Since(start))
-			for _, row := range diff.Dropped {
+
+			// 1. 写入正向升级 SQL
+			sqlFile.WriteString(fmt.Sprintf("--- diff %s \n", rule.Table))
+			for _, row := range diffResult.Dropped {
 				sqlFile.WriteString(dbDialect.GenerateDeleteSql(tgtTable, row) + "\n")
 			}
-			for _, row := range diff.Added {
+			for _, row := range diffResult.Added {
 				sqlFile.WriteString(dbDialect.GenerateInsertSql(tgtTable, row) + "\n")
 			}
-			for _, row := range diff.Modified {
-				sqlFile.WriteString(dbDialect.GenerateUpdateSql(tgtTable, row.New, rule.ComparisonKey) + "\n")
+			for _, row := range diffResult.Modified {
+				colsToUpdate := row.ModifiedCols
+				if len(colsToUpdate) == 0 {
+					colsToUpdate = effectiveCols
+				}
+				sqlStr := dbDialect.GenerateUpdateSql(tgtTable, row.New, colsToUpdate)
+				if sqlStr != "" {
+					sqlFile.WriteString(sqlStr + "\n")
+				}
 			}
 
-			// err = diff.StreamCompareData(
-			// 	srcDB,
-			// 	tgtDB,
-			// 	diff.CreateCompareRule(tgtTable, rule.ComparisonKey),
-			// 	batchSize,
-			// 	func(diffType diff.DiffType, srcRow, tgtRow conn.Record) {
-			// 		var str string
-			// 		switch diffType {
-			// 		case diff.DiffTypeAdd:
-			// 			str = dbDialect.GenerateInsertSql(tgtTable, srcRow)
-			// 			sqlFile.WriteString(str + "\n")
-			// 		case diff.DiffTypeDrop:
-			// 			str = dbDialect.GenerateDeleteSql(tgtTable, tgtRow)
-			// 			sqlFile.WriteString(str + "\n")
-			// 		case diff.DiffTypeModify:
-			// 			str = dbDialect.GenerateUpdateSql(tgtTable, srcRow, rule.ComparisonKey)
-			// 			sqlFile.WriteString(str + "\n")
-			// 		}
-			// 	})
-			// log.Printf("Time taken: %v\n", time.Since(start))
-			// if err != nil {
-			// 	log.Printf("Error comparing data for table %s: %v\n", rule.Table, err)
-			// 	continue
-			// }
+			// 2. 收集当前表反向还原 SQL
+			var tblRollback []string
+			// 反向步骤 1: 将修改的字段还原为 Old 值
+			for _, row := range diffResult.Modified {
+				colsToUpdate := row.ModifiedCols
+				if len(colsToUpdate) == 0 {
+					colsToUpdate = effectiveCols
+				}
+				sqlStr := dbDialect.GenerateUpdateSql(tgtTable, row.Old, colsToUpdate)
+				if sqlStr != "" {
+					tblRollback = append(tblRollback, sqlStr)
+				}
+			}
+			// 反向步骤 2: 将正向新增的数据 DELETE 掉（按 tgtRow 主键）
+			for _, row := range diffResult.Added {
+				tblRollback = append(tblRollback, dbDialect.GenerateDeleteSql(tgtTable, row))
+			}
+			// 反向步骤 3: 将正向删除的数据 INSERT 插回（按 srcRow 完整数据）
+			for _, row := range diffResult.Dropped {
+				tblForInsert := tgtTable
+				if srcTable != nil {
+					tblForInsert = srcTable
+				}
+				tblRollback = append(tblRollback, dbDialect.GenerateInsertSql(tblForInsert, row))
+			}
+
+			if len(tblRollback) > 0 {
+				rollbackList = append(rollbackList, tableRollbackSQL{
+					tableName: rule.Table,
+					sqls:      tblRollback,
+				})
+			}
+		}
+
+		// 3. 逆序写入回滚 SQL（表级倒序回滚，规避外键依赖冲突）
+		for i := len(rollbackList) - 1; i >= 0; i-- {
+			tb := rollbackList[i]
+			rollbackSqlFile.WriteString(fmt.Sprintf("--- rollback %s \n", tb.tableName))
+			for _, s := range tb.sqls {
+				rollbackSqlFile.WriteString(s + "\n")
+			}
 		}
 	},
 }
@@ -124,7 +194,11 @@ var diffDataCmd = &cobra.Command{
 func init() {
 	diffDataCmd.Flags().StringP("config", "c", "", "Path to config file")
 	diffDataCmd.Flags().StringP("rules", "r", "", "Path to rules file")
+	diffDataCmd.Flags().StringP("output", "o", "", "Path to output forward diff SQL file")
+	diffDataCmd.Flags().String("rollback-output", "", "Path to output rollback SQL file")
 	diffDataCmd.Flags().Int("batch-size", 1000, "Batch size for data diff and SQL output")
+	diffDataCmd.Flags().Bool("chunk-hash", false, "Enable chunk hash pre-filtering for large tables")
+	diffDataCmd.Flags().Int("chunk-size", 10000, "Chunk size for hash pre-filtering")
 	diffDataCmd.MarkFlagRequired("config")
 	diffDataCmd.MarkFlagRequired("rules")
 }

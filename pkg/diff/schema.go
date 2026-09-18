@@ -31,15 +31,15 @@ func CompareSchemas(src, tgt *conn.DatabaseSchema) *SchemaDiff {
 	for name := range tgtTables {
 		tgtTableSet[name] = struct{}{}
 	}
-	// 新增表
-	for name, tbl := range srcTables {
-		if _, ok := tgtTables[name]; !ok {
+	// 新增表（Target 存在，Source 不存在）
+	for name, tbl := range tgtTables {
+		if _, ok := srcTables[name]; !ok {
 			diff.TablesAdded = append(diff.TablesAdded, tbl)
 		}
 	}
-	// 删除表
-	for name, tbl := range tgtTables {
-		if _, ok := srcTables[name]; !ok {
+	// 删除表（Source 存在，Target 不存在）
+	for name, tbl := range srcTables {
+		if _, ok := tgtTables[name]; !ok {
 			diff.TablesDropped = append(diff.TablesDropped, tbl)
 		}
 	}
@@ -69,8 +69,8 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 			return &TableDiff{
 				Table: tgt,
 				ViewDefinitionChange: &ViewDefinitionDiff{
-					Old: tgt.ViewDefinition,
-					New: src.ViewDefinition,
+					Old: src.ViewDefinition,
+					New: tgt.ViewDefinition,
 				},
 			}
 		}
@@ -80,62 +80,71 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 	// 列
 	srcCols := src.Columns
 	tgtCols := tgt.Columns
-	for name, col := range srcCols {
-		if _, ok := tgtCols[name]; !ok {
+	// 新增列（Target 存在，Source 不存在）
+	for name, col := range tgtCols {
+		if _, ok := srcCols[name]; !ok {
 			d.ColumnsAdded = append(d.ColumnsAdded, col)
 		}
 	}
-	for name, col := range tgtCols {
-		if _, ok := srcCols[name]; !ok {
+	// 删除列（Source 存在，Target 不存在）
+	for name, col := range srcCols {
+		if _, ok := tgtCols[name]; !ok {
 			d.ColumnsDropped = append(d.ColumnsDropped, col)
 		}
 	}
+	// 修改列
 	for name, srcCol := range srcCols {
 		tgtCol, ok := tgtCols[name]
 		if ok && !equalColumn(srcCol, tgtCol) {
-			d.ColumnsModified = append(d.ColumnsModified, &ColumnDiff{Old: tgtCol, New: srcCol})
+			d.ColumnsModified = append(d.ColumnsModified, &ColumnDiff{Old: srcCol, New: tgtCol})
 		}
 	}
 	// 索引
 	srcIdx := src.Indexes
 	tgtIdx := tgt.Indexes
-	for name, idx := range srcIdx {
-		if _, ok := tgtIdx[name]; !ok {
+	// 新增索引（Target 存在，Source 不存在）
+	for name, idx := range tgtIdx {
+		if _, ok := srcIdx[name]; !ok {
 			d.IndexesAdded = append(d.IndexesAdded, idx)
 		}
 	}
-	for name, idx := range tgtIdx {
-		if _, ok := srcIdx[name]; !ok {
+	// 删除索引（Source 存在，Target 不存在）
+	for name, idx := range srcIdx {
+		if _, ok := tgtIdx[name]; !ok {
 			d.IndexesDropped = append(d.IndexesDropped, idx)
 		}
 	}
+	// 修改索引
 	for name, srcI := range srcIdx {
 		tgtI, ok := tgtIdx[name]
 		if ok && !equalIndex(srcI, tgtI) {
-			d.IndexesModified = append(d.IndexesModified, &IndexDiff{Old: tgtI, New: srcI})
+			d.IndexesModified = append(d.IndexesModified, &IndexDiff{Old: srcI, New: tgtI})
 		}
 	}
 	// 主键
 	if !equalPrimaryKey(src.PrimaryKey, tgt.PrimaryKey) {
-		d.PrimaryKeyChange = &PrimaryKeyDiff{Old: tgt.PrimaryKey, New: src.PrimaryKey}
+		d.PrimaryKeyChange = &PrimaryKeyDiff{Old: src.PrimaryKey, New: tgt.PrimaryKey}
 	}
 	// 外键
 	srcFK := src.ForeignKeys
 	tgtFK := tgt.ForeignKeys
-	for name, fk := range srcFK {
-		if _, ok := tgtFK[name]; !ok {
+	// 新增外键（Target 存在，Source 不存在）
+	for name, fk := range tgtFK {
+		if _, ok := srcFK[name]; !ok {
 			d.ForeignKeysAdded = append(d.ForeignKeysAdded, fk)
 		}
 	}
-	for name, fk := range tgtFK {
-		if _, ok := srcFK[name]; !ok {
+	// 删除外键（Source 存在，Target 不存在）
+	for name, fk := range srcFK {
+		if _, ok := tgtFK[name]; !ok {
 			d.ForeignKeysDropped = append(d.ForeignKeysDropped, fk)
 		}
 	}
+	// 修改外键
 	for name, srcF := range srcFK {
 		tgtF, ok := tgtFK[name]
 		if ok && !equalForeignKey(srcF, tgtF) {
-			d.ForeignKeysModified = append(d.ForeignKeysModified, &ForeignKeyDiff{Old: tgtF, New: srcF})
+			d.ForeignKeysModified = append(d.ForeignKeysModified, &ForeignKeyDiff{Old: srcF, New: tgtF})
 		}
 	}
 	if len(d.ColumnsAdded)+len(d.ColumnsDropped)+len(d.ColumnsModified)+len(d.IndexesAdded)+len(d.IndexesDropped)+len(d.IndexesModified)+len(d.ForeignKeysAdded)+len(d.ForeignKeysDropped)+len(d.ForeignKeysModified) > 0 || d.PrimaryKeyChange != nil {

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jacktea/data-smith/pkg/chunk"
 	"github.com/jacktea/data-smith/pkg/config"
 	"github.com/jacktea/data-smith/pkg/conn"
 	"github.com/jacktea/data-smith/pkg/db/base"
@@ -23,7 +24,10 @@ func NewMySQLAdapter(cfg *config.ConnConfig) (*MySQLAdapter, error) {
 	if err := adapter.Init(cfg); err != nil {
 		return nil, err
 	}
-	connStr := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.DBName)
+	connStr := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.DBName)
+	if extra := cfg.ExtraString(); extra != "" {
+		connStr += "&" + strings.TrimPrefix(extra, "?")
+	}
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
 		adapter.Close()
@@ -418,4 +422,92 @@ func (a *MySQLAdapter) getTableComment(schemaName, tableName string) string {
 		return comment.String
 	}
 	return ""
+}
+
+func (a *MySQLAdapter) GetChunkRanges(table string, pk string, chunkSize int) ([]chunk.ChunkRange, error) {
+	if chunkSize <= 0 {
+		chunkSize = 10000
+	}
+	var count int64
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM `%s`", table)
+	if err := a.Conn.QueryRow(countQuery).Scan(&count); err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	if count <= int64(chunkSize) {
+		var minPK any
+		minQuery := fmt.Sprintf("SELECT `%s` FROM `%s` ORDER BY `%s` ASC LIMIT 1", pk, table, pk)
+		if err := a.Conn.QueryRow(minQuery).Scan(&minPK); err != nil {
+			return nil, err
+		}
+		return []chunk.ChunkRange{
+			{
+				ChunkIndex: 0,
+				MinPK:      minPK,
+				MaxPK:      nil,
+				IsLast:     true,
+			},
+		}, nil
+	}
+
+	var splitPoints []any
+	var minPK any
+	if err := a.Conn.QueryRow(fmt.Sprintf("SELECT `%s` FROM `%s` ORDER BY `%s` ASC LIMIT 1", pk, table, pk)).Scan(&minPK); err != nil {
+		return nil, err
+	}
+	splitPoints = append(splitPoints, minPK)
+
+	for offset := chunkSize; int64(offset) < count; offset += chunkSize {
+		var point any
+		query := fmt.Sprintf("SELECT `%s` FROM `%s` ORDER BY `%s` ASC LIMIT 1 OFFSET %d", pk, table, pk, offset)
+		if err := a.Conn.QueryRow(query).Scan(&point); err != nil {
+			return nil, err
+		}
+		splitPoints = append(splitPoints, point)
+	}
+
+	var ranges []chunk.ChunkRange
+	for i := 0; i < len(splitPoints); i++ {
+		isLast := (i == len(splitPoints)-1)
+		var maxPK any
+		if !isLast {
+			maxPK = splitPoints[i+1]
+		}
+		ranges = append(ranges, chunk.ChunkRange{
+			ChunkIndex: i,
+			MinPK:      splitPoints[i],
+			MaxPK:      maxPK,
+			IsLast:     isLast,
+		})
+	}
+	return ranges, nil
+}
+
+func (a *MySQLAdapter) GetChunkHash(table string, cols []string, pk string, minPK, maxPK any, isLast bool) (string, error) {
+	quotedCols := make([]string, len(cols))
+	for i, c := range cols {
+		quotedCols[i] = fmt.Sprintf("COALESCE(CAST(`%s` AS CHAR), '')", c)
+	}
+	concatExpr := fmt.Sprintf("CONCAT_WS('#', %s)", strings.Join(quotedCols, ", "))
+
+	var whereClause string
+	var args []any
+	if isLast || maxPK == nil {
+		whereClause = fmt.Sprintf("`%s` >= ?", pk)
+		args = append(args, minPK)
+	} else {
+		whereClause = fmt.Sprintf("`%s` >= ? AND `%s` < ?", pk, pk)
+		args = append(args, minPK, maxPK)
+	}
+
+	query := fmt.Sprintf("SELECT COALESCE(HEX(BIT_XOR(CAST(CRC32(%s) AS UNSIGNED))), '0') FROM `%s` WHERE %s", concatExpr, table, whereClause)
+
+	var hash sql.NullString
+	err := a.Conn.QueryRow(query, args...).Scan(&hash)
+	if err != nil {
+		return "", err
+	}
+	return hash.String, nil
 }

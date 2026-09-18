@@ -13,7 +13,9 @@
 │   ├── config/             # 配置加载与解析
 │   └── datasmith/
 │       ├── root.go         # CLI 根命令注册
-│       └── diff/           # 数据与结构比对命令实现
+│       ├── diff/           # 数据与结构比对命令实现
+│       ├── exec/           # SQL 文件执行命令实现
+│       └── migrate/        # 数据迁移与重置命令实现
 ├── pkg/
 │   ├── config/             # 配置相关通用逻辑
 │   ├── conn/               # 数据库连接管理
@@ -145,7 +147,28 @@ target_db:
 ./datasmith diff-data -c configs/config.yaml -r configs/rules.json
 ```
 
-### 4. 数据库脚本执行
+### 4. 执行 SQL 文件 (`exec-sql`)
+
+可在配置文件中定义的源数据库 (`source`) 或目标数据库 (`target`) 上执行 SQL 脚本（如比对生成的差异 SQL、回滚 SQL 或自定义脚本）：
+
+```bash
+# 执行 SQL 文件到目标数据库 (默认 target)
+./datasmith exec-sql -c configs/config.yaml -f data_diff.sql -d target
+
+# 执行 SQL 文件到源数据库 (source)
+./datasmith exec-sql -c configs/config.yaml -f data_diff_rollback.sql -d source
+
+# 通过位置参数传入 SQL 文件
+./datasmith exec-sql -c configs/config.yaml data_diff.sql
+
+# 模拟执行 (在事务中执行后自动回滚，验证脚本正确性)
+./datasmith exec-sql -c configs/config.yaml -f schema_diff.sql -n
+
+# 启用事务执行 (全部成功后提交，遇错自动回滚)
+./datasmith exec-sql -c configs/config.yaml -f data_diff.sql --tx
+```
+
+### 5. 数据库版本迁移与重置
 
 脚本文件目录：
 

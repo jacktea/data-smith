@@ -2,12 +2,22 @@ package diff
 
 import (
 	"fmt"
+	"log"
 
+	"github.com/jacktea/data-smith/pkg/chunk"
 	"github.com/jacktea/data-smith/pkg/conn"
 )
 
+type DetailedDiffHandler func(diffType DiffType, srcRow, tgtRow conn.Record, diffCols []string)
+
 func StreamCompareData(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize int, handle func(diffType DiffType, srcRow, tgtRow conn.Record)) error {
-	cols, pks, err := getTableColumns(tgtDB, rule.GetTable())
+	return StreamCompareDataDetailed(srcDB, tgtDB, rule, batchSize, func(diffType DiffType, srcRow, tgtRow conn.Record, diffCols []string) {
+		handle(diffType, srcRow, tgtRow)
+	})
+}
+
+func StreamCompareDataDetailed(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize int, handle DetailedDiffHandler) error {
+	cols, pks, colTypes, err := getTableColumnsAndTypes(tgtDB, rule.GetTable())
 	if err != nil {
 		return err
 	}
@@ -60,17 +70,28 @@ func StreamCompareData(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize
 		} else if tgtRow == nil {
 			cmp = -1
 		} else {
-			cmp = comparePKRecord(srcRow, tgtRow, pks)
+			cmp = comparePKRecord(srcRow, tgtRow, pks, colTypes)
 		}
 		if cmp < 0 {
-			handle(DiffTypeAdd, srcRow, nil)
+			// src 存在而 tgt 不存在：目标版本删除了此记录
+			handle(DiffTypeDrop, srcRow, nil, nil)
 			srcIdx++
 		} else if cmp > 0 {
-			handle(DiffTypeDrop, nil, tgtRow)
+			// tgt 存在而 src 不存在：目标版本新增了此记录
+			handle(DiffTypeAdd, nil, tgtRow, nil)
 			tgtIdx++
 		} else {
-			if !rule.IsEqual(srcRow, tgtRow) {
-				handle(DiffTypeModify, srcRow, tgtRow)
+			var isDiff bool
+			var diffCols []string
+			if detailedRule, ok := rule.(IDetailedCompareRule); ok {
+				var equal bool
+				equal, diffCols = detailedRule.DiffColumns(srcRow, tgtRow)
+				isDiff = !equal
+			} else {
+				isDiff = !rule.IsEqual(srcRow, tgtRow)
+			}
+			if isDiff {
+				handle(DiffTypeModify, srcRow, tgtRow, diffCols)
 			}
 			srcIdx++
 			tgtIdx++
@@ -81,14 +102,74 @@ func StreamCompareData(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize
 
 func StreamCompareDataToDiff(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize int) (*DataDiff, error) {
 	diff := &DataDiff{}
-	err := StreamCompareData(srcDB, tgtDB, rule, batchSize, func(diffType DiffType, srcRow, tgtRow conn.Record) {
+	err := StreamCompareDataDetailed(srcDB, tgtDB, rule, batchSize, func(diffType DiffType, srcRow, tgtRow conn.Record, diffCols []string) {
 		switch diffType {
 		case DiffTypeAdd:
-			diff.Added = append(diff.Added, srcRow)
+			diff.Added = append(diff.Added, tgtRow)
 		case DiffTypeDrop:
-			diff.Dropped = append(diff.Dropped, tgtRow)
+			diff.Dropped = append(diff.Dropped, srcRow)
 		case DiffTypeModify:
-			diff.Modified = append(diff.Modified, ModifiedRow{Old: tgtRow, New: srcRow})
+			diff.Modified = append(diff.Modified, ModifiedRow{
+				Old:          srcRow,
+				New:          tgtRow,
+				ModifiedCols: diffCols,
+			})
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return diff, nil
+}
+
+// StreamCompareDataWithChunkFilter 带有分块哈希预过滤的流式数据比对
+func StreamCompareDataWithChunkFilter(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize, chunkSize int, handle DetailedDiffHandler) error {
+	srcCfg := srcDB.GetConfig()
+	tgtCfg := tgtDB.GetConfig()
+
+	if srcCfg != nil && tgtCfg != nil && srcCfg.Type == tgtCfg.Type {
+		srcHasher, srcOk := srcDB.(chunk.ChunkHasher)
+		tgtHasher, tgtOk := tgtDB.(chunk.ChunkHasher)
+		if srcOk && tgtOk {
+			cols, pks, _, err := getTableColumnsAndTypes(tgtDB, rule.GetTable())
+			if err == nil && len(pks) == 1 {
+				ranges, err := tgtHasher.GetChunkRanges(rule.GetTable(), pks[0], chunkSize)
+				if err == nil && len(ranges) > 0 {
+					allMatched := true
+					for _, r := range ranges {
+						srcHash, err1 := srcHasher.GetChunkHash(rule.GetTable(), cols, pks[0], r.MinPK, r.MaxPK, r.IsLast)
+						tgtHash, err2 := tgtHasher.GetChunkHash(rule.GetTable(), cols, pks[0], r.MinPK, r.MaxPK, r.IsLast)
+						if err1 != nil || err2 != nil || srcHash != tgtHash {
+							allMatched = false
+							break
+						}
+					}
+					if allMatched {
+						log.Printf("Table %s: all %d chunks matched hash, skipped row-level scan", rule.GetTable(), len(ranges))
+						return nil
+					}
+				}
+			}
+		}
+	}
+
+	return StreamCompareDataDetailed(srcDB, tgtDB, rule, batchSize, handle)
+}
+
+func StreamCompareDataToDiffWithChunkFilter(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize, chunkSize int) (*DataDiff, error) {
+	diff := &DataDiff{}
+	err := StreamCompareDataWithChunkFilter(srcDB, tgtDB, rule, batchSize, chunkSize, func(diffType DiffType, srcRow, tgtRow conn.Record, diffCols []string) {
+		switch diffType {
+		case DiffTypeAdd:
+			diff.Added = append(diff.Added, tgtRow)
+		case DiffTypeDrop:
+			diff.Dropped = append(diff.Dropped, srcRow)
+		case DiffTypeModify:
+			diff.Modified = append(diff.Modified, ModifiedRow{
+				Old:          srcRow,
+				New:          tgtRow,
+				ModifiedCols: diffCols,
+			})
 		}
 	})
 	if err != nil {
@@ -149,15 +230,16 @@ func (it *rowBatchIterator) Close() error {
 	return nil
 }
 
-// comparePKRecord 比较主键值
-func comparePKRecord(a, b conn.Record, pk []string) int {
+// comparePKRecord 比较主键值，使用类型感知的强类型比较器
+func comparePKRecord(a, b conn.Record, pk []string, colTypes map[string]string) int {
 	for _, k := range pk {
-		av := fmt.Sprintf("%v", a[k])
-		bv := fmt.Sprintf("%v", b[k])
-		if av < bv {
-			return -1
-		} else if av > bv {
-			return 1
+		var colType string
+		if colTypes != nil {
+			colType = colTypes[k]
+		}
+		cmp := CompareValues(a[k], b[k], colType)
+		if cmp != 0 {
+			return cmp
 		}
 	}
 	return 0
@@ -172,19 +254,52 @@ func extractPK(row conn.Record, pk []string) []any {
 	return res
 }
 
-// getTableColumns 获取表的列和主键
-func getTableColumns(db conn.DBAdapter, table string) ([]string, []string, error) {
+// getTableColumnsAndTypes 获取表的列、主键及字段类型映射
+func getTableColumnsAndTypes(db conn.DBAdapter, table string) ([]string, []string, map[string]string, error) {
 	tbl, err := db.ExtractTable(table)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	if tbl == nil {
+		return nil, nil, nil, fmt.Errorf("table %s not found", table)
 	}
 	var cols []string
-	for name := range tbl.Columns {
+	colTypes := make(map[string]string)
+	for name, col := range tbl.Columns {
 		cols = append(cols, name)
+		if col != nil {
+			colTypes[name] = col.DataType
+		}
 	}
 	var pks []string
-	if tbl.PrimaryKey != nil {
+	if tbl.PrimaryKey != nil && len(tbl.PrimaryKey.Columns) > 0 {
 		pks = tbl.PrimaryKey.Columns
+	} else if tbl.Indexes != nil {
+		// 回退查找非空唯一索引
+		for _, idx := range tbl.Indexes {
+			if idx.Unique && len(idx.Columns) > 0 {
+				allNotNull := true
+				for _, colName := range idx.Columns {
+					if c := tbl.Columns[colName]; c != nil && c.Nullable {
+						allNotNull = false
+						break
+					}
+				}
+				if allNotNull {
+					pks = idx.Columns
+					break
+				}
+			}
+		}
 	}
-	return cols, pks, nil
+	if len(pks) == 0 {
+		return nil, nil, nil, fmt.Errorf("primary key or not-null unique index required for table %s", table)
+	}
+	return cols, pks, colTypes, nil
+}
+
+// getTableColumns 获取表的列和主键（保留向后兼容）
+func getTableColumns(db conn.DBAdapter, table string) ([]string, []string, error) {
+	cols, pks, _, err := getTableColumnsAndTypes(db, table)
+	return cols, pks, err
 }

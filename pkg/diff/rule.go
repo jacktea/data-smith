@@ -1,8 +1,6 @@
 package diff
 
 import (
-	"fmt"
-
 	"github.com/jacktea/data-smith/pkg/conn"
 )
 
@@ -11,31 +9,75 @@ type ICompareRule interface {
 	GetTable() string
 }
 
+type IDetailedCompareRule interface {
+	ICompareRule
+	DiffColumns(a, b conn.Record) (equal bool, diffCols []string)
+	GetColumnsDef() map[string]*conn.Column
+}
+
 type AllFieldsEqualRule struct {
-	Table   string
-	Columns []string
+	Table      string
+	Columns    []string
+	ColumnsDef map[string]*conn.Column
+}
+
+func (r *AllFieldsEqualRule) DiffColumns(a, b conn.Record) (bool, []string) {
+	var diffCols []string
+	for _, c := range r.Columns {
+		var colType string
+		if r.ColumnsDef != nil && r.ColumnsDef[c] != nil {
+			colType = r.ColumnsDef[c].DataType
+		}
+		if !AreValuesEqual(a[c], b[c], colType) {
+			diffCols = append(diffCols, c)
+		}
+	}
+	return len(diffCols) == 0, diffCols
 }
 
 func (r *AllFieldsEqualRule) IsEqual(a, b conn.Record) bool {
-	for _, c := range r.Columns {
-		if fmt.Sprintf("%v", a[c]) != fmt.Sprintf("%v", b[c]) {
-			return false
-		}
-	}
-	return true
+	equal, _ := r.DiffColumns(a, b)
+	return equal
 }
 
 func (r *AllFieldsEqualRule) GetTable() string {
 	return r.Table
 }
 
-func CreateCompareRule(table *conn.Table, comparisonKey []string) ICompareRule {
+func (r *AllFieldsEqualRule) GetColumnsDef() map[string]*conn.Column {
+	return r.ColumnsDef
+}
+
+func CreateCompareRule(table *conn.Table, comparisonKey []string, ignoreColumns ...[]string) ICompareRule {
 	cols := comparisonKey
-	if len(cols) == 0 {
+	if len(cols) == 0 && table != nil {
 		cols = table.GetColumns()
 	}
+
+	// 剔除忽略字段
+	if len(ignoreColumns) > 0 && len(ignoreColumns[0]) > 0 {
+		ignoreSet := make(map[string]struct{}, len(ignoreColumns[0]))
+		for _, c := range ignoreColumns[0] {
+			ignoreSet[c] = struct{}{}
+		}
+		filtered := make([]string, 0, len(cols))
+		for _, c := range cols {
+			if _, ignored := ignoreSet[c]; !ignored {
+				filtered = append(filtered, c)
+			}
+		}
+		cols = filtered
+	}
+
+	var colsDef map[string]*conn.Column
+	var tableName string
+	if table != nil {
+		colsDef = table.Columns
+		tableName = table.Name
+	}
 	return &AllFieldsEqualRule{
-		Table:   table.Name,
-		Columns: cols,
+		Table:      tableName,
+		Columns:    cols,
+		ColumnsDef: colsDef,
 	}
 }

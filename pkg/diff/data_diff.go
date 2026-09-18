@@ -17,6 +17,7 @@ type DataDiff struct {
 }
 
 type ModifiedRow struct {
-	Old conn.Record
-	New conn.Record
+	Old          conn.Record
+	New          conn.Record
+	ModifiedCols []string
 }

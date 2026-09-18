@@ -64,6 +64,7 @@ type Config struct {
 type Rule struct {
 	Table         string   `json:"table"`
 	ComparisonKey []string `json:"comparisonKey"`
+	IgnoreColumns []string `json:"ignoreColumns"`
 }
 
 // RuleSet defines a set of comparison rules.
