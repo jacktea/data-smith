@@ -140,7 +140,7 @@ func TestGenerateStreamingDataDiffOutputsBatchesAndReversesRollbackTables(t *tes
 	}
 	var forward, rollback bytes.Buffer
 	spoolParent := t.TempDir()
-	failures, err := generateStreamingDataDiffOutputs(&forward, &rollback, spoolParent, rules, pkgsql.NewDialect(consts.DBTypeMySQL), 2, false, prepare, compare)
+	failures, err := generateStreamingDataDiffOutputs(&forward, &rollback, spoolParent, rules, pkgsql.NewDialect(consts.DBTypeMySQL), 2, false, prepare, compare, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestGenerateStreamingDataDiffOutputsBestEffortDiscardsFailedTablePartialSQL
 	}
 	var forward, rollback bytes.Buffer
 	spoolParent := t.TempDir()
-	failures, err := generateStreamingDataDiffOutputs(&forward, &rollback, spoolParent, rules, pkgsql.NewDialect(consts.DBTypeMySQL), 10, true, prepare, compare)
+	failures, err := generateStreamingDataDiffOutputs(&forward, &rollback, spoolParent, rules, pkgsql.NewDialect(consts.DBTypeMySQL), 10, true, prepare, compare, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestStreamingFailFastPreservesAtomicOutputPair(t *testing.T) {
 		return errors.New("injected scan failure")
 	}
 	err := writeAtomicPair(forwardPath, rollbackPath, func(forward, rollback io.Writer) error {
-		_, generateErr := generateStreamingDataDiffOutputs(forward, rollback, dir, []config.Rule{{Table: "items"}}, pkgsql.NewDialect(consts.DBTypeMySQL), 1000, false, prepare, compare)
+		_, generateErr := generateStreamingDataDiffOutputs(forward, rollback, dir, []config.Rule{{Table: "items"}}, pkgsql.NewDialect(consts.DBTypeMySQL), 1000, false, prepare, compare, nil)
 		return generateErr
 	})
 	if err == nil || !strings.Contains(err.Error(), "injected scan failure") {

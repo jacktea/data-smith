@@ -56,7 +56,7 @@ func StreamCompareDataDetailedWithTableContext(ctx context.Context, srcDB, tgtDB
 	if err := validateCompareInputsWithErrorHandler(srcDB, tgtDB, rule, batchSize, handle); err != nil {
 		return err
 	}
-	cols, pks, colTypes, err := tableColumnsAndTypes(tbl, rule.GetTable())
+	cols, pks, colTypes, err := tableColumnsAndTypes(tbl, rule)
 	if err != nil {
 		return err
 	}
@@ -216,7 +216,7 @@ func StreamCompareDataWithChunkFilterAndTableContext(ctx context.Context, srcDB,
 		srcHasher, srcOk := srcDB.(chunk.VerifiedChunkHasher)
 		tgtHasher, tgtOk := tgtDB.(chunk.VerifiedChunkHasher)
 		if srcOk && tgtOk {
-			cols, pks, colTypes, err := tableColumnsAndTypes(tbl, rule.GetTable())
+			cols, pks, colTypes, err := tableColumnsAndTypes(tbl, rule)
 			if err != nil {
 				return err
 			}
@@ -391,9 +391,17 @@ func getTableModel(db conn.DBAdapter, table string) (*conn.Table, error) {
 	return tbl, nil
 }
 
-func tableColumnsAndTypes(tbl *conn.Table, table string) ([]string, []string, map[string]string, error) {
+func tableColumnsAndTypes(tbl *conn.Table, rule ICompareRule) ([]string, []string, map[string]string, error) {
 	if tbl == nil {
-		return nil, nil, nil, fmt.Errorf("table %s not found", table)
+		return nil, nil, nil, fmt.Errorf("table %s not found", rule.GetTable())
+	}
+	// 行读取必须跟随比对列集(忽略列/对比列),同时保留主键用于行匹配;
+	// 否则忽略单侧不存在的列会直接报错。
+	allowed := make(map[string]bool)
+	if cr, ok := rule.(interface{ GetCompareColumns() []string }); ok {
+		for _, name := range cr.GetCompareColumns() {
+			allowed[name] = true
+		}
 	}
 	var cols []string
 	colTypes := make(map[string]string)
@@ -402,6 +410,9 @@ func tableColumnsAndTypes(tbl *conn.Table, table string) ([]string, []string, ma
 			continue
 		}
 		name := col.Name
+		if len(allowed) > 0 && !allowed[name] {
+			continue
+		}
 		cols = append(cols, name)
 		colTypes[name] = col.DataType
 	}
@@ -433,7 +444,23 @@ func tableColumnsAndTypes(tbl *conn.Table, table string) ([]string, []string, ma
 		}
 	}
 	if len(pks) == 0 {
-		return nil, nil, nil, fmt.Errorf("primary key or not-null unique index required for table %s", table)
+		return nil, nil, nil, fmt.Errorf("primary key or not-null unique index required for table %s", rule.GetTable())
+	}
+	// 主键必须参与行读取(可能不在比对列集中)
+	for _, pk := range pks {
+		found := false
+		for _, name := range cols {
+			if name == pk {
+				found = true
+				break
+			}
+		}
+		if !found {
+			if col := tbl.Columns[pk]; col != nil {
+				cols = append(cols, pk)
+				colTypes[pk] = col.DataType
+			}
+		}
 	}
 	return cols, pks, colTypes, nil
 }

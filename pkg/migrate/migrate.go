@@ -39,7 +39,7 @@ func CurrentVersion(db conn.DBAdapter) (string, error) {
 // PrepareMigrationFiles validates every migration and loads its content before
 // callers make any database change. It also calculates the ledger checksum.
 func PrepareMigrationFiles(files []*MigrationFile) error {
-	versions := make(map[string]string, len(files))
+	versions := make(map[string]map[string]string, len(files))
 	for _, file := range files {
 		if file == nil {
 			return errors.New("migration list contains a nil file")
@@ -51,23 +51,28 @@ func PrepareMigrationFiles(files []*MigrationFile) error {
 			}
 		}
 		if !strings.EqualFold(file.Ext, "sql") {
-			return fmt.Errorf("migration %q has unsupported .%s format; only SQL upgrades are allowed", file.Path, file.Ext)
+			return fmt.Errorf("migration %q has unsupported .%s format; only SQL scripts are allowed", file.Path, file.Ext)
 		}
 		if file.Direction == "" {
 			file.Direction = "up"
 		}
-		if file.Direction != "up" {
-			return fmt.Errorf("migration %q has direction %q; upgrade accepts only .up.sql or directionless .sql files", file.Path, file.Direction)
+		if file.Direction != "up" && file.Direction != "down" {
+			return fmt.Errorf("migration %q has direction %q; only .up.sql, .down.sql or directionless .sql files are allowed", file.Path, file.Direction)
 		}
 
 		versionKey := normalizeVersion(file.Version)
 		if versionKey == "" {
 			return fmt.Errorf("migration %q has an empty version", file.Path)
 		}
-		if previous, exists := versions[versionKey]; exists {
-			return fmt.Errorf("duplicate migration version %q in %s and %s", file.Version, previous, file.Path)
+		directions := versions[versionKey]
+		if directions == nil {
+			directions = make(map[string]string, 2)
+			versions[versionKey] = directions
 		}
-		versions[versionKey] = file.Path
+		if previous, exists := directions[file.Direction]; exists {
+			return fmt.Errorf("duplicate migration version %q (%s) in %s and %s", file.Version, file.Direction, previous, file.Path)
+		}
+		directions[file.Direction] = file.Path
 
 		content, err := file.ReadContent()
 		if err != nil {
@@ -81,7 +86,7 @@ func PrepareMigrationFiles(files []*MigrationFile) error {
 }
 
 func DryRunMigrations(db conn.DBAdapter, files []*MigrationFile) error {
-	if err := PrepareMigrationFiles(files); err != nil {
+	if err := prepareForwardFiles(files); err != nil {
 		return err
 	}
 	if db.GetConfig().Type == consts.DBTypeMySQL {
@@ -111,7 +116,7 @@ func DryRunMigrations(db conn.DBAdapter, files []*MigrationFile) error {
 }
 
 func ApplyMigrations(db conn.DBAdapter, files []*MigrationFile) error {
-	if err := PrepareMigrationFiles(files); err != nil {
+	if err := prepareForwardFiles(files); err != nil {
 		return err
 	}
 	logger.Info("开始数据迁移")
@@ -145,6 +150,104 @@ func ApplyMigrations(db conn.DBAdapter, files []*MigrationFile) error {
 		logger.Info("数据迁移成功")
 		return nil
 	})
+}
+
+// prepareForwardFiles validates the full set and rejects down scripts, which
+// only ever run through RollbackLatestMigration.
+func prepareForwardFiles(files []*MigrationFile) error {
+	if err := PrepareMigrationFiles(files); err != nil {
+		return err
+	}
+	for _, file := range files {
+		if file.Direction == "down" {
+			return fmt.Errorf("migration %q is a down script; it cannot run in a forward migration", file.Path)
+		}
+	}
+	return nil
+}
+
+// RollbackLatestMigration executes the down script of the latest successfully
+// applied version and marks it rolled_back in the ledger. PostgreSQL runs the
+// down script in a single transaction; MySQL DDL may auto-commit, in which
+// case a failed rollback leaves the ledger untouched for retry.
+func RollbackLatestMigration(db conn.DBAdapter, files []*MigrationFile) (rolledVersion string, err error) {
+	if err := PrepareMigrationFiles(files); err != nil {
+		return "", err
+	}
+	current, err := CurrentVersion(db)
+	if err != nil {
+		return "", fmt.Errorf("read current migration version: %w", err)
+	}
+	if current == "" {
+		return "", errors.New("no applied migration to roll back")
+	}
+	var down *MigrationFile
+	for _, file := range files {
+		if file.Direction == "down" && normalizeVersion(file.Version) == normalizeVersion(current) {
+			down = file
+			break
+		}
+	}
+	if down == nil {
+		return "", fmt.Errorf("migration version %q has no down script and cannot be rolled back", current)
+	}
+
+	if err := withMigrationLock(db, func(ctx context.Context, connection *sql.Conn) error {
+		switch db.GetConfig().Type {
+		case consts.DBTypePostgres:
+			return rollbackPostgresMigration(ctx, connection, down, current)
+		case consts.DBTypeMySQL:
+			return rollbackMySQLMigration(ctx, connection, down, current)
+		default:
+			return fmt.Errorf("unsupported database type: %s", db.GetConfig().Type)
+		}
+	}); err != nil {
+		return "", err
+	}
+	logger.Infof("版本 %s 已回退", current)
+	return current, nil
+}
+
+func rollbackPostgresMigration(ctx context.Context, connection *sql.Conn, down *MigrationFile, ledgerVersion string) error {
+	tx, err := connection.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	start := time.Now()
+	if _, err = tx.ExecContext(ctx, `UPDATE schema_migrations SET status = 'rolling_back', error_summary = NULL WHERE version = $1`, ledgerVersion); err == nil {
+		_, err = tx.ExecContext(ctx, down.Content)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `UPDATE schema_migrations SET status = 'rolled_back', execution_time = $1,
+			error_summary = NULL, applied_at = CURRENT_TIMESTAMP WHERE version = $2`, time.Since(start).Milliseconds(), ledgerVersion)
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("rollback migration %s__%s: %w", down.Version, down.Title, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit rollback transaction (outcome unknown): %w", err)
+	}
+	return nil
+}
+
+func rollbackMySQLMigration(ctx context.Context, connection *sql.Conn, down *MigrationFile, ledgerVersion string) error {
+	start := time.Now()
+	if _, err := connection.ExecContext(ctx, down.Content); err != nil {
+		if _, ledgerErr := connection.ExecContext(ctx, `UPDATE schema_migrations SET error_summary = ?,
+			applied_at = CURRENT_TIMESTAMP WHERE version = ?`, errorSummary(fmt.Errorf("回退失败: %w", err)), ledgerVersion); ledgerErr != nil {
+			return fmt.Errorf("%v (also failed to record rollback failure: %w)", err, ledgerErr)
+		}
+		return fmt.Errorf("rollback migration %s__%s: %w", down.Version, down.Title, err)
+	}
+	executionTime := time.Since(start).Milliseconds()
+	if _, err := connection.ExecContext(ctx, `UPDATE schema_migrations SET status = 'rolled_back', execution_time = ?,
+		error_summary = NULL, applied_at = CURRENT_TIMESTAMP WHERE version = ?`, executionTime, ledgerVersion); err != nil {
+		return fmt.Errorf("rollback SQL completed but ledger update failed; MySQL DDL may already be committed: %w", err)
+	}
+	return nil
 }
 
 func ResetDatabase(db conn.DBAdapter) error {
@@ -183,11 +286,21 @@ func BuildResetSQL(cfg *config.ConnConfig) (string, error) {
 		name := ident.Quote(ident.Backtick, cfg.DBName)
 		return fmt.Sprintf("DROP DATABASE IF EXISTS %s; CREATE DATABASE %s;", name, name), nil
 	case consts.DBTypePostgres:
-		name := ident.Quote(ident.DoubleQuote, cfg.TableSchema)
+		name := ident.Quote(ident.DoubleQuote, resetSchema(cfg))
 		return fmt.Sprintf("DROP SCHEMA %s CASCADE; CREATE SCHEMA %s;", name, name), nil
 	default:
 		return "", fmt.Errorf("unsupported database type: %s", cfg.Type)
 	}
+}
+
+// resetSchema returns the PostgreSQL schema a reset targets: the configured
+// table schema, defaulting to "public" exactly like the PostgreSQL adapter
+// does for every other code path (diff, query, execution).
+func resetSchema(cfg *config.ConnConfig) string {
+	if schema := strings.TrimSpace(cfg.TableSchema); schema != "" {
+		return schema
+	}
+	return "public"
 }
 
 func ValidateResetTarget(cfg *config.ConnConfig) error {
@@ -208,10 +321,7 @@ func ValidateResetTarget(cfg *config.ConnConfig) error {
 		if system := map[string]bool{"postgres": true, "template0": true, "template1": true}; system[strings.ToLower(database)] {
 			return fmt.Errorf("refusing to reset PostgreSQL system database %q", database)
 		}
-		schema := strings.TrimSpace(cfg.TableSchema)
-		if schema == "" {
-			return errors.New("refusing to reset an empty PostgreSQL schema")
-		}
+		schema := resetSchema(cfg)
 		lowerSchema := strings.ToLower(schema)
 		if lowerSchema == "information_schema" || strings.HasPrefix(lowerSchema, "pg_") {
 			return fmt.Errorf("refusing to reset PostgreSQL system schema %q", schema)

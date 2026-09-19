@@ -16,9 +16,10 @@ func writeMigration(t *testing.T, dir, name string) string {
 	return path
 }
 
-func TestScanMigrationsUpgradeOnly(t *testing.T) {
+func TestScanMigrationsIncludesUpDownPairs(t *testing.T) {
 	dir := t.TempDir()
 	writeMigration(t, dir, "v1.0.0__create_users.up.sql")
+	writeMigration(t, dir, "v1.0.0__create_users.down.sql")
 	writeMigration(t, dir, "v1.1.0__drop_users.down.sql")
 	writeMigration(t, dir, "v1.2.0__add_index.sql")
 	writeMigration(t, dir, "README.txt")
@@ -28,16 +29,26 @@ func TestScanMigrationsUpgradeOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	SortMigrations(files)
-	if len(files) != 2 {
-		t.Fatalf("got %d upgrade files, want 2", len(files))
+	if len(files) != 4 {
+		t.Fatalf("got %d scripts, want 4 (up+down pairs and directionless)", len(files))
 	}
+	downCount := 0
 	for _, file := range files {
-		if file.Direction != "up" || file.Ext != "sql" {
-			t.Fatalf("unexpected upgrade candidate: %#v", file)
+		if file.Ext != "sql" {
+			t.Fatalf("unexpected candidate: %#v", file)
+		}
+		if file.Direction == "down" {
+			downCount++
 		}
 	}
-	if files[1].Version != "v1.2.0" {
-		t.Fatalf("directionless SQL was not retained as an upgrade: %#v", files)
+	if downCount != 2 {
+		t.Fatalf("got %d down scripts, want 2", downCount)
+	}
+	if files[0].Version != "v1.0.0" || files[1].Version != "v1.0.0" {
+		t.Fatalf("same-version pair must sort adjacently: %#v", files)
+	}
+	if files[3].Version != "v1.2.0" {
+		t.Fatalf("directionless SQL was not retained: %#v", files)
 	}
 }
 
@@ -58,7 +69,7 @@ func TestScanMigrationsRejectsDuplicateVersions(t *testing.T) {
 	writeMigration(t, dir, "1__second.sql")
 
 	_, err := ScanMigrations(dir)
-	if err == nil || !strings.Contains(err.Error(), "duplicate migration version") {
+	if err == nil || !strings.Contains(err.Error(), "duplicate migration script") {
 		t.Fatalf("expected actionable duplicate version error, got %v", err)
 	}
 }

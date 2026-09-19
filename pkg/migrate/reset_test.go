@@ -30,6 +30,20 @@ func TestBuildResetSQLQuotesIdentifiers(t *testing.T) {
 	}
 }
 
+// 连接档案允许 tableSchema 留空;与 PostgreSQL 适配器其余路径一致,
+// 重置目标此时应默认为 public,而不是拒绝。
+func TestBuildResetSQLDefaultsEmptySchemaToPublic(t *testing.T) {
+	for _, schema := range []string{"", "   "} {
+		sql, err := BuildResetSQL(&config.ConnConfig{Type: consts.DBTypePostgres, DBName: "application", TableSchema: schema})
+		if err != nil {
+			t.Fatalf("schema %q: %v", schema, err)
+		}
+		if want := `DROP SCHEMA "public" CASCADE; CREATE SCHEMA "public";`; sql != want {
+			t.Fatalf("schema %q: got %s, want %s", schema, sql, want)
+		}
+	}
+}
+
 func TestResetDatabaseRejectsDangerousTargetBeforeConnectionAccess(t *testing.T) {
 	adapter := &mockAdapter{cfg: &config.ConnConfig{Type: consts.DBTypePostgres, DBName: "application", TableSchema: "pg_catalog"}}
 	err := ResetDatabase(adapter)
@@ -54,17 +68,21 @@ func TestResetDatabaseContextHonorsDeadline(t *testing.T) {
 	}
 }
 
-func TestValidateResetTargetRejectsEmptyAndSystemTargets(t *testing.T) {
+func TestValidateResetTargetRejectsSystemTargets(t *testing.T) {
 	tests := []*config.ConnConfig{
 		{Type: consts.DBTypeMySQL},
 		{Type: consts.DBTypeMySQL, DBName: "mysql"},
-		{Type: consts.DBTypePostgres, DBName: "application"},
 		{Type: consts.DBTypePostgres, DBName: "application", TableSchema: "information_schema"},
+		{Type: consts.DBTypePostgres, DBName: "application", TableSchema: "pg_catalog"},
 		{Type: consts.DBTypePostgres, DBName: "postgres", TableSchema: "public"},
 	}
 	for _, cfg := range tests {
 		if err := ValidateResetTarget(cfg); err == nil {
 			t.Fatalf("dangerous target accepted: %#v", cfg)
 		}
+	}
+	// 空 schema 默认 public,属于合法目标。
+	if err := ValidateResetTarget(&config.ConnConfig{Type: consts.DBTypePostgres, DBName: "application"}); err != nil {
+		t.Fatalf("empty schema should default to public: %v", err)
 	}
 }

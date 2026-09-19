@@ -48,6 +48,22 @@ func (r *AllFieldsEqualRule) GetColumnsDef() map[string]*conn.Column {
 	return r.ColumnsDef
 }
 
+// GetCompareColumns exposes the effective compare set so row readers can fetch
+// only the compared columns (plus primary keys), honouring ignore columns.
+func (r *AllFieldsEqualRule) GetCompareColumns() []string {
+	return r.Columns
+}
+
+// CreateCompareRuleColumns builds the compare rule with explicit precedence:
+// compare columns > comparisonKey (legacy) > all columns. Ignore columns are
+// removed from the resulting compare set in every branch.
+func CreateCompareRuleColumns(table *conn.Table, columns, comparisonKey, ignoreColumns []string) ICompareRule {
+	if len(columns) > 0 {
+		return CreateCompareRule(table, columns, ignoreColumns)
+	}
+	return CreateCompareRule(table, comparisonKey, ignoreColumns)
+}
+
 func CreateCompareRule(table *conn.Table, comparisonKey []string, ignoreColumns ...[]string) ICompareRule {
 	cols := comparisonKey
 	if len(cols) == 0 && table != nil {

@@ -7,6 +7,7 @@ import (
 	"github.com/jacktea/data-smith/internal/datasmith/diff"
 	"github.com/jacktea/data-smith/internal/datasmith/exec"
 	"github.com/jacktea/data-smith/internal/datasmith/migrate"
+	"github.com/jacktea/data-smith/internal/datasmith/web"
 	"github.com/spf13/cobra"
 )
 
@@ -19,6 +20,7 @@ func init() {
 	diff.Install(rootCmd)
 	migrate.Install(rootCmd)
 	exec.Install(rootCmd)
+	web.Install(rootCmd)
 }
 
 func Execute() {

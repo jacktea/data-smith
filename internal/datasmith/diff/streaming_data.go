@@ -68,6 +68,12 @@ type rollbackSpool struct {
 	path  string
 }
 
+type tableDiffStats struct {
+	added    int
+	modified int
+	dropped  int
+}
+
 func generateStreamingDataDiffOutputs(
 	forward io.Writer,
 	rollback io.Writer,
@@ -78,6 +84,7 @@ func generateStreamingDataDiffOutputs(
 	bestEffort bool,
 	prepare prepareTableModelsFunc,
 	compare streamTableCompareFunc,
+	onTableDone func(rule pkgconfig.Rule, stats tableDiffStats, tableErr error),
 ) (resultFailures []tableDiffFailure, resultErr error) {
 	if err := validateDMLBatchSize(dmlBatchSize); err != nil {
 		return nil, err
@@ -154,11 +161,17 @@ func generateStreamingDataDiffOutputs(
 			if forwardFile != nil {
 				_ = os.Remove(forwardFile.Name())
 			}
+			if onTableDone != nil {
+				onTableDone(rule, tableDiffStats{}, err)
+			}
 			failures, err = recordTableFailure(failures, rule.Table, err, bestEffort)
 			if err != nil {
 				return failures, err
 			}
 			continue
+		}
+		if onTableDone != nil {
+			onTableDone(rule, stream.stats(), nil)
 		}
 
 		if forwardFile != nil {
@@ -286,6 +299,13 @@ type tableDMLStream struct {
 	target        *conn.Table
 	source        *conn.Table
 	effectiveCols []string
+	added         int
+	modified      int
+	dropped       int
+}
+
+func (s *tableDMLStream) stats() tableDiffStats {
+	return tableDiffStats{added: s.added, modified: s.modified, dropped: s.dropped}
 }
 
 func newTableDMLStream(forward, rollback io.Writer, dialect pkgsql.IDialect, models *tableModels, batchSize int) *tableDMLStream {
@@ -305,16 +325,19 @@ func newTableDMLStream(forward, rollback io.Writer, dialect pkgsql.IDialect, mod
 func (s *tableDMLStream) handle(kind pkgdiff.DiffType, srcRow, tgtRow conn.Record, diffCols []string) error {
 	switch kind {
 	case pkgdiff.DiffTypeAdd:
+		s.added++
 		if err := s.forward.add(dmlInsert, tgtRow); err != nil {
 			return err
 		}
 		return s.rollback.addForTable(dmlDelete, s.target, tgtRow)
 	case pkgdiff.DiffTypeDrop:
+		s.dropped++
 		if err := s.forward.add(dmlDelete, srcRow); err != nil {
 			return err
 		}
 		return s.rollback.addForTable(dmlInsert, s.source, srcRow)
 	case pkgdiff.DiffTypeModify:
+		s.modified++
 		if err := s.forward.flush(); err != nil {
 			return err
 		}

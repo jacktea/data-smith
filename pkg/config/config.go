@@ -227,6 +227,7 @@ type Config struct {
 // Rule defines a single comparison rule.
 type Rule struct {
 	Table         string   `json:"table"`
+	Columns       []string `json:"columns"`
 	ComparisonKey []string `json:"comparisonKey"`
 	IgnoreColumns []string `json:"ignoreColumns"`
 }

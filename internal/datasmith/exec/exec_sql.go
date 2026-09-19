@@ -154,6 +154,13 @@ func validateDeclaredDatabase(sqlContent, dbLabel string) error {
 	return nil
 }
 
+// DeclaredExecuteOn returns the execution target declared in the SQL header
+// ("source"/"target"), or an empty string when no marker is present. The web
+// console uses it to warn when a script is run against an unexpected database.
+func DeclaredExecuteOn(sqlContent string) string {
+	return declaredDatabase(sqlContent)
+}
+
 func declaredDatabase(sqlContent string) string {
 	const maxHeaderLines = 20
 	for index, line := range strings.Split(sqlContent, "\n") {

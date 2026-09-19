@@ -72,7 +72,7 @@ func TestApplyMigrationsPreflightBeforeDatabaseMutation(t *testing.T) {
 		want string
 	}{
 		{"json", &MigrationFile{Version: "1", Ext: "json", Direction: "up", Content: `{}`}, "only SQL"},
-		{"down", &MigrationFile{Version: "1", Ext: "sql", Direction: "down", Content: "SELECT 1"}, "accepts only"},
+		{"down", &MigrationFile{Version: "1", Ext: "sql", Direction: "down", Content: "SELECT 1"}, "down script"},
 		{"missing", &MigrationFile{Version: "1", Ext: "sql", Direction: "up", Path: "/missing.sql"}, "read migration"},
 	}
 	for _, test := range tests {
@@ -93,7 +93,7 @@ func TestPrepareMigrationFilesRejectsDuplicateVersion(t *testing.T) {
 		{Version: "v1", Content: "SELECT 1"},
 		{Version: "1", Content: "SELECT 2"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "duplicate migration version") {
+	if err == nil || !strings.Contains(err.Error(), "duplicate migration") {
 		t.Fatalf("expected duplicate version error, got %v", err)
 	}
 }

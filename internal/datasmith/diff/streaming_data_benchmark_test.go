@@ -73,7 +73,7 @@ func BenchmarkDataDiffPipelines(b *testing.B) {
 			}
 			for i := 0; i < b.N; i++ {
 				var forward, rollback benchmarkCountingWriter
-				if _, err := generateStreamingDataDiffOutputs(&forward, &rollback, spoolParent, rules, dialect, 1000, false, prepare, compare); err != nil {
+				if _, err := generateStreamingDataDiffOutputs(&forward, &rollback, spoolParent, rules, dialect, 1000, false, prepare, compare, nil); err != nil {
 					b.Fatal(err)
 				}
 				outputBytes += int64(forward + rollback)

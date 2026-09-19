@@ -62,7 +62,7 @@ func ScanMigrations(dir string) ([]*migrate.MigrationFile, error) {
 		if file.Ext == "json" {
 			return fmt.Errorf("JSON migration is not supported: %s", path)
 		}
-		if file.Ext == "sql" && file.Direction == "up" {
+		if file.Ext == "sql" && (file.Direction == "up" || file.Direction == "down") {
 			files = append(files, file)
 		}
 		return nil
@@ -72,16 +72,31 @@ func ScanMigrations(dir string) ([]*migrate.MigrationFile, error) {
 		return nil, err
 	}
 
-	versions := make(map[string]string, len(files))
+	type scriptKey struct {
+		version   string
+		direction string
+	}
+	seen := make(map[scriptKey]string, len(files))
 	for _, file := range files {
-		normalized := normalizeVersion(file.Version)
-		if previous, ok := versions[normalized]; ok {
-			return nil, fmt.Errorf("duplicate migration version %q in %s and %s", file.Version, previous, file.Path)
+		key := scriptKey{normalizeVersion(file.Version), file.Direction}
+		if previous, ok := seen[key]; ok {
+			return nil, fmt.Errorf("duplicate migration script %q (%s) in %s and %s", file.Version, file.Direction, previous, file.Path)
 		}
-		versions[normalized] = file.Path
+		seen[key] = file.Path
 	}
 
 	return files, nil
+}
+
+// FindDownMigration returns the down script for version, or nil when absent.
+func FindDownMigration(files []*migrate.MigrationFile, version string) *migrate.MigrationFile {
+	normalized := normalizeVersion(version)
+	for _, file := range files {
+		if file.Direction == "down" && normalizeVersion(file.Version) == normalized {
+			return file
+		}
+	}
+	return nil
 }
 
 func SortMigrations(files []*migrate.MigrationFile) {

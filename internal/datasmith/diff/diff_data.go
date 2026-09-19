@@ -7,12 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/jacktea/data-smith/internal/config"
 	pkgconfig "github.com/jacktea/data-smith/pkg/config"
 	"github.com/jacktea/data-smith/pkg/conn"
-	"github.com/jacktea/data-smith/pkg/db"
 	"github.com/jacktea/data-smith/pkg/diff"
 	"github.com/jacktea/data-smith/pkg/sql"
 
@@ -66,115 +64,50 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	srcDB, err := db.NewDBAdapterContext(cmd.Context(), &cfg.SourceDB)
-	if err != nil {
-		return fmt.Errorf("connect to source DB: %w", err)
-	}
-	defer srcDB.Close()
-	tgtDB, err := db.NewDBAdapterContext(cmd.Context(), &cfg.TargetDB)
-	if err != nil {
-		return fmt.Errorf("connect to target DB: %w", err)
-	}
-	defer tgtDB.Close()
-
-	dbDialect := sql.NewDialect(cfg.TargetDB.Type)
-
-	diffFile, _ := cmd.Flags().GetString("output")
-	rollbackFile, _ := cmd.Flags().GetString("rollback-output")
-
 	diffDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get current working directory: %w", err)
 	}
+	diffFile, _ := cmd.Flags().GetString("output")
+	rollbackFile, _ := cmd.Flags().GetString("rollback-output")
 	if diffFile == "" {
-		diffFile = fmt.Sprintf("%s/data_diff.sql", diffDir)
+		diffFile = filepath.Join(diffDir, dataDiffForwardFile)
 	}
 	if rollbackFile == "" {
-		rollbackFile = fmt.Sprintf("%s/data_diff_rollback.sql", diffDir)
+		rollbackFile = filepath.Join(diffDir, dataDiffRollbackFile)
 	}
 	log.Printf("Forward Diff file: %s\n", diffFile)
 	log.Printf("Rollback Diff file: %s\n", rollbackFile)
 
-	sourceModels := newTableModelCache(srcDB)
-	targetModels := newTableModelCache(tgtDB)
-	prepareTable := func(rule pkgconfig.Rule) (*tableModels, error) {
-		tgtTable, err := targetModels.get(rule.Table)
-		if err != nil {
-			return nil, fmt.Errorf("extract target table: %w", err)
+	result, err := RunDataDiff(cmd.Context(), DataDiffParams{
+		Source:       &cfg.SourceDB,
+		Target:       &cfg.TargetDB,
+		Rules:        rules.Rules,
+		BatchSize:    batchSize,
+		ChunkSize:    chunkSize,
+		DMLBatchSize: dmlBatchSize,
+		ChunkHash:    enableChunkHash,
+		BestEffort:   bestEffort,
+		ForwardPath:  diffFile,
+		RollbackPath: rollbackFile,
+	}, diffDir, func(event TableProgress) {
+		if event.Phase == "log" {
+			log.Printf("%s\n", event.Error)
 		}
-		if tgtTable == nil {
-			return nil, fmt.Errorf("extract target table: table not found")
-		}
-		srcTable, err := sourceModels.get(rule.Table)
-		if err != nil {
-			return nil, fmt.Errorf("extract source table: %w", err)
-		}
-		compareRule := diff.CreateCompareRule(tgtTable, rule.ComparisonKey, rule.IgnoreColumns)
-		var effectiveCols []string
-		if allRule, ok := compareRule.(*diff.AllFieldsEqualRule); ok {
-			effectiveCols = allRule.Columns
-		} else {
-			effectiveCols = rule.ComparisonKey
-		}
-		return &tableModels{target: tgtTable, source: srcTable, effectiveCols: effectiveCols}, nil
-	}
-	compareTable := func(rule pkgconfig.Rule, models *tableModels, handle diff.DetailedDiffErrorHandler) error {
-		start := time.Now()
-		compareRule := diff.CreateCompareRule(models.target, rule.ComparisonKey, rule.IgnoreColumns)
-		var err error
-		if enableChunkHash {
-			err = diff.StreamCompareDataWithChunkFilterAndTableContext(
-				cmd.Context(),
-				srcDB,
-				tgtDB,
-				compareRule,
-				models.target,
-				batchSize,
-				chunkSize,
-				handle,
-			)
-		} else {
-			err = diff.StreamCompareDataDetailedWithTableContext(
-				cmd.Context(),
-				srcDB,
-				tgtDB,
-				compareRule,
-				models.target,
-				batchSize,
-				handle,
-			)
-		}
-		if err != nil {
-			return fmt.Errorf("compare data: %w", err)
-		}
-		log.Printf("Table %s compared in %v\n", rule.Table, time.Since(start))
-		return nil
-	}
-
-	var failures []tableDiffFailure
-	err = writeAtomicPair(diffFile, rollbackFile, func(forward, rollback io.Writer) error {
-		var generateErr error
-		failures, generateErr = generateStreamingDataDiffOutputs(
-			forward,
-			rollback,
-			filepath.Dir(rollbackFile),
-			rules.Rules,
-			dbDialect,
-			dmlBatchSize,
-			bestEffort,
-			prepareTable,
-			compareTable,
-		)
-		return generateErr
 	})
 	if err != nil {
 		return err
 	}
-	if len(failures) > 0 {
-		log.Printf("WARNING: data diff is INCOMPLETE (--best-effort); %d table(s) failed:", len(failures))
-		for _, failure := range failures {
-			log.Printf("  - %s: %v", failure.table, failure.err)
+	failed := 0
+	for _, table := range result.Tables {
+		if table.Status != "failed" {
+			continue
 		}
+		failed++
+		log.Printf("  - %s: %s", table.Table, table.Error)
+	}
+	if failed > 0 {
+		log.Printf("WARNING: data diff is INCOMPLETE (--best-effort); %d table(s) failed:", failed)
 	}
 	return nil
 }
@@ -340,6 +273,11 @@ func validateRules(rules *pkgconfig.RuleSet) error {
 		for _, key := range rule.ComparisonKey {
 			if strings.TrimSpace(key) == "" {
 				return fmt.Errorf("rule %d comparison keys must not be empty", i)
+			}
+		}
+		for _, column := range rule.Columns {
+			if strings.TrimSpace(column) == "" {
+				return fmt.Errorf("rule %d compare columns must not be empty", i)
 			}
 		}
 		for _, column := range rule.IgnoreColumns {
