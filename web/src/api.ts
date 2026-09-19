@@ -380,6 +380,10 @@ export const api = {
   listSchemes: () => request<Scheme[]>("/schemes"),
   createScheme: (body: { name: string; tables: SchemeTable[] }) =>
     request<Scheme>("/schemes", { method: "POST", body: JSON.stringify(body) }),
+  updateScheme: (id: string, body: { name: string; tables: SchemeTable[] }) =>
+    request<Scheme>(`/schemes/${enc(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteScheme: (id: string) =>
+    request<void>(`/schemes/${enc(id)}`, { method: "DELETE" }),
 
   // 任务
   createJobDiffSchema: (body: DiffSchemaJobInput) =>

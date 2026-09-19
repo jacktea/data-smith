@@ -1,4 +1,4 @@
-import { SaveOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, SaveOutlined } from "@ant-design/icons";
 import {
   Alert,
   App,
@@ -9,6 +9,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Popconfirm,
   Row,
   Select,
   Space,
@@ -110,6 +111,9 @@ export default function DiffDataPage() {
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
   const [savingScheme, setSavingScheme] = useState(false);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [updateName, setUpdateName] = useState("");
+  const [deletingScheme, setDeletingScheme] = useState(false);
   const [batchSize, setBatchSize] = useState<number | undefined>();
   const [chunkSize, setChunkSize] = useState<number | undefined>();
   const [dmlBatchSize, setDmlBatchSize] = useState<number | undefined>();
@@ -222,6 +226,52 @@ export default function DiffDataPage() {
       message.error(errMsg(e));
     } finally {
       setSavingScheme(false);
+    }
+  };
+
+  const openUpdateScheme = () => {
+    const current = schemes.find((s) => s.id === schemeId);
+    if (!current) return;
+    setUpdateName(current.name);
+    setUpdateOpen(true);
+  };
+
+  const submitUpdateScheme = async () => {
+    if (!schemeId) return;
+    const name = updateName.trim();
+    if (!name) {
+      message.warning("请输入方案名称");
+      return;
+    }
+    if (targetKeys.length === 0) {
+      message.warning("请先选择至少一张表");
+      return;
+    }
+    setSavingScheme(true);
+    try {
+      const s = await api.updateScheme(schemeId, { name, tables: buildSchemeTables() });
+      message.success(`方案「${s.name}」已更新`);
+      setUpdateOpen(false);
+      await loadSchemes();
+    } catch (e) {
+      message.error(errMsg(e));
+    } finally {
+      setSavingScheme(false);
+    }
+  };
+
+  const submitDeleteScheme = async () => {
+    if (!schemeId) return;
+    setDeletingScheme(true);
+    try {
+      await api.deleteScheme(schemeId);
+      message.success("方案已删除");
+      setSchemeId(undefined);
+      await loadSchemes();
+    } catch (e) {
+      message.error(errMsg(e));
+    } finally {
+      setDeletingScheme(false);
     }
   };
 
@@ -347,6 +397,21 @@ export default function DiffDataPage() {
             allowClear
             options={schemes.map((s) => ({ value: s.id, label: `${s.name}(${s.tables.length} 表)` }))}
           />
+          <Button icon={<EditOutlined />} disabled={!schemeId} onClick={openUpdateScheme}>
+            更新方案
+          </Button>
+          <Popconfirm
+            title="删除比对方案"
+            description="删除后不可恢复,确定删除当前选中的方案?"
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => void submitDeleteScheme()}
+          >
+            <Button danger icon={<DeleteOutlined />} disabled={!schemeId} loading={deletingScheme}>
+              删除
+            </Button>
+          </Popconfirm>
           <Button loading={loadingTables} disabled={!sourceId} onClick={() => void loadTables()}>
             从 source 拉取表清单
           </Button>
@@ -442,6 +507,24 @@ export default function DiffDataPage() {
         />
         <Typography.Text type="secondary">
           将保存当前已选 {targetKeys.length} 张表及其比对列/忽略列配置。
+        </Typography.Text>
+      </Modal>
+      <Modal
+        title="更新比对方案"
+        open={updateOpen}
+        onCancel={() => setUpdateOpen(false)}
+        onOk={() => void submitUpdateScheme()}
+        confirmLoading={savingScheme}
+        okText="保存修改"
+        cancelText="取消"
+      >
+        <Input
+          placeholder="方案名称"
+          value={updateName}
+          onChange={(e) => setUpdateName(e.target.value)}
+        />
+        <Typography.Text type="secondary">
+          将以当前已选 {targetKeys.length} 张表及其比对列/忽略列配置覆盖该方案。
         </Typography.Text>
       </Modal>
     </Card>
