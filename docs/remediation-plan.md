@@ -13,7 +13,7 @@ Execution order is sequential in the shared checkout. Each session must preserve
 - [x] [#6](https://github.com/jacktea/data-smith/issues/6) — Session 5: fail-fast CLI and atomic output files (completed 2026-09-18)
 - [x] [#7](https://github.com/jacktea/data-smith/issues/7) — Session 6: streaming diff and database performance (completed 2026-09-18)
 - [x] [#8](https://github.com/jacktea/data-smith/issues/8) — Session 7: configuration, SSH, connections, and reset safety (completed 2026-09-19)
-- [ ] [#9](https://github.com/jacktea/data-smith/issues/9) — Session 8: implementation and local gates complete; closure blocked on protected review-matrix authorization and an actual GitHub Actions run
+- [x] [#9](https://github.com/jacktea/data-smith/issues/9) — Session 8: dual-database E2E, CI gates, coverage, and final review matrix completed 2026-09-19
 
 ## Session 1 acceptance evidence
 
@@ -242,12 +242,14 @@ Final verification:
 - `go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...` — PASS.
 - `go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...` — PASS, zero reachable vulnerabilities (one imported/module advisory is not called).
 - Protected `datasmith` remained tracked-modified, executable, 7,401,858 bytes, SHA-256 `84fd988415654588c2bfc2a14b2b2490575d43d6d0e46ea61264e1a41cfc1c57`; protected `CODE_REVIEW_REPORT.md` remained untracked, 21,194 bytes, SHA-256 `9c529456726a93167b326e1a0c07f740ad013dcc42269f0a2b893539d2d3424b`; staged diff remained empty after every important round.
+- `CODE_REVIEW_REPORT.md` status matrix was updated with all original P0/P1 findings marked fixed and linked to regression/E2E evidence.
+- Commit `6a7e1dc` was pushed to `origin/main`; GitHub Actions [run 35419579967](https://github.com/jacktea/data-smith/actions/runs/35419579967) passed both the dual-database E2E/coverage job and the unit/race/static-analysis job.
 
-## Session 8 closure blockers
+## Session 8 closure result
 
-- `CODE_REVIEW_REPORT.md` is explicitly protected, so its review status matrix has not been updated. Suggested change: mark all P0/P1 rows fixed and link the automated tests/E2E evidence above. User authorization is required before touching that file.
-- No commit or push is authorized, so the new GitHub Actions workflow cannot have an actual run URL or green remote result yet. Local equivalents pass, but Issue #9 must remain open until CI runs from a committed clean checkout.
-- Epic #1 must remain open while Issue #9 is open. After report authorization and a green CI run, update the matrix, attach the run link, close #9, then check all Epic children and close #1.
+- The protected report was updated only after explicit user authorization; the original P0/P1 findings now have a status matrix and evidence links.
+- The implementation was committed and pushed, and the clean-checkout GitHub Actions run passed.
+- Issue #9 and Epic #1 are ready to close after the corresponding GitHub issue updates.
 
 ## Open risks and later work
 
@@ -273,6 +275,6 @@ Final verification:
 - SSH lifecycle tests use local listeners and injected forwarding rather than external credentials. Live bastion plus live database coverage remains for environments that can supply an approved known_hosts entry or fingerprint; Issue #9 remains responsible for database E2E, not SSH infrastructure.
 - The modified executable `datasmith` (size `7401858`, mode `-rwxr-xr-x`, SHA-256 `84fd988415654588c2bfc2a14b2b2490575d43d6d0e46ea61264e1a41cfc1c57`, status `M`) and untracked `CODE_REVIEW_REPORT.md` (size `21194`, SHA-256 `9c529456726a93167b326e1a0c07f740ad013dcc42269f0a2b893539d2d3424b`, status `??`) are unrelated user changes and must remain untouched in later sessions. Do not rebuild, truncate, restore, stage, or commit either file; use Go test/vet commands that do not emit the root binary.
 
-## Next action
+## Final action
 
-Obtain explicit authorization to update the protected `CODE_REVIEW_REPORT.md` status matrix and authorization for a commit/push so GitHub Actions can run. If the workflow is green, record its URL in Issue #9 and these docs, close #9, update Epic #1 with the P0/P1 mapping and all child evidence, and close the epic. Until both approvals/evidence exist, keep Issue #9 and Epic #1 open.
+Issue #9 and Epic #1 were closed after the authorized report update and the green remote CI run. The remaining risks above are product/operational limitations, not unresolved P0/P1 remediation blockers.

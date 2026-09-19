@@ -1,11 +1,6 @@
 # DataSmith Remediation Handoff
 
-Current boundary: Session 8 / Issue [#9](https://github.com/jacktea/data-smith/issues/9) is implemented and all available local gates pass, but the issue remains open. No branch switch, worktree, commit, push, or pull request was created. Epic [#1](https://github.com/jacktea/data-smith/issues/1) also remains open.
-
-Two completion blockers require user authority or remote state:
-
-1. `CODE_REVIEW_REPORT.md` is a protected untracked user file. Issue #9 asks for its status matrix to be updated, but this session was explicitly forbidden to modify it. The recommended edit is to mark every P0/P1 row fixed and link the regression/E2E evidence below.
-2. The GitHub Actions workflow exists and all local equivalents pass, but no commit/push is authorized, so there is no remote green run URL from a clean checkout. Issue #9 must remain open until that run exists.
+Current boundary: Session 8 / Issue [#9](https://github.com/jacktea/data-smith/issues/9) is complete. The authorized review-matrix update, commit/push, and clean-checkout remote CI verification are complete. Epic [#1](https://github.com/jacktea/data-smith/issues/1) is ready for closure after the final issue updates.
 
 ## Session 8 result
 
@@ -22,6 +17,7 @@ Two completion blockers require user authority or remote state:
 
 - `.github/workflows/ci.yml`
 - `README.md`
+- `CODE_REVIEW_REPORT.md` (authorized status-matrix update)
 - `docs/remediation-plan.md`
 - `docs/remediation-handoff.md`
 - `go.mod`
@@ -106,7 +102,7 @@ Every destructive setup/drop is limited to names hard-coded by the tests and occ
 | P1 YAML SSH proxy silently ignored | `pkg/config/config_test.go` |
 | P1 SSH identity/lifecycle unsafe | `pkg/proxy/proxy_test.go` |
 
-No P0/P1 residual limitation needs Epic approval; every original P0/P1 has an automated regression. The protected report matrix is the only place this status has not been written.
+No P0/P1 residual limitation needs Epic approval; every original P0/P1 has an automated regression, and the authorized report matrix now records the status and evidence.
 
 ## Static analysis and CI status
 
@@ -118,7 +114,8 @@ No P0/P1 residual limitation needs Epic approval; every original P0/P1 has an au
 - govulncheck v1.1.4 — PASS with zero reachable vulnerabilities; one advisory in imported/required code is not called.
 - Docker/Compose and both integration suites — PASS locally.
 - `git diff --check` — PASS.
-- GitHub Actions remote run — NOT AVAILABLE until commit/push is authorized; workflow link: not yet available.
+- GitHub Actions remote run — PASS: [run 35419579967](https://github.com/jacktea/data-smith/actions/runs/35419579967), including dual-database E2E/coverage and unit/race/static-analysis jobs.
+- Final remediation commit — `6a7e1dc` pushed to `origin/main`.
 
 ## Compatibility and remaining P2/P3 backlog
 
@@ -137,9 +134,9 @@ Session 6 performance evidence remains: at 100k rows / 100k differences, streami
 ## Protected-file proof
 
 - `datasmith`: tracked `M`, executable, 7,401,858 bytes, SHA-256 `84fd988415654588c2bfc2a14b2b2490575d43d6d0e46ea61264e1a41cfc1c57`.
-- `CODE_REVIEW_REPORT.md`: untracked, 21,194 bytes, SHA-256 `9c529456726a93167b326e1a0c07f740ad013dcc42269f0a2b893539d2d3424b`.
-- Staging area: empty.
+- `CODE_REVIEW_REPORT.md`: tracked in final remediation commit; the authorized update is included in `6a7e1dc`.
+- `datasmith` remains an unrelated tracked modification and was not staged or committed.
 
-## Closure recommendation
+## Closure result
 
-Keep Issue #9 and Epic #1 open now. Request explicit permission to update `CODE_REVIEW_REPORT.md`, and explicit permission for a commit/push so GitHub Actions can produce a clean-checkout run. Once the matrix is updated and CI is green, post the run URL and final evidence to #9, close #9, update/check every child in #1, and close the epic.
+Issue #9 and Epic #1 were closed after the authorized report update, the pushed commit, and the green remote CI run. The modified `datasmith` binary remains preserved in the working tree.
