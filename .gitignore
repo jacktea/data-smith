@@ -6,3 +6,4 @@ schema_diff.sql
 schema_diff_rollback.sql
 data_diff.sql
 data_diff_rollback.sql
+bin

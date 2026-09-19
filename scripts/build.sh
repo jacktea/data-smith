@@ -1,3 +1,2 @@
 #!/bin/bash
-
-go build -ldflags '-s -w' -o datasmith cmd/main.go
+go build -ldflags '-s -w' -o bin/datasmith cmd/main.go
