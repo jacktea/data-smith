@@ -5,7 +5,7 @@ DataSmith（`github.com/jacktea/data-smith`）— Go CLI 数据库管理工具�
 ## 常用命令
 
 ```bash
-# 构建（产物 bin/datasmith）
+# 构建（产物 bin/datasmith；检测到 pnpm 时先构建 web/ 前端并 embed）
 ./scripts/build.sh
 
 # 单元测试（不启动 Docker、不读外部数据库凭据）
@@ -28,7 +28,7 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 ./scripts/check-coverage.sh
 ```
 
-CLI 子命令：`diff-schema`、`diff-data`、`exec-sql`、`reset-db`、`migrate-script`（示例配置在 `configs/`）。
+CLI 子命令：`diff-schema`、`diff-data`、`exec-sql`、`reset-db`、`migrate-script`、`web`（Web 控制台，`--addr`/`--data-dir`；示例配置在 `configs/`）。
 
 ## 架构
 
@@ -38,14 +38,22 @@ internal/
   config/                   配置加载与解析（YAML/JSON）
   datasmith/root.go         cobra 根命令；子命令包经 Install(rootCmd) 注册
   datasmith/diff/           diff-schema、diff-data（streaming_data.go 流水线，
-                            atomic_output.go 原子写文件）
+                            atomic_output.go 原子写文件，run.go 供 Web 复用的编排入口）
   datasmith/exec/           exec-sql（sql_scanner.go：词法级 SQL 语句拆分器）
-  datasmith/migrate/        reset-db、migrate-script
+  datasmith/migrate/        reset-db、migrate-script（RunMigrations/RollbackLatest
+                            供 Web 复用；down 脚本仅经 RollbackLatest 执行）
+  datasmith/web/            Web 控制台子命令（--addr、--data-dir）
+  server/                   Web 控制台后端：连接管理、比对/执行/重置/迁移任务、
+                            命名连接与比对方案存储（store.json）、脚本库托管、
+                            增量版本登记；webfs/ 为 go:embed 的前端产物
+web/                        Web 控制台前端（React + Vite + pnpm + TS + AntD5，仅中文；
+                            dev 端口 5173 代理 /api 到 :8080；产物 embed 进单二进制）
 pkg/
   conn/                     连接管理 + DBAdapter 接口（接口定义在此，避免 import cycle）
   db/                       driver.go 工厂（按 cfg.Type switch）；base/ 公共实现；
                             mysql/ postgres/ 驱动适配器
-  diff/                     结构与数据比对核心算法
+  diff/                     结构与数据比对核心算法（比对列优先级：
+                            Rule.Columns > comparisonKey > 全列减忽略列）
   sql/{mysql,postgres}/     方言 SQL 生成（forward + rollback，文件头带
                             `DATASMITH EXECUTE-ON:` 指示目标库）
   migrate/                  版本迁移逻辑（唯一版本、SHA-256 checksum、状态 ledger、
@@ -61,7 +69,8 @@ pkg/
 
 - **新增数据库类型**：`pkg/db/<type>/` 实现 `conn.DBAdapter`，`pkg/sql/<type>/` 实现方言生成，`pkg/consts/` 注册类型常量，`pkg/db/driver.go` 工厂加分支。不改动上层包。
 - **配置外置**：连接信息、比对规则一律走 YAML/JSON 配置文件；禁止硬编码凭据。
-- **代码位置**：只在 `internal/`、`pkg/`、`cmd/`、`scripts/`、`configs/` 下写代码；`main.go` 不含业务逻辑。
+- **代码位置**：只在 `internal/`、`pkg/`、`cmd/`、`scripts/`、`configs/`、`web/` 下写代码；`main.go` 不含业务逻辑。
+- **Web 控制台**：领域词汇见根目录 `CONTEXT.md`；接口以 `internal/server` 与 `web/` 既有实现为准。安全红线与 CLI 完全等同：Web 不重写任何安全逻辑，一律调用既有引擎函数（reset 两步、EXECUTE-ON 校验、MySQL DDL dry-run 拒绝、down 脚本仅回退通道）。
 - **测试**：核心逻辑（diff/db/sql/migrate/exec）必须有单元测试，默认不依赖 Docker；真实数据库行为放 `integration` tag 的测试里，走 `scripts/integration-test.sh`。
 - **CI gate**（`.github/workflows/ci.yml`）：gofmt 无 diff、单测、race、vet、staticcheck、govulncheck、双库 E2E + 覆盖率 gate 全部必须通过。工具版本固定（staticcheck v0.8.1、govulncheck v1.1.4），升级需同步 CI 与本文档。
 - **提交**：语义化提交；PR 关联 issue 并过 review。目录结构或核心接口变更需团队评审。
