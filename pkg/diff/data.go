@@ -220,6 +220,7 @@ func StreamCompareDataWithChunkFilterAndTableContext(ctx context.Context, srcDB,
 			if err != nil {
 				return err
 			}
+			hashCols := chunkHashColumns(cols, rule)
 			if len(pks) == 1 {
 				pk := pks[0]
 				srcStats, err := srcHasher.GetChunkStats(rule.GetTable(), pk)
@@ -255,11 +256,11 @@ func StreamCompareDataWithChunkFilterAndTableContext(ctx context.Context, srcDB,
 						if err := ctx.Err(); err != nil {
 							return err
 						}
-						srcHash, err := srcHasher.GetChunkHash(rule.GetTable(), cols, pk, r.MinPK, r.MaxPK, r.IsLast)
+						srcHash, err := srcHasher.GetChunkHash(rule.GetTable(), hashCols, pk, r.MinPK, r.MaxPK, r.IsLast)
 						if err != nil {
 							return fmt.Errorf("hash source chunk %d: %w", r.ChunkIndex, err)
 						}
-						tgtHash, err := tgtHasher.GetChunkHash(rule.GetTable(), cols, pk, r.MinPK, r.MaxPK, r.IsLast)
+						tgtHash, err := tgtHasher.GetChunkHash(rule.GetTable(), hashCols, pk, r.MinPK, r.MaxPK, r.IsLast)
 						if err != nil {
 							return fmt.Errorf("hash target chunk %d: %w", r.ChunkIndex, err)
 						}
@@ -391,6 +392,33 @@ func getTableModel(db conn.DBAdapter, table string) (*conn.Table, error) {
 	return tbl, nil
 }
 
+// chunkHashColumns 返回 chunk 概率比对的哈希列:与比对列集保持一致,剔除忽略字段。
+// 忽略字段一旦进入哈希,仅在忽略字段上不同的块会全部哈希失配,退化成整表逐行扫描。
+func chunkHashColumns(cols []string, rule ICompareRule) []string {
+	ir, ok := rule.(interface{ GetIgnoredColumns() []string })
+	if !ok || len(cols) == 0 {
+		return cols
+	}
+	ignored := make(map[string]struct{}, len(ir.GetIgnoredColumns()))
+	for _, name := range ir.GetIgnoredColumns() {
+		ignored[name] = struct{}{}
+	}
+	if len(ignored) == 0 {
+		return cols
+	}
+	hashCols := make([]string, 0, len(cols))
+	for _, name := range cols {
+		if _, skip := ignored[name]; !skip {
+			hashCols = append(hashCols, name)
+		}
+	}
+	if len(hashCols) == 0 {
+		// 防御:忽略列覆盖全部列时退回完整列集,避免生成空列哈希。
+		return cols
+	}
+	return hashCols
+}
+
 func tableColumnsAndTypes(tbl *conn.Table, rule ICompareRule) ([]string, []string, map[string]string, error) {
 	if tbl == nil {
 		return nil, nil, nil, fmt.Errorf("table %s not found", rule.GetTable())
@@ -400,6 +428,13 @@ func tableColumnsAndTypes(tbl *conn.Table, rule ICompareRule) ([]string, []strin
 	allowed := make(map[string]bool)
 	if cr, ok := rule.(interface{ GetCompareColumns() []string }); ok {
 		for _, name := range cr.GetCompareColumns() {
+			allowed[name] = true
+		}
+	}
+	// 忽略字段不参与比对,但行读取仍需取值:生成的 INSERT 依赖完整行数据
+	// (忽略字段为 NOT NULL 时缺列会直接执行失败)。表中不存在的忽略列不会命中。
+	if ir, ok := rule.(interface{ GetIgnoredColumns() []string }); ok {
+		for _, name := range ir.GetIgnoredColumns() {
 			allowed[name] = true
 		}
 	}

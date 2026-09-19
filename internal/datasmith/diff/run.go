@@ -281,6 +281,35 @@ func slimTable(tbl *conn.Table, keep map[string]bool) *conn.Table {
 	return &slim
 }
 
+// dataDiffKeepColumns 计算数据比对的行读取与 SQL 生成列集:
+// 比对列 ∪ 主键 ∪ 双侧均存在的忽略列。忽略字段不参与比对,但生成的
+// INSERT 必须携带完整行数据(NOT NULL 忽略字段缺列会执行失败);
+// 仅单侧存在的忽略列不进入 SQL,维持对两侧结构差异的容错。
+func dataDiffKeepColumns(tgtTable, srcTable *conn.Table, effectiveCols, ignoreColumns []string) map[string]bool {
+	keep := make(map[string]bool, len(effectiveCols)+len(ignoreColumns)+2)
+	for _, name := range effectiveCols {
+		keep[name] = true
+	}
+	if tgtTable == nil {
+		return keep
+	}
+	for _, pk := range tgtTable.GetPrimaryKeyColumns() {
+		keep[pk] = true
+	}
+	for _, name := range ignoreColumns {
+		if _, inTarget := tgtTable.Columns[name]; !inTarget {
+			continue
+		}
+		if srcTable == nil {
+			continue
+		}
+		if _, inSource := srcTable.Columns[name]; inSource {
+			keep[name] = true
+		}
+	}
+	return keep
+}
+
 func intersectNames(keep map[string]bool, tbl *conn.Table) map[string]bool {
 	if tbl == nil {
 		return map[string]bool{}
@@ -377,15 +406,7 @@ func RunDataDiff(ctx context.Context, params DataDiffParams, dir string, progres
 		} else {
 			effectiveCols = rule.ComparisonKey
 		}
-		// SQL 生成与行读取必须使用同一列集(比对列 ∪ 主键):
-		// 忽略列不出现在增量 SQL 中,入库时由数据库默认值补齐。
-		keep := make(map[string]bool, len(effectiveCols)+2)
-		for _, name := range effectiveCols {
-			keep[name] = true
-		}
-		for _, pk := range tgtTable.GetPrimaryKeyColumns() {
-			keep[pk] = true
-		}
+		keep := dataDiffKeepColumns(tgtTable, srcTable, effectiveCols, rule.IgnoreColumns)
 		slimTarget := slimTable(tgtTable, keep)
 		slimSource := slimTable(srcTable, intersectNames(keep, srcTable))
 		return &tableModels{target: slimTarget, source: slimSource, effectiveCols: effectiveCols}, nil

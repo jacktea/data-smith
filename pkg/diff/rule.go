@@ -19,6 +19,9 @@ type AllFieldsEqualRule struct {
 	Table      string
 	Columns    []string
 	ColumnsDef map[string]*conn.Column
+	// IgnoredColumns 记录被剔除出比对集的忽略字段:它们不参与比对,
+	// 但行读取仍会取值,生成的 INSERT 需要携带完整行数据。
+	IgnoredColumns []string
 }
 
 func (r *AllFieldsEqualRule) DiffColumns(a, b conn.Record) (bool, []string) {
@@ -54,6 +57,12 @@ func (r *AllFieldsEqualRule) GetCompareColumns() []string {
 	return r.Columns
 }
 
+// GetIgnoredColumns exposes the ignore list so row readers can fetch ignored
+// column values (for INSERT generation) without adding them to the compare set.
+func (r *AllFieldsEqualRule) GetIgnoredColumns() []string {
+	return r.IgnoredColumns
+}
+
 // CreateCompareRuleColumns builds the compare rule with explicit precedence:
 // compare columns > comparisonKey (legacy) > all columns. Ignore columns are
 // removed from the resulting compare set in every branch.
@@ -70,15 +79,25 @@ func CreateCompareRule(table *conn.Table, comparisonKey []string, ignoreColumns 
 		cols = table.GetColumns()
 	}
 
+	var ignored []string
 	// 剔除忽略字段
 	if len(ignoreColumns) > 0 && len(ignoreColumns[0]) > 0 {
 		ignoreSet := make(map[string]struct{}, len(ignoreColumns[0]))
 		for _, c := range ignoreColumns[0] {
 			ignoreSet[c] = struct{}{}
 		}
+		seen := make(map[string]struct{}, len(ignoreSet))
+		ignored = make([]string, 0, len(ignoreSet))
+		for _, c := range ignoreColumns[0] {
+			if _, dup := seen[c]; dup {
+				continue
+			}
+			seen[c] = struct{}{}
+			ignored = append(ignored, c)
+		}
 		filtered := make([]string, 0, len(cols))
 		for _, c := range cols {
-			if _, ignored := ignoreSet[c]; !ignored {
+			if _, isIgnored := ignoreSet[c]; !isIgnored {
 				filtered = append(filtered, c)
 			}
 		}
@@ -92,8 +111,9 @@ func CreateCompareRule(table *conn.Table, comparisonKey []string, ignoreColumns 
 		tableName = table.Name
 	}
 	return &AllFieldsEqualRule{
-		Table:      tableName,
-		Columns:    cols,
-		ColumnsDef: colsDef,
+		Table:          tableName,
+		Columns:        cols,
+		ColumnsDef:     colsDef,
+		IgnoredColumns: ignored,
 	}
 }

@@ -37,7 +37,7 @@ _Avoid_: comparisonKey(旧概念,见"比对键")
 _Avoid_: 对比字段、比较列
 
 **忽略列 (Ignore Columns)**:
-从比对列集合中显式剔除的列。
+从比对列集合中显式剔除的列:不参与相等性判断;但两侧均存在的忽略列仍会随行读取取值,并进入生成的 INSERT(回滚侧同理),UPDATE SET 仅含比对出差异的列。
 _Avoid_: 排除字段
 
 **比对键 (comparisonKey)**:
