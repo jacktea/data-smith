@@ -31,7 +31,7 @@ func (m *mockDB) Close() error { return nil }
 
 func (m *mockDB) GetTableDataBatch(table string, cols, pk []string, lastPK []any, limit int) ([]conn.Record, error) {
 	start := 0
-	if lastPK != nil && len(lastPK) > 0 {
+	if len(lastPK) > 0 {
 		for i, row := range m.rows {
 			match := true
 			for j, k := range pk {

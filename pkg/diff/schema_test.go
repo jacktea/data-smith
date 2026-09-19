@@ -199,4 +199,3 @@ func TestCompareSchemas_DualRollback(t *testing.T) {
 		t.Errorf("expected rollback ColumnsDropped to be name")
 	}
 }
-

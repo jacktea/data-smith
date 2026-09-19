@@ -209,12 +209,6 @@ func printDiffSummary(d *diff.SchemaDiff) {
 	}
 }
 
-func writeSqlFile(filepath string, sqls []string) error {
-	return writeAtomicFile(filepath, func(writer io.Writer) error {
-		return writeSQLStatements(writer, sqls)
-	})
-}
-
 func writeSQLStatements(writer io.Writer, sqls []string) error {
 	for _, s := range sqls {
 		if s != "" {

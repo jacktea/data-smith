@@ -36,11 +36,30 @@ func TestBuildPostgresDSNRoundTripsSpecialCharacters(t *testing.T) {
 	if parsed.Path != "/"+cfg.DBName {
 		t.Fatalf("database did not round trip: got %q want %q", parsed.Path, "/"+cfg.DBName)
 	}
-	if got := parsed.Query().Get("search_path"); got != "odd,schema & two" {
+	if got := parsed.Query().Get("search_path"); got != `"odd,schema & two"` {
 		t.Fatalf("schema parameter: got %q", got)
 	}
 	if got := parsed.Query().Get("application_name"); got != "data smith=tests" {
 		t.Fatalf("application_name: got %q", got)
+	}
+}
+
+func TestBuildPostgresDSNQuotesSearchPathIdentifier(t *testing.T) {
+	cfg := &config.ConnConfig{
+		Host:        "127.0.0.1",
+		Port:        5432,
+		User:        "test",
+		Password:    "obvious-placeholder",
+		DBName:      "application",
+		TableSchema: `Mixed,"Schema`,
+		Extra:       config.DBParams{"sslmode": "disable"},
+	}
+	parsed, err := url.Parse(buildPostgresDSN(cfg))
+	if err != nil {
+		t.Fatalf("parse generated DSN: %v", err)
+	}
+	if got, want := parsed.Query().Get("search_path"), `"Mixed,""Schema"`; got != want {
+		t.Fatalf("search_path = %q, want %q", got, want)
 	}
 }
 

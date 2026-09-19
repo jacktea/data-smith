@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -211,5 +212,103 @@ func TestMySQLFailureIsRecorded(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCurrentVersionHandlesSuccessEmptyAndQueryErrors(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		adapter, mock := newMockAdapter(t, consts.DBTypePostgres)
+		expectQuery(mock, "SELECT version FROM schema_migrations WHERE status = 'success' ORDER BY id DESC LIMIT 1").
+			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("20260919"))
+		version, err := CurrentVersion(adapter)
+		if err != nil || version != "20260919" {
+			t.Fatalf("CurrentVersion = %q, %v", version, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		adapter, mock := newMockAdapter(t, consts.DBTypeMySQL)
+		expectQuery(mock, "SELECT version FROM schema_migrations WHERE status = 'success' ORDER BY id DESC LIMIT 1").
+			WillReturnError(sql.ErrNoRows)
+		version, err := CurrentVersion(adapter)
+		if err != nil || version != "" {
+			t.Fatalf("CurrentVersion = %q, %v", version, err)
+		}
+	})
+
+	t.Run("query error", func(t *testing.T) {
+		adapter, mock := newMockAdapter(t, consts.DBTypeMySQL)
+		expectQuery(mock, "SELECT version FROM schema_migrations WHERE status = 'success' ORDER BY id DESC LIMIT 1").
+			WillReturnError(errors.New("ledger unavailable"))
+		if _, err := CurrentVersion(adapter); err == nil || !strings.Contains(err.Error(), "ledger unavailable") {
+			t.Fatalf("CurrentVersion error = %v", err)
+		}
+	})
+}
+
+func TestSuccessfulMigrationsReturnsOnlySuccessfulLedgerRows(t *testing.T) {
+	adapter, mock := newMockAdapter(t, consts.DBTypePostgres)
+	expectQuery(mock, "SELECT version, checksum FROM schema_migrations WHERE status = 'success'").
+		WillReturnRows(sqlmock.NewRows([]string{"version", "checksum"}).
+			AddRow("001", "abc").
+			AddRow("002", nil))
+
+	applied, err := SuccessfulMigrations(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(applied, map[string]string{"001": "abc", "002": ""}) {
+		t.Fatalf("SuccessfulMigrations = %#v", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSuccessfulMigrationsPropagatesQueryAndCursorErrors(t *testing.T) {
+	t.Run("query", func(t *testing.T) {
+		adapter, mock := newMockAdapter(t, consts.DBTypeMySQL)
+		expectQuery(mock, "SELECT version, checksum FROM schema_migrations WHERE status = 'success'").
+			WillReturnError(errors.New("ledger query failed"))
+		if _, err := SuccessfulMigrations(adapter); err == nil || !strings.Contains(err.Error(), "ledger query failed") {
+			t.Fatalf("SuccessfulMigrations error = %v", err)
+		}
+	})
+
+	t.Run("cursor", func(t *testing.T) {
+		adapter, mock := newMockAdapter(t, consts.DBTypePostgres)
+		rows := sqlmock.NewRows([]string{"version", "checksum"}).
+			AddRow("001", "abc").
+			RowError(0, errors.New("ledger cursor failed"))
+		expectQuery(mock, "SELECT version, checksum FROM schema_migrations WHERE status = 'success'").WillReturnRows(rows)
+		if _, err := SuccessfulMigrations(adapter); err == nil || !strings.Contains(err.Error(), "ledger cursor failed") {
+			t.Fatalf("SuccessfulMigrations error = %v", err)
+		}
+	})
+}
+
+func TestDryRunMigrationsRejectsNonTransactionalDialectsBeforeDatabaseWork(t *testing.T) {
+	tests := []struct {
+		name   string
+		dbType consts.DBType
+		want   string
+	}{
+		{"mysql auto commit", consts.DBTypeMySQL, "auto-commit"},
+		{"unsupported", consts.DBType("sqlite"), "unsupported database type"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			adapter, mock := newMockAdapter(t, test.dbType)
+			err := DryRunMigrations(adapter, nil)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("DryRunMigrations error = %v, want %q", err, test.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("database was touched: %v", err)
+			}
+		})
 	}
 }

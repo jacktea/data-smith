@@ -1,15 +1,15 @@
 module github.com/jacktea/data-smith
 
-go 1.23.0
+go 1.26.0
 
-toolchain go1.24.4
+toolchain go1.26.8
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/lib/pq v1.10.9
 	github.com/spf13/cobra v1.9.1
-	golang.org/x/crypto v0.40.0
+	golang.org/x/crypto v0.56.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
@@ -19,6 +19,6 @@ require (
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/spf13/pflag v1.0.7 // indirect
-	golang.org/x/sys v0.34.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )

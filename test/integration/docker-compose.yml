@@ -1,0 +1,57 @@
+name: datasmith-integration
+
+x-mysql: &mysql
+  image: mysql:8.4.3
+  environment:
+    MYSQL_ROOT_PASSWORD: datasmith_root_test_password
+    MYSQL_DATABASE: datasmith_fixture
+  tmpfs:
+    - /var/lib/mysql
+  volumes:
+    - ./fixtures/mysql-init.sql:/docker-entrypoint-initdb.d/00-fixture.sql:ro
+  healthcheck:
+    test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping --host=127.0.0.1 --user=root --silent"]
+    interval: 2s
+    timeout: 5s
+    retries: 60
+    start_period: 15s
+  stop_grace_period: 10s
+
+x-postgres: &postgres
+  image: postgres:17.2-alpine3.21
+  environment:
+    POSTGRES_USER: datasmith_test
+    POSTGRES_PASSWORD: datasmith_test_password
+    POSTGRES_DB: datasmith_fixture
+  tmpfs:
+    - /var/lib/postgresql/data
+  volumes:
+    - ./fixtures/postgres-init.sql:/docker-entrypoint-initdb.d/00-fixture.sql:ro
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready --host=127.0.0.1 --username=$$POSTGRES_USER --dbname=$$POSTGRES_DB"]
+    interval: 2s
+    timeout: 5s
+    retries: 60
+    start_period: 10s
+  stop_grace_period: 10s
+
+services:
+  mysql-source:
+    <<: *mysql
+    ports:
+      - "127.0.0.1:33306:3306"
+
+  mysql-target:
+    <<: *mysql
+    ports:
+      - "127.0.0.1:33307:3306"
+
+  postgres-source:
+    <<: *postgres
+    ports:
+      - "127.0.0.1:35432:5432"
+
+  postgres-target:
+    <<: *postgres
+    ports:
+      - "127.0.0.1:35433:5432"

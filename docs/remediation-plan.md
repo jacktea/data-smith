@@ -13,7 +13,7 @@ Execution order is sequential in the shared checkout. Each session must preserve
 - [x] [#6](https://github.com/jacktea/data-smith/issues/6) — Session 5: fail-fast CLI and atomic output files (completed 2026-09-18)
 - [x] [#7](https://github.com/jacktea/data-smith/issues/7) — Session 6: streaming diff and database performance (completed 2026-09-18)
 - [x] [#8](https://github.com/jacktea/data-smith/issues/8) — Session 7: configuration, SSH, connections, and reset safety (completed 2026-09-19)
-- [ ] [#9](https://github.com/jacktea/data-smith/issues/9) — Session 8: dual-database E2E, CI, coverage, and documentation
+- [ ] [#9](https://github.com/jacktea/data-smith/issues/9) — Session 8: implementation and local gates complete; closure blocked on protected review-matrix authorization and an actual GitHub Actions run
 
 ## Session 1 acceptance evidence
 
@@ -222,6 +222,33 @@ Final verification:
 - Protected artifacts: `datasmith` size `7401858`, mode `-rwxr-xr-x`, SHA-256 `84fd988415654588c2bfc2a14b2b2490575d43d6d0e46ea61264e1a41cfc1c57`, status `M`; `CODE_REVIEW_REPORT.md` size `21194`, SHA-256 `9c529456726a93167b326e1a0c07f740ad013dcc42269f0a2b893539d2d3424b`, status `??`; staged diff empty.
 - GitHub evidence: [Issue #8 comment](https://github.com/jacktea/data-smith/issues/8#issuecomment-5738300406); Issue #8 closed as completed.
 
+## Session 8 implementation and local acceptance evidence
+
+- Added `test/integration/docker-compose.yml` with pinned MySQL 8.4.3 and PostgreSQL 17.2 images, four isolated source/target services, health checks, bounded startup, tmpfs data directories, deterministic init SQL, and a fixture identity marker checked before every test database drop.
+- Added integration-tagged dual-engine E2E tests. MySQL and PostgreSQL both generate and apply schema/data forward SQL, produce an empty second schema/data diff, apply rollback, and match the original schema and rows. The cases cover non-public/mixed-case PostgreSQL schema, table/view/foreign-key dependency order, BIGINT values above 2^53, NULL versus empty string, and reserved/mixed-case/embedded-delimiter identifiers.
+- Added live migration E2E for both engines: successful apply, duplicate/repeat skip, failed ledger state, same-checksum retry to success, checksum-drift rejection, single-row ledger semantics, and advisory/named-lock exclusion.
+- The live E2E exposed and fixed three database defects: MySQL primary-key metadata joins were not schema/table scoped, MySQL foreign-key metadata used a nonexistent `CONSTRAINT_COLUMN_USAGE`, and generated PostgreSQL `search_path` failed to quote mixed-case/special schema identifiers.
+- Added live MySQL CLI integration coverage for atomic `diff-schema` and `diff-data` forward/rollback output pairs. Default `go test ./...` remains Docker- and credential-independent because every live test has both the `integration` build tag and environment identity guard.
+- Added `.github/workflows/ci.yml` with pinned action SHAs, pinned staticcheck/govulncheck versions, formatting, unit, race, vet, static analysis, vulnerability scan, dual-database integration, and coverage gates. No real credentials are present; all checked-in credentials are unmistakable disposable test placeholders.
+- Upgraded the Go toolchain to 1.26.8 and `golang.org/x/crypto` to 0.56.0 so the fixed-version vulnerability scan reports zero reachable vulnerabilities. Removed unused private helpers and fixed a possible nil dereference reported by staticcheck.
+- Added meaningful scalar/JSON/identifier/migration-ledger regressions. The strict combined profile reports overall 72.5% (>=60%), db 77.8%, diff 71.9%, sql 70.1%, migrate 70.6%, and exec 87.9% (each critical group >=70%).
+- Mapped every original P0/P1 finding to an automated regression: migration discovery (`internal/datasmith/migrate/local`), execution-count/transaction scanner (`internal/datasmith/exec`), exact/hash comparison and cursor errors (`pkg/diff`, `pkg/db/*`), migration ledger/lock/checksum (`pkg/migrate` plus live E2E), schema qualification/type/dependencies (`pkg/sql` plus live E2E), fail-fast/atomic output (`internal/datasmith/diff`), proxy/SSH trust (`pkg/config`, `pkg/proxy`), and dual-engine integration (`test/integration`).
+
+## Session 8 verification evidence
+
+- Baseline: corrected NUL-safe gofmt check found one pre-existing unformatted test (`pkg/diff/schema_test.go`), which was formatted; `go test ./... -count=1`, `go test -race ./... -count=1`, `go vet ./...`, and `git diff --check` passed.
+- `./scripts/integration-test.sh` — PASS for all unit plus integration-tagged packages and disposable MySQL/PostgreSQL fixtures.
+- `./scripts/check-coverage.sh` — PASS: overall 72.5%, db 77.8%, diff 71.9%, sql 70.1%, migrate 70.6%, exec 87.9%.
+- `go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...` — PASS.
+- `go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...` — PASS, zero reachable vulnerabilities (one imported/module advisory is not called).
+- Protected `datasmith` remained tracked-modified, executable, 7,401,858 bytes, SHA-256 `84fd988415654588c2bfc2a14b2b2490575d43d6d0e46ea61264e1a41cfc1c57`; protected `CODE_REVIEW_REPORT.md` remained untracked, 21,194 bytes, SHA-256 `9c529456726a93167b326e1a0c07f740ad013dcc42269f0a2b893539d2d3424b`; staged diff remained empty after every important round.
+
+## Session 8 closure blockers
+
+- `CODE_REVIEW_REPORT.md` is explicitly protected, so its review status matrix has not been updated. Suggested change: mark all P0/P1 rows fixed and link the automated tests/E2E evidence above. User authorization is required before touching that file.
+- No commit or push is authorized, so the new GitHub Actions workflow cannot have an actual run URL or green remote result yet. Local equivalents pass, but Issue #9 must remain open until CI runs from a committed clean checkout.
+- Epic #1 must remain open while Issue #9 is open. After report authorization and a green CI run, update the matrix, attach the run link, close #9, then check all Epic children and close #1.
+
 ## Open risks and later work
 
 - Session 1 uses deterministic SQL-mock regression tests; live PostgreSQL/MySQL migration E2E remains for #9.
@@ -248,4 +275,4 @@ Final verification:
 
 ## Next action
 
-Run Session 8 for issue #9 using the complete prompt in `docs/remediation-handoff.md`. Preserve all completed #2–#8 behavior, especially Session 7 configuration immutability, verified SSH lifecycle, cancellable long operations, pool bounds, credential-safe DSNs, and reset confirmation/preflight. Issue #9 is the only remaining child issue.
+Obtain explicit authorization to update the protected `CODE_REVIEW_REPORT.md` status matrix and authorization for a commit/push so GitHub Actions can run. If the workflow is green, record its URL in Issue #9 and these docs, close #9, update Epic #1 with the P0/P1 mapping and all child evidence, and close the epic. Until both approvals/evidence exist, keep Issue #9 and Epic #1 open.

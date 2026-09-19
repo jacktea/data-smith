@@ -5,12 +5,94 @@ import (
 	"math"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/jacktea/data-smith/pkg/chunk"
 	"github.com/jacktea/data-smith/pkg/config"
 	"github.com/jacktea/data-smith/pkg/conn"
 	"github.com/jacktea/data-smith/pkg/consts"
 )
+
+func TestValueComparatorCoversDriverScalarShapes(t *testing.T) {
+	numericValues := []any{
+		int(1), int8(1), int16(1), int32(1), int64(1),
+		uint(1), uint8(1), uint16(1), uint32(1), uint64(1),
+		float32(1), float64(1), "1",
+	}
+	for _, value := range numericValues {
+		if got := CompareValues(value, float64(2), "double precision"); got >= 0 {
+			t.Errorf("CompareValues(%T(%v), 2) = %d, want < 0", value, value, got)
+		}
+	}
+
+	for _, value := range []any{true, int(1), int8(1), int16(1), int32(1), int64(1), "yes"} {
+		if !AreValuesEqual(value, true, "boolean") {
+			t.Errorf("boolean driver value %T(%v) was not normalized", value, value)
+		}
+	}
+	for _, value := range []any{false, int(0), "no"} {
+		if !AreValuesEqual(value, false, "tinyint(1)") {
+			t.Errorf("false driver value %T(%v) was not normalized", value, value)
+		}
+	}
+
+	instant := time.Date(2026, time.September, 19, 1, 2, 3, 456000000, time.UTC)
+	for _, value := range []any{instant, instant.Format(time.RFC3339Nano), "2026-09-19 01:02:03.456000"} {
+		if !AreValuesEqual(value, instant, "timestamp") {
+			t.Errorf("timestamp driver value %T(%v) was not normalized", value, value)
+		}
+	}
+
+	if CompareValues([]byte{0x00, 0xff}, []byte{0x01}, "bytea") >= 0 {
+		t.Fatal("binary values were not compared bytewise")
+	}
+	if !AreValuesEqual(math.Inf(1), "infinity", "double") {
+		t.Fatal("positive infinity spellings should compare equal")
+	}
+}
+
+func TestEqualJSONAcceptsDriverShapesAndRejectsInvalidValues(t *testing.T) {
+	if !equalJSON([]byte(`{"a":1,"b":[true,null]}`), `{"b":[true,null],"a":1}`) {
+		t.Fatal("JSON bytes and strings should compare structurally")
+	}
+	if !equalJSON(map[string]any{"a": float64(1)}, []byte(`{"a":1}`)) {
+		t.Fatal("marshaled objects should compare with driver bytes")
+	}
+	if equalJSON(`{"a":`, `{"a":1}`) {
+		t.Fatal("malformed JSON must not compare equal")
+	}
+	if equalJSON(make(chan int), map[string]any{"a": 1}) {
+		t.Fatal("unmarshalable values must not compare equal")
+	}
+}
+
+func TestValueComparatorNullBooleanStringAndBinaryOrdering(t *testing.T) {
+	tests := []struct {
+		name       string
+		a, b       any
+		columnType string
+		want       int
+	}{
+		{"both null", nil, nil, "text", 0},
+		{"null first", nil, "value", "text", -1},
+		{"null last", "value", nil, "text", 1},
+		{"string order", "alpha", "beta", "text", -1},
+		{"boolean order", false, true, "boolean", -1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := CompareValues(test.a, test.b, test.columnType); got != test.want {
+				t.Fatalf("CompareValues(%v, %v, %q) = %d, want %d", test.a, test.b, test.columnType, got, test.want)
+			}
+		})
+	}
+	if !AreValuesEqual([]byte{0, 1}, []byte{0, 1}, "bytea") {
+		t.Fatal("equal binary values should compare equal")
+	}
+	if AreValuesEqual([]byte{0, 1}, []byte{0, 2}, "blob") {
+		t.Fatal("different binary values should not compare equal")
+	}
+}
 
 func TestValueComparatorExactNumericSemantics(t *testing.T) {
 	tests := []struct {

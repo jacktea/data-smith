@@ -314,11 +314,15 @@ func (a *MySQLAdapter) extractPrimaryKey(table *conn.Table) error {
 			tc.constraint_name,
 			GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position) as columns
 		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+		JOIN information_schema.key_column_usage kcu
+		  ON tc.constraint_schema = kcu.constraint_schema
+		 AND tc.table_schema = kcu.table_schema
+		 AND tc.table_name = kcu.table_name
+		 AND tc.constraint_name = kcu.constraint_name
 		WHERE tc.table_schema = ? 
 		  AND tc.table_name = ? 
 		  AND tc.constraint_type = 'PRIMARY KEY'
-		GROUP BY tc.constraint_name
+		GROUP BY tc.constraint_schema, tc.table_schema, tc.table_name, tc.constraint_name
 	`
 	var constraintName, columns string
 	err := a.Conn.QueryRow(query, table.Schema, table.Name).Scan(&constraintName, &columns)
@@ -373,19 +377,25 @@ func (a *MySQLAdapter) extractForeignKeys(table *conn.Table) error {
 		SELECT 
 			tc.constraint_name,
 			GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position) as columns,
-			ccu.table_schema as referenced_schema,
-			ccu.table_name as referenced_table,
-			GROUP_CONCAT(ccu.column_name ORDER BY kcu.ordinal_position) as referenced_columns,
+			kcu.referenced_table_schema as referenced_schema,
+			kcu.referenced_table_name as referenced_table,
+			GROUP_CONCAT(kcu.referenced_column_name ORDER BY kcu.ordinal_position) as referenced_columns,
 			rc.delete_rule,
 			rc.update_rule
 		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
-		JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name
-		JOIN information_schema.referential_constraints rc ON rc.constraint_name = tc.constraint_name
+		JOIN information_schema.key_column_usage kcu
+		  ON tc.constraint_schema = kcu.constraint_schema
+		 AND tc.table_schema = kcu.table_schema
+		 AND tc.table_name = kcu.table_name
+		 AND tc.constraint_name = kcu.constraint_name
+		JOIN information_schema.referential_constraints rc
+		  ON tc.constraint_schema = rc.constraint_schema
+		 AND tc.table_name = rc.table_name
+		 AND tc.constraint_name = rc.constraint_name
 		WHERE tc.table_schema = ? 
 		  AND tc.table_name = ? 
 		  AND tc.constraint_type = 'FOREIGN KEY'
-		GROUP BY tc.constraint_name, ccu.table_schema, ccu.table_name, rc.delete_rule, rc.update_rule
+		GROUP BY tc.constraint_name, kcu.referenced_table_schema, kcu.referenced_table_name, rc.delete_rule, rc.update_rule
 	`
 	fkRows, err := a.Conn.Query(query, table.Schema, table.Name)
 	if err != nil {

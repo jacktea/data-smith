@@ -9,6 +9,30 @@ import (
 	"github.com/jacktea/data-smith/pkg/diff"
 )
 
+func TestDialectAndSafeGeneratorRejectUnsupportedInputs(t *testing.T) {
+	if dialect := NewDialect(consts.DBType("sqlite")); dialect != nil {
+		t.Fatalf("unsupported dialect returned %#v", dialect)
+	}
+	if _, err := GenerateSchemaSQLSafe(nil, consts.DBTypeMySQL); err == nil {
+		t.Fatal("nil schema diff must be rejected")
+	}
+	if statements := GenerateSchemaSQL(nil, consts.DBTypeMySQL); statements != nil {
+		t.Fatalf("legacy generator should return nil for invalid input, got %#v", statements)
+	}
+	if _, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{}, consts.DBType("sqlite")); err == nil {
+		t.Fatal("unsupported schema dialect must be rejected")
+	}
+}
+
+func TestQualifiedAliasHandlesDefaultSchema(t *testing.T) {
+	if got := qualifiedAlias("", "items"); got != "items" {
+		t.Fatalf("default-schema alias = %q, want %q", got, "items")
+	}
+	if got := qualifiedAlias("app", "items"); got != "app.items" {
+		t.Fatalf("qualified alias = %q, want %q", got, "app.items")
+	}
+}
+
 func TestGenerateSchemaSQL_FourStageOrdering(t *testing.T) {
 	// 构造一个包含所有阶段变更的 SchemaDiff：
 	// 1. 删除旧表 old_table

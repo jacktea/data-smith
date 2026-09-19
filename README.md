@@ -233,3 +233,38 @@ SSH 代理必须配置主机身份验证，二选一使用 `knownHostsPath` 或�
 - 接口驱动、配置管理、依赖最小化
 - 核心逻辑需编写单元测试
 - 语义化提交，PR 需关联 issue 并通过 review
+
+## CI、端到端测试与覆盖率
+
+默认单元测试不启动 Docker，也不读取外部数据库凭据：
+
+```bash
+go test ./... -count=1
+go test -race ./... -count=1
+go vet ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+```
+
+真实数据库测试必须同时具备 `integration` build tag 和 `DATASMITH_INTEGRATION=1` 环境保护。推荐通过脚本启动固定版本、tmpfs 存储的 MySQL 8.4.3 与 PostgreSQL 17.2 fixtures；脚本会验证 fixture identity，使用独立 source/target 实例，并在退出时销毁容器和数据：
+
+```bash
+./scripts/integration-test.sh
+./scripts/check-coverage.sh
+```
+
+端到端矩阵覆盖两种引擎的 schema/data forward SQL 生成与应用、第二次 diff 为空、rollback 恢复原状态；同时覆盖非 `public` PostgreSQL schema、依赖顺序、超过 2^53 的 BIGINT、NULL/空串和保留字/混合大小写/内嵌引号标识符。Migration E2E 覆盖成功、失败后同 checksum 重试、重复执行幂等、checksum drift、ledger 状态和并发锁。
+
+`scripts/check-coverage.sh` 对同一个带 integration tag 的全仓 profile 去重并强制总体 statement coverage >= 60%，以及 db/diff/sql/migrate/exec 每组 >= 70%。2026-09-19 本地验证结果为：overall 72.5%、db 77.8%、diff 71.9%、sql 70.1%、migrate 70.6%、exec 87.9%。GitHub Actions 使用固定 action SHA、固定工具版本、固定数据库镜像、health check 和有界 timeout 执行同等 gate。
+
+## 操作安全流程与已知限制
+
+1. 在隔离副本上生成并人工审阅 forward/rollback SQL；两个文件都带 `DATASMITH EXECUTE-ON: source`，必须显式选择 source 执行。
+2. `exec-sql` 先使用 `--dry-run`/事务模式验证；MySQL DDL 和 MySQL migration dry-run 不具备可靠事务回滚能力，因此会被拒绝或要求人工恢复预案。
+3. `reset-db` 先运行 `--dry-run`，确认目标后才使用 `--yes`；系统数据库、空目标和危险 schema 会在连接/破坏前被拒绝。
+4. Migration 使用唯一版本、SHA-256 checksum、状态 ledger 和 advisory lock。旧 ledger 的历史成功行可能没有 checksum，无法证明这些旧行的 drift；旧表中若已有重复 version，唯一索引升级会要求先人工清理。
+5. `--chunk-hash` 仍是 opt-in 概率优化：只有精确 count/min/max 一致后才允许跳过范围；并发写入不在共享快照中时仍可能让比较失效。
+6. SQL scanner 是词法扫描器，不是完整客户端协议实现；MySQL `DELIMITER` 和 PostgreSQL `COPY ... FROM STDIN` 等客户端格式不受支持，歧义脚本会被保守拒绝。
+7. SSH 必须配置 `knownHostsPath` 或 SHA-256 `hostFingerprint`；不提供主机身份验证材料的连接会失败。
+
+Session 6 性能基准（Apple M4 Pro，`-benchtime=1x -count=3`）显示：100k 行且 100k 差异时，streaming pipeline 从 110.48–122.14 ms / 85.57 MB alloc/op 降至 67.38–67.86 ms / 46.13–46.17 MB，SQL 输出从 12,477,886 降至 5,285,286 bytes/op，峰值缓冲从 100,000 行降至固定 2,000 引用。10k 行仅 100 差异时会承担 spool 创建/同步/删除的固定延迟，因此不是低差异场景的纯速度优化。

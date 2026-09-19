@@ -52,37 +52,6 @@ func writeAtomicPair(forwardPath, rollbackPath string, write func(io.Writer, io.
 	return writeAtomicPairWithOps(forwardPath, rollbackPath, write, defaultAtomicOutputOps)
 }
 
-func writeAtomicFile(path string, write func(io.Writer) error) error {
-	if write == nil {
-		return fmt.Errorf("atomic output writer is required")
-	}
-	path = filepath.Clean(path)
-	staged, err := createStagedOutput(path, defaultAtomicOutputOps)
-	if err != nil {
-		return fmt.Errorf("create temporary output: %w", err)
-	}
-	if err := write(staged.writer); err != nil {
-		return errors.Join(err, abortStagedOutputs(defaultAtomicOutputOps, staged))
-	}
-	if err := finishStagedOutputs(staged); err != nil {
-		return errors.Join(err, cleanupPaths(defaultAtomicOutputOps, staged.path))
-	}
-	backup, err := backupFinal(path, defaultAtomicOutputOps)
-	if err != nil {
-		return errors.Join(err, cleanupPaths(defaultAtomicOutputOps, staged.path))
-	}
-	if err := defaultAtomicOutputOps.rename(staged.path, path); err != nil {
-		return errors.Join(err, restoreFinals(defaultAtomicOutputOps, backup), cleanupPaths(defaultAtomicOutputOps, staged.path))
-	}
-	if err := syncOutputDirs(defaultAtomicOutputOps, path); err != nil {
-		return errors.Join(err, restoreFinals(defaultAtomicOutputOps, backup))
-	}
-	if backup.existed {
-		_ = removeIfExists(defaultAtomicOutputOps, backup.backupPath)
-	}
-	return nil
-}
-
 func writeAtomicPairWithOps(forwardPath, rollbackPath string, write func(io.Writer, io.Writer) error, ops atomicOutputOps) error {
 	if write == nil {
 		return fmt.Errorf("atomic output writer is required")

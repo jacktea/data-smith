@@ -74,7 +74,10 @@ func buildPostgresDSN(cfg *config.ConnConfig) string {
 		query.Set(key, fmt.Sprint(value))
 	}
 	if cfg.TableSchema != "" && query.Get("search_path") == "" {
-		query.Set("search_path", cfg.TableSchema)
+		// search_path is a PostgreSQL identifier list, not a plain string. Quote
+		// the configured schema so mixed case, commas, spaces, and embedded quotes
+		// retain their literal identifier meaning.
+		query.Set("search_path", pq.QuoteIdentifier(cfg.TableSchema))
 	}
 	escapedDatabase := url.PathEscape(cfg.DBName)
 	connectionURL := &url.URL{

@@ -380,21 +380,6 @@ func extractPK(row conn.Record, pk []string) []any {
 	return res
 }
 
-// getTableColumnsAndTypes 获取表的列、主键及字段类型映射
-func getTableColumnsAndTypes(db conn.DBAdapter, table string) ([]string, []string, map[string]string, error) {
-	if db == nil {
-		return nil, nil, nil, fmt.Errorf("database adapter is required")
-	}
-	if table == "" {
-		return nil, nil, nil, fmt.Errorf("table name is required")
-	}
-	tbl, err := getTableModel(db, table)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return tableColumnsAndTypes(tbl, table)
-}
-
 func getTableModel(db conn.DBAdapter, table string) (*conn.Table, error) {
 	tbl, err := db.ExtractTable(table)
 	if err != nil {
@@ -413,11 +398,12 @@ func tableColumnsAndTypes(tbl *conn.Table, table string) ([]string, []string, ma
 	var cols []string
 	colTypes := make(map[string]string)
 	for _, col := range tbl.GetColumnsByPosition() {
+		if col == nil {
+			continue
+		}
 		name := col.Name
 		cols = append(cols, name)
-		if col != nil {
-			colTypes[name] = col.DataType
-		}
+		colTypes[name] = col.DataType
 	}
 	var pks []string
 	if tbl.PrimaryKey != nil && len(tbl.PrimaryKey.Columns) > 0 {
@@ -488,10 +474,4 @@ func validateCompareInputsWithErrorHandler(srcDB, tgtDB conn.DBAdapter, rule ICo
 		return fmt.Errorf("diff handler is required")
 	}
 	return nil
-}
-
-// getTableColumns 获取表的列和主键（保留向后兼容）
-func getTableColumns(db conn.DBAdapter, table string) ([]string, []string, error) {
-	cols, pks, _, err := getTableColumnsAndTypes(db, table)
-	return cols, pks, err
 }
