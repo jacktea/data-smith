@@ -12,7 +12,7 @@ func TestExtractTableDetail(t *testing.T) {
 		Host:        "localhost",
 		Port:        5432,
 		User:        "postgres",
-		Password:    "air20220401",
+		Password:    "obvious-test-placeholder",
 		DBName:      "airedge2.1db",
 		TableSchema: "public",
 	}
@@ -37,7 +37,7 @@ func TestExtractViewDetail(t *testing.T) {
 		Host:        "localhost",
 		Port:        5432,
 		User:        "postgres",
-		Password:    "air20220401",
+		Password:    "obvious-test-placeholder",
 		DBName:      "airedge2.1db",
 		TableSchema: "public",
 	}

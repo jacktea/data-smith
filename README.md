@@ -106,21 +106,40 @@
 编辑 `configs/config.yaml`：
 
 ```yaml
-source_db:
+sourceDb:
   type: postgres
   host: 127.0.0.1
   port: 5433
-  user: user
-  password: password
+  user: example_user
+  password: obvious-placeholder
   dbname: source_db
+  # Duration values are nanoseconds when written as YAML numbers.
+  connectTimeout: 10000000000
+  maxOpenConns: 20
+  maxIdleConns: 5
+  connMaxLifetime: 1800000000000
+  connMaxIdleTime: 300000000000
 
-target_db:
+targetDb:
   type: postgres
   host: 127.0.0.1
   port: 5432
-  user: user
-  password: password
+  user: example_user
+  password: obvious-placeholder
   dbname: target_db
+```
+
+SSH 代理必须配置主机身份验证，二选一使用 `knownHostsPath` 或固定的
+`hostFingerprint`；未配置或不匹配时连接会在数据库访问前失败：
+
+```yaml
+  proxy:
+    host: bastion.example
+    port: 22
+    user: example_user
+    type: pass
+    pass: obvious-placeholder
+    knownHostsPath: /path/to/known_hosts
 ```
 
 ### 2. 配置比对规则
@@ -194,8 +213,10 @@ target_db:
 ```
 
 ```bash
-# 重置数据库，删除所有数据
-./datasmith reset-db -c configs/config.yaml
+# 仅输出经过校验和安全引用的重置 SQL，不连接数据库
+./datasmith reset-db -c configs/config.yaml --dry-run
+# 真实重置必须显式确认；空目标与系统数据库/Schema 会被拒绝
+./datasmith reset-db -c configs/config.yaml --yes
 # 执行迁移脚本
 ./datasmith migrate-script -c configs/config.yaml -d data/dbscripts
 # 执行迁移脚本, 模拟执行

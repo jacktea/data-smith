@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sort"
@@ -43,6 +44,15 @@ func StreamCompareDataDetailed(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, b
 // caller-owned table model. It avoids repeated metadata extraction within one
 // run and propagates callback failures without reading another batch.
 func StreamCompareDataDetailedWithTable(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, tbl *conn.Table, batchSize int, handle DetailedDiffErrorHandler) error {
+	return StreamCompareDataDetailedWithTableContext(context.Background(), srcDB, tgtDB, rule, tbl, batchSize, handle)
+}
+
+// StreamCompareDataDetailedWithTableContext is the cancellable counterpart of
+// StreamCompareDataDetailedWithTable. The legacy API remains unchanged.
+func StreamCompareDataDetailedWithTableContext(ctx context.Context, srcDB, tgtDB conn.DBAdapter, rule ICompareRule, tbl *conn.Table, batchSize int, handle DetailedDiffErrorHandler) error {
+	if ctx == nil {
+		return fmt.Errorf("comparison context is required")
+	}
 	if err := validateCompareInputsWithErrorHandler(srcDB, tgtDB, rule, batchSize, handle); err != nil {
 		return err
 	}
@@ -50,8 +60,8 @@ func StreamCompareDataDetailedWithTable(srcDB, tgtDB conn.DBAdapter, rule ICompa
 	if err != nil {
 		return err
 	}
-	srcIter := newRowBatchIterator(srcDB, rule.GetTable(), cols, pks, batchSize)
-	tgtIter := newRowBatchIterator(tgtDB, rule.GetTable(), cols, pks, batchSize)
+	srcIter := newRowBatchIterator(ctx, srcDB, rule.GetTable(), cols, pks, batchSize)
+	tgtIter := newRowBatchIterator(ctx, tgtDB, rule.GetTable(), cols, pks, batchSize)
 	defer srcIter.Close()
 	defer tgtIter.Close()
 
@@ -59,6 +69,9 @@ func StreamCompareDataDetailedWithTable(srcDB, tgtDB conn.DBAdapter, rule ICompa
 	var srcIdx, tgtIdx int
 	var srcDone, tgtDone bool
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if srcIdx >= len(srcBuf) && !srcDone {
 			batch, err := srcIter.NextBatch()
 			if err != nil {
@@ -178,6 +191,15 @@ func StreamCompareDataWithChunkFilter(srcDB, tgtDB conn.DBAdapter, rule ICompare
 // StreamCompareDataWithChunkFilterAndTable is the metadata-reusing,
 // error-aware variant of StreamCompareDataWithChunkFilter.
 func StreamCompareDataWithChunkFilterAndTable(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, tbl *conn.Table, batchSize, chunkSize int, handle DetailedDiffErrorHandler) error {
+	return StreamCompareDataWithChunkFilterAndTableContext(context.Background(), srcDB, tgtDB, rule, tbl, batchSize, chunkSize, handle)
+}
+
+// StreamCompareDataWithChunkFilterAndTableContext adds cancellation to the
+// optimized comparison path while preserving the legacy wrapper.
+func StreamCompareDataWithChunkFilterAndTableContext(ctx context.Context, srcDB, tgtDB conn.DBAdapter, rule ICompareRule, tbl *conn.Table, batchSize, chunkSize int, handle DetailedDiffErrorHandler) error {
+	if ctx == nil {
+		return fmt.Errorf("comparison context is required")
+	}
 	if err := validateCompareInputsWithErrorHandler(srcDB, tgtDB, rule, batchSize, handle); err != nil {
 		return err
 	}
@@ -188,6 +210,9 @@ func StreamCompareDataWithChunkFilterAndTable(srcDB, tgtDB conn.DBAdapter, rule 
 	tgtCfg := tgtDB.GetConfig()
 
 	if srcCfg != nil && tgtCfg != nil && srcCfg.Type == tgtCfg.Type {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		srcHasher, srcOk := srcDB.(chunk.VerifiedChunkHasher)
 		tgtHasher, tgtOk := tgtDB.(chunk.VerifiedChunkHasher)
 		if srcOk && tgtOk {
@@ -227,6 +252,9 @@ func StreamCompareDataWithChunkFilterAndTable(srcDB, tgtDB conn.DBAdapter, rule 
 					}
 					allMatched := true
 					for _, r := range ranges {
+						if err := ctx.Err(); err != nil {
+							return err
+						}
 						srcHash, err := srcHasher.GetChunkHash(rule.GetTable(), cols, pk, r.MinPK, r.MaxPK, r.IsLast)
 						if err != nil {
 							return fmt.Errorf("hash source chunk %d: %w", r.ChunkIndex, err)
@@ -249,7 +277,7 @@ func StreamCompareDataWithChunkFilterAndTable(srcDB, tgtDB conn.DBAdapter, rule 
 		}
 	}
 
-	return StreamCompareDataDetailedWithTable(srcDB, tgtDB, rule, tbl, batchSize, handle)
+	return StreamCompareDataDetailedWithTableContext(ctx, srcDB, tgtDB, rule, tbl, batchSize, handle)
 }
 
 func StreamCompareDataToDiffWithChunkFilter(srcDB, tgtDB conn.DBAdapter, rule ICompareRule, batchSize, chunkSize int) (*DataDiff, error) {
@@ -274,8 +302,9 @@ func StreamCompareDataToDiffWithChunkFilter(srcDB, tgtDB conn.DBAdapter, rule IC
 	return diff, nil
 }
 
-func newRowBatchIterator(db conn.DBAdapter, table string, cols, pk []string, batchSize int) *rowBatchIterator {
+func newRowBatchIterator(ctx context.Context, db conn.DBAdapter, table string, cols, pk []string, batchSize int) *rowBatchIterator {
 	return &rowBatchIterator{
+		ctx:   ctx,
 		db:    db,
 		table: table,
 		cols:  cols,
@@ -285,6 +314,7 @@ func newRowBatchIterator(db conn.DBAdapter, table string, cols, pk []string, bat
 }
 
 type rowBatchIterator struct {
+	ctx    context.Context
 	db     conn.DBAdapter
 	table  string
 	cols   []string
@@ -305,7 +335,7 @@ func (it *rowBatchIterator) NextBatch() ([]conn.Record, error) {
 		it.idx = len(it.buf)
 		return batch, nil
 	}
-	batch, err := it.db.GetTableDataBatch(it.table, it.cols, it.pk, it.lastPK, it.limit)
+	batch, err := conn.GetTableDataBatchContext(it.ctx, it.db, it.table, it.cols, it.pk, it.lastPK, it.limit)
 	if err != nil {
 		return nil, err
 	}

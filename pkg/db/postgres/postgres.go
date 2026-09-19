@@ -1,10 +1,12 @@
 package postgres
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
-	"time"
 
 	"github.com/jacktea/data-smith/pkg/chunk"
 	"github.com/jacktea/data-smith/pkg/config"
@@ -28,39 +30,62 @@ func (a *PostgresAdapter) quotedTable(table string) string {
 }
 
 func NewPostgresAdapter(cfg *config.ConnConfig) (*PostgresAdapter, error) {
-	adapter := &PostgresAdapter{}
-	if err := adapter.Init(cfg); err != nil {
+	return NewPostgresAdapterContext(context.Background(), cfg)
+}
+
+func NewPostgresAdapterContext(ctx context.Context, cfg *config.ConnConfig) (*PostgresAdapter, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("connection context is required")
+	}
+	working := cfg.Clone()
+	if err := base.NormalizeConnectionSettings(working); err != nil {
 		return nil, err
 	}
-	if !cfg.SSL {
-		cfg.SetExtra("sslmode", "disable")
+	adapter := &PostgresAdapter{}
+	if err := adapter.Init(working); err != nil {
+		return nil, err
 	}
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s%s", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.DBName, cfg.ExtraString())
+	if !adapter.Cfg.SSL && !adapter.Cfg.ContainsExtra("sslmode") {
+		adapter.Cfg.SetExtra("sslmode", "disable")
+	}
+	if adapter.Cfg.TableSchema == "" {
+		adapter.Cfg.TableSchema = "public"
+	}
+	connStr := buildPostgresDSN(adapter.Cfg)
 
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		adapter.Close()
-		return nil, err
+		return nil, fmt.Errorf("open PostgreSQL database: %w", base.RedactError(err, adapter.Cfg))
 	}
-	var pingErr error
-	for range 3 {
-		pingErr = db.Ping()
-		if pingErr == nil {
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
-	if pingErr != nil {
+	base.ApplyConnectionSettings(db, adapter.Cfg)
+	if err := base.PingWithRetry(ctx, db, adapter.Cfg); err != nil {
+		_ = db.Close()
 		adapter.Close()
-		return nil, pingErr
-	}
-	tableSchema := cfg.TableSchema
-	if tableSchema == "" {
-		tableSchema = "public"
+		return nil, fmt.Errorf("connect to PostgreSQL database: %w", err)
 	}
 	adapter.Conn = db
-	adapter.Cfg.TableSchema = tableSchema
 	return adapter, nil
+}
+
+func buildPostgresDSN(cfg *config.ConnConfig) string {
+	query := make(url.Values, len(cfg.Extra))
+	for key, value := range cfg.Extra {
+		query.Set(key, fmt.Sprint(value))
+	}
+	if cfg.TableSchema != "" && query.Get("search_path") == "" {
+		query.Set("search_path", cfg.TableSchema)
+	}
+	escapedDatabase := url.PathEscape(cfg.DBName)
+	connectionURL := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(cfg.User, cfg.Password),
+		Host:     net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port)),
+		Path:     "/" + cfg.DBName,
+		RawPath:  "/" + escapedDatabase,
+		RawQuery: query.Encode(),
+	}
+	return connectionURL.String()
 }
 
 func (a *PostgresAdapter) ReadSchema() (*conn.DatabaseSchema, error) {
@@ -74,6 +99,13 @@ func (a *PostgresAdapter) ReadSchema() (*conn.DatabaseSchema, error) {
 }
 
 func (a *PostgresAdapter) GetTableDataBatch(table string, cols, pk []string, lastPK []any, limit int) ([]conn.Record, error) {
+	return a.GetTableDataBatchContext(context.Background(), table, cols, pk, lastPK, limit)
+}
+
+func (a *PostgresAdapter) GetTableDataBatchContext(ctx context.Context, table string, cols, pk []string, lastPK []any, limit int) ([]conn.Record, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("query context is required")
+	}
 	if err := validateBatchScanInputs(table, cols, pk, lastPK, limit); err != nil {
 		return nil, err
 	}
@@ -100,7 +132,7 @@ func (a *PostgresAdapter) GetTableDataBatch(table string, cols, pk []string, las
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s %s ORDER BY %s LIMIT $%d", colList, a.quotedTable(table), where, orderBy, argIdx)
 	args = append(args, limit)
-	rows, err := a.Conn.Query(query, args...)
+	rows, err := a.Conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -1,8 +1,10 @@
 package mysql
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -12,7 +14,7 @@ import (
 	"github.com/jacktea/data-smith/pkg/db/base"
 	"github.com/jacktea/data-smith/pkg/sql/ident"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
 type MySQLAdapter struct {
@@ -24,34 +26,55 @@ func (a *MySQLAdapter) quotedTable(table string) string {
 }
 
 func NewMySQLAdapter(cfg *config.ConnConfig) (*MySQLAdapter, error) {
-	adapter := &MySQLAdapter{}
-	if err := adapter.Init(cfg); err != nil {
+	return NewMySQLAdapterContext(context.Background(), cfg)
+}
+
+func NewMySQLAdapterContext(ctx context.Context, cfg *config.ConnConfig) (*MySQLAdapter, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("connection context is required")
+	}
+	working := cfg.Clone()
+	if err := base.NormalizeConnectionSettings(working); err != nil {
 		return nil, err
 	}
-	connStr := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.DBName)
-	if extra := cfg.ExtraString(); extra != "" {
-		connStr += "&" + strings.TrimPrefix(extra, "?")
+	adapter := &MySQLAdapter{}
+	if err := adapter.Init(working); err != nil {
+		return nil, err
 	}
+	connStr := buildMySQLDSN(adapter.Cfg)
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
 		adapter.Close()
-		return nil, err
+		return nil, fmt.Errorf("open MySQL database: %w", base.RedactError(err, adapter.Cfg))
 	}
-	var pingErr error
-	for range 3 {
-		pingErr = db.Ping()
-		if pingErr == nil {
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
-	if pingErr != nil {
+	base.ApplyConnectionSettings(db, adapter.Cfg)
+	if err := base.PingWithRetry(ctx, db, adapter.Cfg); err != nil {
+		_ = db.Close()
 		adapter.Close()
-		return nil, pingErr
+		return nil, fmt.Errorf("connect to MySQL database: %w", err)
 	}
 	adapter.Conn = db
-	adapter.Cfg.TableSchema = cfg.DBName
+	adapter.Cfg.TableSchema = adapter.Cfg.DBName
 	return adapter, nil
+}
+
+func buildMySQLDSN(cfg *config.ConnConfig) string {
+	params := make(map[string]string, len(cfg.Extra)+1)
+	params["charset"] = "utf8mb4"
+	for key, value := range cfg.Extra {
+		params[key] = fmt.Sprint(value)
+	}
+	driverConfig := mysqlDriver.NewConfig()
+	driverConfig.User = cfg.User
+	driverConfig.Passwd = cfg.Password
+	driverConfig.Net = "tcp"
+	driverConfig.Addr = net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
+	driverConfig.DBName = cfg.DBName
+	driverConfig.Params = params
+	driverConfig.ParseTime = true
+	driverConfig.Loc = time.Local
+	driverConfig.MultiStatements = true
+	return driverConfig.FormatDSN()
 }
 
 func (a *MySQLAdapter) ReadSchema() (*conn.DatabaseSchema, error) {
@@ -65,6 +88,13 @@ func (a *MySQLAdapter) ReadSchema() (*conn.DatabaseSchema, error) {
 }
 
 func (a *MySQLAdapter) GetTableDataBatch(table string, cols, pk []string, lastPK []any, limit int) ([]conn.Record, error) {
+	return a.GetTableDataBatchContext(context.Background(), table, cols, pk, lastPK, limit)
+}
+
+func (a *MySQLAdapter) GetTableDataBatchContext(ctx context.Context, table string, cols, pk []string, lastPK []any, limit int) ([]conn.Record, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("query context is required")
+	}
 	if err := validateBatchScanInputs(table, cols, pk, lastPK, limit); err != nil {
 		return nil, err
 	}
@@ -89,7 +119,7 @@ func (a *MySQLAdapter) GetTableDataBatch(table string, cols, pk []string, lastPK
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s %s ORDER BY %s LIMIT ?", colList, a.quotedTable(table), where, orderBy)
 	args = append(args, limit)
-	rows, err := a.Conn.Query(query, args...)
+	rows, err := a.Conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

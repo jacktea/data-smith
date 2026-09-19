@@ -66,12 +66,12 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	srcDB, err := db.NewDBAdapter(&cfg.SourceDB)
+	srcDB, err := db.NewDBAdapterContext(cmd.Context(), &cfg.SourceDB)
 	if err != nil {
 		return fmt.Errorf("connect to source DB: %w", err)
 	}
 	defer srcDB.Close()
-	tgtDB, err := db.NewDBAdapter(&cfg.TargetDB)
+	tgtDB, err := db.NewDBAdapterContext(cmd.Context(), &cfg.TargetDB)
 	if err != nil {
 		return fmt.Errorf("connect to target DB: %w", err)
 	}
@@ -123,7 +123,8 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 		compareRule := diff.CreateCompareRule(models.target, rule.ComparisonKey, rule.IgnoreColumns)
 		var err error
 		if enableChunkHash {
-			err = diff.StreamCompareDataWithChunkFilterAndTable(
+			err = diff.StreamCompareDataWithChunkFilterAndTableContext(
+				cmd.Context(),
 				srcDB,
 				tgtDB,
 				compareRule,
@@ -133,7 +134,8 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 				handle,
 			)
 		} else {
-			err = diff.StreamCompareDataDetailedWithTable(
+			err = diff.StreamCompareDataDetailedWithTableContext(
+				cmd.Context(),
 				srcDB,
 				tgtDB,
 				compareRule,

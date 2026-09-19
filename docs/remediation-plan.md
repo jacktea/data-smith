@@ -12,7 +12,7 @@ Execution order is sequential in the shared checkout. Each session must preserve
 - [x] [#5](https://github.com/jacktea/data-smith/issues/5) — Session 4: deterministic, dependency-safe, schema-qualified SQL (completed 2026-09-18)
 - [x] [#6](https://github.com/jacktea/data-smith/issues/6) — Session 5: fail-fast CLI and atomic output files (completed 2026-09-18)
 - [x] [#7](https://github.com/jacktea/data-smith/issues/7) — Session 6: streaming diff and database performance (completed 2026-09-18)
-- [ ] [#8](https://github.com/jacktea/data-smith/issues/8) — Session 7: configuration, SSH, connections, and reset safety
+- [x] [#8](https://github.com/jacktea/data-smith/issues/8) — Session 7: configuration, SSH, connections, and reset safety (completed 2026-09-19)
 - [ ] [#9](https://github.com/jacktea/data-smith/issues/9) — Session 8: dual-database E2E, CI, coverage, and documentation
 
 ## Session 1 acceptance evidence
@@ -192,6 +192,36 @@ Final verification:
 - Static audit: no `OFFSET`/`ROW_NUMBER` chunk discovery, no business `Run:` handlers, and only `internal/datasmith/root.go` calls `os.Exit` — PASS
 - Protected artifacts retain their exact size/mode/SHA/status; staged diff remains empty.
 
+## Session 7 acceptance evidence
+
+- `ConnConfig.Proxy` remains `any` for source compatibility. `SSHProxyConfig` explicitly accepts `SSHProxy`, `*SSHProxy`, `map[string]any`, and YAML's `map[any]any`, rejects typed nils, non-string keys, unknown fields, wrong field types, and unsupported shapes, and is exercised by a real YAML unmarshal regression. A configured proxy can no longer be silently ignored.
+- `ConnConfig.Clone` copies `Extra`, nested map/slice values, and supported proxy forms. `BaseAdapter.Init` and both database constructors work only on clones before applying tunnel endpoints, PostgreSQL schema/SSL defaults, connection timeout defaults, or pool defaults. Tests prove caller-owned values remain deeply equal after successful tunnel setup, proxy-validation failure, pool-validation failure, and canceled MySQL/PostgreSQL connection attempts.
+- MySQL uses `go-sql-driver/mysql.NewConfig().FormatDSN`; PostgreSQL uses `url.URL`, `url.UserPassword`, `url.PathEscape`, and `url.Values`. Round-trip tests cover special characters in usernames, passwords, database names, PostgreSQL schemas/search paths, and query parameters. Connection errors redact raw, query/path-escaped, and userinfo-escaped credentials.
+- SSH host identity verification requires exactly one of a validated `knownHostsPath` or SHA-256 `hostFingerprint`; the insecure callback is gone. Tests reject missing trust and mismatched keys and accept matching known_hosts and pinned-fingerprint keys.
+- SSH tunnels bind `127.0.0.1:0`, retain the listener, cancel forwarding, close accepted connections and the underlying SSH transport, wait for the accept/forwarding goroutines, and make `Stop` concurrent, repeatable, and race-safe. The lifecycle test proves the assigned port is recorded, the accepted connection closes, the forwarding goroutine exits, the listener rejects new connections, and eight concurrent stops plus a later stop all succeed under `-race`.
+- `ContextDBAdapter` is additive, so legacy `DBAdapter` implementations and public methods remain source-compatible. MySQL/PostgreSQL batch reads use `QueryContext`; context-aware streaming comparison APIs are used by the CLI; adapter connection/ping, `exec-sql`, and reset execution use Cobra contexts and `PingContext`/`BeginTx`/`ExecContext`. Cancellation/deadline tests cover database reads, the streaming path, SQL execution, reset, and connection attempts.
+- Connection settings add validated `connectTimeout`, `maxOpenConns`, `maxIdleConns`, `connMaxLifetime`, and `connMaxIdleTime`. Zero values receive bounded defaults on the cloned config; negative values and idle limits above the open limit fail before tunnel/network work; the configured pool is applied before ping.
+- `reset-db` adds `--dry-run`, requires `--yes` for real execution, validates before adapter construction, refuses empty targets plus MySQL/PostgreSQL system databases and PostgreSQL system schemas, and quotes identifiers through `pkg/sql/ident`. Tests prove missing confirmation fails before even reading the config, dry-run prints SQL without connecting, dangerous targets fail before DB access, cancellation interrupts execution, and embedded quote/backtick identifiers are escaped.
+- Repository configuration/test credentials were replaced with unmistakable placeholders. README configuration, SSH trust, pool, dry-run, and confirmed reset examples were updated. The pre-existing `EXECUTE-ON: source` marker, explicit database selection, target guard, and correct README execution direction remain intact.
+
+## Session 7 verification
+
+Baseline before changes:
+
+- `go test ./... -count=1` — PASS
+- `go test -race ./... -count=1` — PASS
+- `go vet ./...` — PASS
+
+Final verification:
+
+- `go test ./... -count=1` — PASS
+- `go test -race ./... -count=1` — PASS
+- `go vet ./...` — PASS
+- `git diff --check` — PASS
+- Static audit: no `ssh.InsecureIgnoreHostKey`, random fixed-range tunnel ports, or hand-built MySQL/PostgreSQL DSNs; only `internal/datasmith/root.go` calls `os.Exit`; source-only SQL markers and target blocking remain — PASS.
+- Protected artifacts: `datasmith` size `7401858`, mode `-rwxr-xr-x`, SHA-256 `84fd988415654588c2bfc2a14b2b2490575d43d6d0e46ea61264e1a41cfc1c57`, status `M`; `CODE_REVIEW_REPORT.md` size `21194`, SHA-256 `9c529456726a93167b326e1a0c07f740ad013dcc42269f0a2b893539d2d3424b`, status `??`; staged diff empty.
+- GitHub evidence: [Issue #8 comment](https://github.com/jacktea/data-smith/issues/8#issuecomment-5738300406); Issue #8 closed as completed.
+
 ## Open risks and later work
 
 - Session 1 uses deterministic SQL-mock regression tests; live PostgreSQL/MySQL migration E2E remains for #9.
@@ -211,8 +241,11 @@ Final verification:
 - Session 6 deliberately keeps table concurrency at one. Parallel comparison may improve latency but would require explicit connection budgets, deterministic output slots, fail-fast cancellation, and bounded best-effort collection; those costs are not justified by Issue #7's acceptance criteria.
 - Low-difference runs are slower in the synthetic benchmark because durable rollback spooling adds file creation, sync, and removal. This is the safety/memory tradeoff; high-difference runs are faster and substantially smaller. Live database performance and concurrent-mutation behavior remain for #9.
 - Keyset boundary discovery assumes a stable ordered key view while it runs. As before, chunk hashing remains opt-in and concurrent changes outside a shared snapshot may invalidate statistics or boundaries.
-- The modified executable `datasmith` (size `7301362`, mode `-rwxr-xr-x`, SHA-256 `efadb73998d2e845b88a5d3465b12a3b21e3c4d82d59c74a1f1202cc7dd56253`, status `M`) and untracked `CODE_REVIEW_REPORT.md` (size `21194`, SHA-256 `9c529456726a93167b326e1a0c07f740ad013dcc42269f0a2b893539d2d3424b`, status `??`) are unrelated user changes and must remain untouched in later sessions. Do not rebuild, truncate, restore, stage, or commit either file; use Go test/vet commands that do not emit the root binary.
+- MySQL's documented DSN grammar has no escaping mechanism for `:` inside a username; DataSmith uses the official driver formatter and round-trips every supported reserved character rather than inventing an incompatible encoding. Passwords, database names, parameters, and PostgreSQL userinfo/path/query values use the official encoders.
+- Context-aware streaming covers the long row scan and checks cancellation between optional hash chunks; legacy third-party adapters that implement only `DBAdapter` retain their old non-cancellable database call while remaining source-compatible.
+- SSH lifecycle tests use local listeners and injected forwarding rather than external credentials. Live bastion plus live database coverage remains for environments that can supply an approved known_hosts entry or fingerprint; Issue #9 remains responsible for database E2E, not SSH infrastructure.
+- The modified executable `datasmith` (size `7401858`, mode `-rwxr-xr-x`, SHA-256 `84fd988415654588c2bfc2a14b2b2490575d43d6d0e46ea61264e1a41cfc1c57`, status `M`) and untracked `CODE_REVIEW_REPORT.md` (size `21194`, SHA-256 `9c529456726a93167b326e1a0c07f740ad013dcc42269f0a2b893539d2d3424b`, status `??`) are unrelated user changes and must remain untouched in later sessions. Do not rebuild, truncate, restore, stage, or commit either file; use Go test/vet commands that do not emit the root binary.
 
 ## Next action
 
-Run Session 7 for issue #8 using the complete prompt in `docs/remediation-handoff.md`. Preserve all completed #2–#7 behavior, especially Session 6 streaming/spooling/batch bounds/keyset/cache behavior and Session 5 fail-fast/atomic-pair semantics. Remaining order is #8 → #9.
+Run Session 8 for issue #9 using the complete prompt in `docs/remediation-handoff.md`. Preserve all completed #2–#8 behavior, especially Session 7 configuration immutability, verified SSH lifecycle, cancellable long operations, pool bounds, credential-safe DSNs, and reset confirmation/preflight. Issue #9 is the only remaining child issue.

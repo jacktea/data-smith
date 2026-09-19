@@ -15,7 +15,7 @@ func TestGenerateTableDDL(t *testing.T) {
 		Type:        consts.DBTypePostgres,
 		Port:        5432,
 		User:        "postgres",
-		Password:    "air20220401",
+		Password:    "obvious-test-placeholder",
 		DBName:      "airedge2.1db",
 		TableSchema: "public",
 	}
@@ -40,7 +40,7 @@ func TestExtractViewDetail(t *testing.T) {
 		Type:        consts.DBTypePostgres,
 		Port:        5432,
 		User:        "postgres",
-		Password:    "air20220401",
+		Password:    "obvious-test-placeholder",
 		DBName:      "airedge2.1db",
 		TableSchema: "public",
 	}

@@ -1,12 +1,13 @@
 package proxy
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"sync"
-	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -16,8 +17,15 @@ type SSHTunnel struct {
 	Server *Endpoint
 	Remote *Endpoint
 	Config *ssh.ClientConfig
-	done   chan struct{}
-	mu     sync.Mutex
+
+	mu       sync.Mutex
+	listener net.Listener
+	cancel   context.CancelFunc
+	started  bool
+	stopped  bool
+	active   map[net.Conn]struct{}
+	wg       sync.WaitGroup
+	forward  func(context.Context, net.Conn)
 }
 
 type Endpoint struct {
@@ -26,165 +34,172 @@ type Endpoint struct {
 }
 
 func (endpoint *Endpoint) String() string {
-	return fmt.Sprintf("%s:%d", endpoint.Host, endpoint.Port)
+	return net.JoinHostPort(endpoint.Host, fmt.Sprintf("%d", endpoint.Port))
 }
 
-// 创建SSH隧道
 func (tunnel *SSHTunnel) Start() error {
-	log.Printf("开始创建SSH隧道: 本地[%s] -> SSH服务器[%s] -> 远程[%s]",
-		tunnel.Local.String(), tunnel.Server.String(), tunnel.Remote.String())
-
+	tunnel.mu.Lock()
+	defer tunnel.mu.Unlock()
+	if tunnel.started {
+		return fmt.Errorf("SSH tunnel has already been started")
+	}
+	if tunnel.stopped {
+		return fmt.Errorf("SSH tunnel has already been stopped")
+	}
 	listener, err := net.Listen("tcp", tunnel.Local.String())
 	if err != nil {
-		log.Printf("创建本地监听器失败: %v", err)
-		return fmt.Errorf("创建本地监听器失败: %w", err)
+		return fmt.Errorf("listen for SSH tunnel connections: %w", err)
 	}
-	log.Printf("成功创建本地监听器: %s", tunnel.Local.String())
-
-	tunnel.done = make(chan struct{})
-
-	go func() {
-		defer func() {
-			listener.Close()
-			log.Printf("SSH隧道监听器已关闭: %s", tunnel.Local.String())
-		}()
-
-		log.Printf("开始监听本地连接: %s", tunnel.Local.String())
-		for {
-			select {
-			case <-tunnel.done:
-				log.Printf("收到停止信号，关闭SSH隧道")
-				return
-			default:
-				conn, err := listener.Accept()
-				if err != nil {
-					select {
-					case <-tunnel.done:
-						return
-					default:
-						log.Printf("接受连接失败: %v", err)
-						continue
-					}
-				}
-				log.Printf("收到新的本地连接: %s", conn.RemoteAddr().String())
-				go tunnel.forward(conn)
-			}
-		}
-	}()
-
+	tcpAddress, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = listener.Close()
+		return fmt.Errorf("SSH tunnel listener returned unexpected address type %T", listener.Addr())
+	}
+	tunnel.Local.Host = tcpAddress.IP.String()
+	if tunnel.Local.Host == "" || tunnel.Local.Host == "::" {
+		tunnel.Local.Host = "127.0.0.1"
+	}
+	tunnel.Local.Port = tcpAddress.Port
+	ctx, cancel := context.WithCancel(context.Background())
+	tunnel.listener = listener
+	tunnel.cancel = cancel
+	tunnel.active = make(map[net.Conn]struct{})
+	tunnel.started = true
+	tunnel.wg.Add(1)
+	go tunnel.acceptLoop(ctx, listener)
+	log.Printf("SSH tunnel listening on %s for remote %s", tunnel.Local.String(), tunnel.Remote.String())
 	return nil
+}
+
+func (tunnel *SSHTunnel) acceptLoop(ctx context.Context, listener net.Listener) {
+	defer tunnel.wg.Done()
+	for {
+		localConn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			log.Printf("SSH tunnel accept failed: %v", err)
+			continue
+		}
+		tunnel.mu.Lock()
+		if tunnel.stopped {
+			tunnel.mu.Unlock()
+			_ = localConn.Close()
+			continue
+		}
+		tunnel.active[localConn] = struct{}{}
+		tunnel.wg.Add(1)
+		forward := tunnel.forward
+		tunnel.mu.Unlock()
+		go func() {
+			defer tunnel.wg.Done()
+			defer func() {
+				_ = localConn.Close()
+				tunnel.mu.Lock()
+				delete(tunnel.active, localConn)
+				tunnel.mu.Unlock()
+			}()
+			if forward != nil {
+				forward(ctx, localConn)
+				return
+			}
+			tunnel.forwardConnection(ctx, localConn)
+		}()
+	}
 }
 
 func (tunnel *SSHTunnel) Stop() error {
 	tunnel.mu.Lock()
-	defer tunnel.mu.Unlock()
-
-	log.Printf("正在停止SSH隧道...")
-	if tunnel.done != nil {
-		close(tunnel.done)
-		log.Printf("SSH隧道已停止")
+	if tunnel.stopped {
+		tunnel.mu.Unlock()
+		tunnel.wg.Wait()
+		return nil
 	}
-	return nil
+	tunnel.stopped = true
+	cancel := tunnel.cancel
+	listener := tunnel.listener
+	connections := make([]net.Conn, 0, len(tunnel.active))
+	for connection := range tunnel.active {
+		connections = append(connections, connection)
+	}
+	tunnel.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	var result error
+	if listener != nil {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			result = errors.Join(result, fmt.Errorf("close SSH tunnel listener: %w", err))
+		}
+	}
+	for _, connection := range connections {
+		if err := connection.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			result = errors.Join(result, fmt.Errorf("close SSH tunnel connection: %w", err))
+		}
+	}
+	tunnel.wg.Wait()
+	return result
 }
 
-func (tunnel *SSHTunnel) forward(localConn net.Conn) {
-	startTime := time.Now()
-	log.Printf("开始转发连接: %s", localConn.RemoteAddr().String())
-
-	// 连接到SSH服务器
-	serverConn, err := ssh.Dial("tcp", tunnel.Server.String(), tunnel.Config)
+func (tunnel *SSHTunnel) forwardConnection(ctx context.Context, localConn net.Conn) {
+	dialer := &net.Dialer{Timeout: tunnel.Config.Timeout}
+	rawServerConn, err := dialer.DialContext(ctx, "tcp", tunnel.Server.String())
 	if err != nil {
-		log.Printf("SSH连接失败: %v", err)
-		localConn.Close()
+		if ctx.Err() == nil {
+			log.Printf("SSH server connection failed: %v", err)
+		}
 		return
 	}
-	log.Printf("成功连接到SSH服务器: %s", tunnel.Server.String())
+	defer rawServerConn.Close()
+	stopServerClose := context.AfterFunc(ctx, func() { _ = rawServerConn.Close() })
+	defer stopServerClose()
 
-	// 通过SSH连接到远程数据库
-	remoteConn, err := serverConn.Dial("tcp", tunnel.Remote.String())
+	sshConn, channels, requests, err := ssh.NewClientConn(rawServerConn, tunnel.Server.String(), tunnel.Config)
 	if err != nil {
-		log.Printf("远程数据库连接失败: %v", err)
-		serverConn.Close()
-		localConn.Close()
+		if ctx.Err() == nil {
+			log.Printf("SSH handshake failed: %v", err)
+		}
 		return
 	}
-	log.Printf("成功连接到远程数据库: %s", tunnel.Remote.String())
-
-	// 记录连接建立时间
-	log.Printf("连接转发完成，耗时: %v", time.Since(startTime))
-
-	// 创建双向数据转发
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// 本地 -> 远程
-	go func() {
-		defer wg.Done()
-		defer func() {
-			remoteConn.Close()
-			log.Printf("远程数据库连接已关闭: %s", tunnel.Remote.String())
-		}()
-
-		buf := make([]byte, 32*1024)
-		for {
-			select {
-			case <-tunnel.done:
-				log.Printf("收到停止信号，关闭本地->远程连接")
-				return
-			default:
-				n, err := localConn.Read(buf)
-				if err != nil {
-					if err != io.EOF {
-						log.Printf("本地->远程 读取数据失败: %v", err)
-					}
-					return
-				}
-				if n > 0 {
-					_, err = remoteConn.Write(buf[:n])
-					if err != nil {
-						log.Printf("本地->远程 写入数据失败: %v", err)
-						return
-					}
-				}
-			}
+	client := ssh.NewClient(sshConn, channels, requests)
+	defer client.Close()
+	remoteConn, err := client.Dial("tcp", tunnel.Remote.String())
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("SSH remote connection failed: %v", err)
 		}
-	}()
+		return
+	}
+	defer remoteConn.Close()
+	stopConnections := context.AfterFunc(ctx, func() {
+		_ = localConn.Close()
+		_ = remoteConn.Close()
+	})
+	defer stopConnections()
 
-	// 远程 -> 本地
+	var copies sync.WaitGroup
+	copies.Add(2)
 	go func() {
-		defer wg.Done()
-		defer func() {
-			localConn.Close()
-			log.Printf("本地连接已关闭: %s", localConn.RemoteAddr().String())
-		}()
-
-		buf := make([]byte, 32*1024)
-		for {
-			select {
-			case <-tunnel.done:
-				log.Printf("收到停止信号，关闭远程->本地连接")
-				return
-			default:
-				n, err := remoteConn.Read(buf)
-				if err != nil {
-					if err != io.EOF {
-						log.Printf("远程->本地 读取数据失败: %v", err)
-					}
-					return
-				}
-				if n > 0 {
-					_, err = localConn.Write(buf[:n])
-					if err != nil {
-						log.Printf("远程->本地 写入数据失败: %v", err)
-						return
-					}
-				}
-			}
-		}
+		defer copies.Done()
+		_, _ = io.Copy(remoteConn, localConn)
+		_ = remoteConn.Close()
 	}()
+	go func() {
+		defer copies.Done()
+		_, _ = io.Copy(localConn, remoteConn)
+		_ = localConn.Close()
+	}()
+	copies.Wait()
+}
 
-	// 等待连接关闭
-	wg.Wait()
-	serverConn.Close()
-	log.Printf("连接转发已结束: %s", localConn.RemoteAddr().String())
+// ListenerAddr returns the bound local address after Start.
+func (tunnel *SSHTunnel) ListenerAddr() net.Addr {
+	tunnel.mu.Lock()
+	defer tunnel.mu.Unlock()
+	if tunnel.listener == nil {
+		return nil
+	}
+	return tunnel.listener.Addr()
 }

@@ -31,12 +31,12 @@ func runDiffSchema(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	srcDB, err := db.NewDBAdapter(&cfg.SourceDB)
+	srcDB, err := db.NewDBAdapterContext(cmd.Context(), &cfg.SourceDB)
 	if err != nil {
 		return fmt.Errorf("connect to source DB: %w", err)
 	}
 	defer srcDB.Close()
-	tgtDB, err := db.NewDBAdapter(&cfg.TargetDB)
+	tgtDB, err := db.NewDBAdapterContext(cmd.Context(), &cfg.TargetDB)
 	if err != nil {
 		return fmt.Errorf("connect to target DB: %w", err)
 	}

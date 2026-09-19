@@ -23,7 +23,7 @@ var migrateScript = &cobra.Command{
 			return fmt.Errorf("load config: %w", err)
 		}
 
-		tgtDB, err := db.NewDBAdapter(&cfg.TargetDB)
+		tgtDB, err := db.NewDBAdapterContext(cmd.Context(), &cfg.TargetDB)
 		if err != nil {
 			return fmt.Errorf("connect to target DB: %w", err)
 		}

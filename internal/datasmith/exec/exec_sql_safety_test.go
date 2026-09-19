@@ -1,12 +1,14 @@
 package exec
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -15,6 +17,18 @@ import (
 	"github.com/jacktea/data-smith/pkg/consts"
 	"github.com/lib/pq"
 )
+
+func TestExecuteSQLContextHonorsDeadline(t *testing.T) {
+	adapter, mock := newExecMockAdapter(t, consts.DBTypePostgres)
+	sqlText := "SELECT pg_sleep(10)"
+	mock.ExpectExec(regexp.QuoteMeta(sqlText)).WillDelayFor(time.Second).WillReturnResult(sqlmock.NewResult(0, 0))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := ExecuteSQLContext(ctx, adapter, sqlText, false, false)
+	if !errors.Is(err, context.DeadlineExceeded) && (err == nil || !strings.Contains(err.Error(), "cancel")) {
+		t.Fatalf("got %v, want context cancellation", err)
+	}
+}
 
 type execMockAdapter struct {
 	db  *sql.DB

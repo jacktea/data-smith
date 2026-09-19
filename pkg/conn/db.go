@@ -1,7 +1,9 @@
 package conn
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"sort"
 
 	"github.com/jacktea/data-smith/pkg/config"
@@ -160,4 +162,25 @@ type DBAdapter interface {
 	GetConn() *sql.DB
 	GetConfig() *config.ConnConfig
 	Close() error
+}
+
+// ContextDBAdapter is an additive capability for cancellable long-running row
+// reads. DBAdapter remains unchanged so existing implementations stay source
+// compatible.
+type ContextDBAdapter interface {
+	DBAdapter
+	GetTableDataBatchContext(ctx context.Context, table string, cols, pk []string, lastPK []any, limit int) ([]Record, error)
+}
+
+func GetTableDataBatchContext(ctx context.Context, db DBAdapter, table string, cols, pk []string, lastPK []any, limit int) ([]Record, error) {
+	if ctx == nil {
+		return nil, errors.New("query context is required")
+	}
+	if contextual, ok := db.(ContextDBAdapter); ok {
+		return contextual.GetTableDataBatchContext(ctx, table, cols, pk, lastPK, limit)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return db.GetTableDataBatch(table, cols, pk, lastPK, limit)
 }

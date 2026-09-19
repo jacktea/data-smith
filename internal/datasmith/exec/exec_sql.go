@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -105,13 +106,13 @@ func runExecSQL(cmd *cobra.Command, args []string) error {
 	logger.Infof("目标数据库 [%s]: 类型=%s, 地址=%s:%d, 库名=%s, Schema=%s",
 		dbLabel, targetConnCfg.Type, targetConnCfg.Host, targetConnCfg.Port, targetConnCfg.DBName, targetConnCfg.TableSchema)
 
-	adapter, err := db.NewDBAdapter(targetConnCfg)
+	adapter, err := db.NewDBAdapterContext(cmd.Context(), targetConnCfg)
 	if err != nil {
 		return fmt.Errorf("连接数据库失败: %w", err)
 	}
 	defer adapter.Close()
 
-	return ExecuteSQL(adapter, sqlContent, dryRun, useTx)
+	return ExecuteSQLContext(cmd.Context(), adapter, sqlContent, dryRun, useTx)
 }
 
 const executeOnMarker = "-- DATASMITH EXECUTE-ON:"
@@ -187,6 +188,13 @@ func resolveDBConfig(cfg *pkgconfig.Config, dbChoice string) (*pkgconfig.ConnCon
 
 // ExecuteSQL 执行指定的 SQL 语句内容
 func ExecuteSQL(adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bool) error {
+	return ExecuteSQLContext(context.Background(), adapter, sqlContent, dryRun, useTx)
+}
+
+func ExecuteSQLContext(ctx context.Context, adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bool) error {
+	if ctx == nil {
+		return errors.New("SQL execution context is required")
+	}
 	cfg := adapter.GetConfig()
 	options := sqlScannerOptions{nestedBlockComments: true, dollarQuotes: true}
 	if cfg != nil && cfg.Type == consts.DBTypeMySQL {
@@ -239,7 +247,7 @@ func ExecuteSQL(adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bo
 
 	if dryRun {
 		logger.Info("开始模拟执行 SQL (Dry-run 模式，在事务中执行后自动回滚)...")
-		tx, err := connDB.Begin()
+		tx, err := connDB.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("开启模拟执行事务失败: %w", err)
 		}
@@ -247,7 +255,7 @@ func ExecuteSQL(adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bo
 			_ = tx.Rollback()
 		}()
 
-		if _, err := tx.Exec(sqlContent); err != nil {
+		if _, err := tx.ExecContext(ctx, sqlContent); err != nil {
 			_ = tx.Rollback()
 			return executionError("模拟执行 SQL 失败，已回滚", err, sqlContent, scan)
 		}
@@ -261,12 +269,12 @@ func ExecuteSQL(adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bo
 
 	if useTx {
 		logger.Info("开始在事务中执行 SQL...")
-		tx, err := connDB.Begin()
+		tx, err := connDB.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("开启事务失败: %w", err)
 		}
 
-		if _, err := tx.Exec(sqlContent); err != nil {
+		if _, err := tx.ExecContext(ctx, sqlContent); err != nil {
 			_ = tx.Rollback()
 			return executionError("事务执行 SQL 失败，已回滚", err, sqlContent, scan)
 		}
@@ -280,7 +288,7 @@ func ExecuteSQL(adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bo
 	}
 
 	logger.Info("开始执行 SQL...")
-	if _, err := connDB.Exec(sqlContent); err != nil {
+	if _, err := connDB.ExecContext(ctx, sqlContent); err != nil {
 		return executionError("执行 SQL 失败", err, sqlContent, scan)
 	}
 

@@ -11,9 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jacktea/data-smith/pkg/config"
 	"github.com/jacktea/data-smith/pkg/conn"
 	"github.com/jacktea/data-smith/pkg/consts"
 	"github.com/jacktea/data-smith/pkg/logger"
+	"github.com/jacktea/data-smith/pkg/sql/ident"
 	"github.com/jacktea/data-smith/pkg/utils"
 )
 
@@ -146,22 +148,77 @@ func ApplyMigrations(db conn.DBAdapter, files []*MigrationFile) error {
 }
 
 func ResetDatabase(db conn.DBAdapter) error {
+	return ResetDatabaseContext(context.Background(), db)
+}
+
+func ResetDatabaseContext(ctx context.Context, db conn.DBAdapter) error {
+	if db == nil {
+		return errors.New("database adapter is required")
+	}
+	query, err := BuildResetSQL(db.GetConfig())
+	if err != nil {
+		return err
+	}
+	if ctx == nil {
+		return errors.New("reset context is required")
+	}
 	logger.Info("开始重置数据库")
 	connection := db.GetConn()
-	cfg := db.GetConfig()
-	query := ""
-	switch cfg.Type {
-	case consts.DBTypeMySQL:
-		query = fmt.Sprintf("DROP DATABASE IF EXISTS %s; CREATE DATABASE %s;", cfg.DBName, cfg.DBName)
-	case consts.DBTypePostgres:
-		query = fmt.Sprintf("DROP SCHEMA %s CASCADE; CREATE SCHEMA %s;", cfg.TableSchema, cfg.TableSchema)
-	default:
-		return errors.New("不支持的数据库类型")
+	if connection == nil {
+		return errors.New("database connection is required")
 	}
-	if _, err := connection.Exec(query); err != nil {
+	if _, err := connection.ExecContext(ctx, query); err != nil {
 		return fmt.Errorf("重置数据库失败: %w", err)
 	}
 	logger.Info("数据库重置成功")
+	return nil
+}
+
+func BuildResetSQL(cfg *config.ConnConfig) (string, error) {
+	if err := ValidateResetTarget(cfg); err != nil {
+		return "", err
+	}
+	switch cfg.Type {
+	case consts.DBTypeMySQL:
+		name := ident.Quote(ident.Backtick, cfg.DBName)
+		return fmt.Sprintf("DROP DATABASE IF EXISTS %s; CREATE DATABASE %s;", name, name), nil
+	case consts.DBTypePostgres:
+		name := ident.Quote(ident.DoubleQuote, cfg.TableSchema)
+		return fmt.Sprintf("DROP SCHEMA %s CASCADE; CREATE SCHEMA %s;", name, name), nil
+	default:
+		return "", fmt.Errorf("unsupported database type: %s", cfg.Type)
+	}
+}
+
+func ValidateResetTarget(cfg *config.ConnConfig) error {
+	if cfg == nil {
+		return errors.New("connection configuration is required")
+	}
+	database := strings.TrimSpace(cfg.DBName)
+	if database == "" {
+		return errors.New("refusing to reset an empty database name")
+	}
+	switch cfg.Type {
+	case consts.DBTypeMySQL:
+		system := map[string]bool{"mysql": true, "information_schema": true, "performance_schema": true, "sys": true}
+		if system[strings.ToLower(database)] {
+			return fmt.Errorf("refusing to reset MySQL system database %q", database)
+		}
+	case consts.DBTypePostgres:
+		if system := map[string]bool{"postgres": true, "template0": true, "template1": true}; system[strings.ToLower(database)] {
+			return fmt.Errorf("refusing to reset PostgreSQL system database %q", database)
+		}
+		schema := strings.TrimSpace(cfg.TableSchema)
+		if schema == "" {
+			return errors.New("refusing to reset an empty PostgreSQL schema")
+		}
+		lowerSchema := strings.ToLower(schema)
+		if lowerSchema == "information_schema" || strings.HasPrefix(lowerSchema, "pg_") {
+			return fmt.Errorf("refusing to reset PostgreSQL system schema %q", schema)
+		}
+	default:
+		return fmt.Errorf("unsupported database type: %s", cfg.Type)
+	}
 	return nil
 }
 
