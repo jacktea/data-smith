@@ -9,3 +9,14 @@ data_diff_rollback.sql
 bin
 .agents
 skills-lock.json
+
+# Web 控制台运行数据(含连接凭据,禁止入库)
+datasmith-web-data/
+# Agent 工具本地状态
+.zcode/
+# 前端依赖与构建产物(embed 产物由 scripts/build.sh 生成)
+web/node_modules/
+web/dist/
+# go:embed 目标:仅保留占位页,真实产物构建时替换
+internal/server/webfs/dist/*
+!internal/server/webfs/dist/index.html
