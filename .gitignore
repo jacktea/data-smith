@@ -7,3 +7,5 @@ schema_diff_rollback.sql
 data_diff.sql
 data_diff_rollback.sql
 bin
+.agents
+skills-lock.json
