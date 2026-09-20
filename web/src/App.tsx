@@ -32,12 +32,26 @@ const MENU_ITEMS = [
   { key: "/jobs", icon: <UnorderedListOutlined />, label: "任务列表" },
 ];
 
+const TAB_SCROLL_ROUTES = ["/migrations", "/sql"];
+
 function MainLayout() {
   const navigate = useNavigate();
   const location = useLocation();
+  const isTabScroll = TAB_SCROLL_ROUTES.some((r) => location.pathname.startsWith(r));
+
   return (
-    <Layout style={{ minHeight: "100vh" }}>
-      <Sider width={208} theme="dark">
+    <Layout style={{ height: "100vh", overflow: "hidden" }}>
+      <Sider
+        width={208}
+        theme="dark"
+        style={{
+          height: "100vh",
+          display: "flex",
+          flexDirection: "column",
+          flexShrink: 0,
+          overflow: "hidden",
+        }}
+      >
         <div
           style={{
             height: 56,
@@ -48,19 +62,32 @@ function MainLayout() {
             fontWeight: 700,
             fontSize: 16,
             letterSpacing: 1,
+            flexShrink: 0,
+            borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
           }}
         >
           DataSmith 控制台
         </div>
-        <Menu
-          mode="inline"
-          theme="dark"
-          selectedKeys={[location.pathname]}
-          items={MENU_ITEMS}
-          onClick={({ key }) => navigate(key)}
-        />
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden" }}>
+          <Menu
+            mode="inline"
+            theme="dark"
+            selectedKeys={[location.pathname]}
+            items={MENU_ITEMS}
+            onClick={({ key }) => navigate(key)}
+          />
+        </div>
       </Sider>
-      <Layout>
+      <Layout
+        style={{
+          height: "100vh",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          flex: 1,
+          minWidth: 0,
+        }}
+      >
         <Header
           style={{
             background: "#fff",
@@ -68,13 +95,14 @@ function MainLayout() {
             height: 56,
             lineHeight: "56px",
             borderBottom: "1px solid #f0f0f0",
+            flexShrink: 0,
           }}
         >
           <Typography.Text type="secondary">
             数据库结构/数据比对、迁移与重置控制台 · 术语约定:source=将被变更的库,target=参照标准
           </Typography.Text>
         </Header>
-        <Content style={{ padding: 24 }}>
+        <Content className={isTabScroll ? "ds-content-tab-mode" : "ds-content-main-mode"}>
           <Outlet />
         </Content>
       </Layout>

@@ -784,8 +784,9 @@ ${plannedText}。每个版本执行其 down 脚本并把账本标记为 rolled_b
 
 export default function MigrationsPage() {
   return (
-    <Card title="迁移管理">
+    <Card title="迁移管理" className="ds-tab-page-card">
       <Tabs
+        className="ds-fill-tabs"
         defaultActiveKey="libs"
         items={[
           { key: "libs", label: "脚本库管理", children: <LibraryTab /> },

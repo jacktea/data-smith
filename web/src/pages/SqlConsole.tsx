@@ -197,34 +197,36 @@ export default function SqlConsolePage() {
   };
 
   return (
-    <Card title="SQL 控制台">
-      <Space direction="vertical" style={{ width: "100%" }} size="middle">
-        <Space wrap>
-          <Typography.Text strong>连接:</Typography.Text>
-          <Select
-            showSearch
-            optionFilterProp="label"
-            style={{ width: 340 }}
-            placeholder="选择连接"
-            loading={connsLoading}
-            options={connOptions}
-            value={connId}
-            onChange={(v) => {
-              setConnId(v);
-              setResult(null);
-            }}
-          />
-          {connId && (
-            <Typography.Text type="secondary">
-              所选库即执行目标(source 语义:将被变更)。
-            </Typography.Text>
-          )}
-          <Button size="small" onClick={() => void reload()} loading={connsLoading}>
-            刷新
-          </Button>
-        </Space>
-        <Tabs activeKey={tab} onChange={setTab} items={[queryTab, scriptTab]} />
-      </Space>
+    <Card title="SQL 控制台" className="ds-tab-page-card">
+      <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+        <div style={{ flexShrink: 0, marginBottom: 16 }}>
+          <Space wrap>
+            <Typography.Text strong>连接:</Typography.Text>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              style={{ width: 340 }}
+              placeholder="选择连接"
+              loading={connsLoading}
+              options={connOptions}
+              value={connId}
+              onChange={(v) => {
+                setConnId(v);
+                setResult(null);
+              }}
+            />
+            {connId && (
+              <Typography.Text type="secondary">
+                所选库即执行目标(source 语义:将被变更)。
+              </Typography.Text>
+            )}
+            <Button size="small" onClick={() => void reload()} loading={connsLoading}>
+              刷新
+            </Button>
+          </Space>
+        </div>
+        <Tabs className="ds-fill-tabs" activeKey={tab} onChange={setTab} items={[queryTab, scriptTab]} />
+      </div>
     </Card>
   );
 }
