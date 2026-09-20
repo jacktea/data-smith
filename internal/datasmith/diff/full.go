@@ -21,6 +21,9 @@ type FullDiffParams struct {
 	DMLBatchSize  int
 	ChunkHash     bool
 	BestEffort    bool
+	// SkipMissingTables 透传给数据比对阶段：rules 引用的表在任一侧不存在时
+	// 跳过并告警，而不是失败（结构阶段的单侧表过滤仍先行生效）。
+	SkipMissingTables bool
 }
 
 // FullDiffResult merges the schema and data projections of a full diff run.
@@ -103,14 +106,15 @@ func RunFullDiff(ctx context.Context, params FullDiffParams, dir string, progres
 
 	report("=== 数据比对阶段 ===")
 	dataResult, err := RunDataDiff(ctx, DataDiffParams{
-		Source:       params.Source,
-		Target:       params.Target,
-		Rules:        rules,
-		BatchSize:    params.BatchSize,
-		ChunkSize:    params.ChunkSize,
-		DMLBatchSize: params.DMLBatchSize,
-		ChunkHash:    params.ChunkHash,
-		BestEffort:   params.BestEffort,
+		Source:            params.Source,
+		Target:            params.Target,
+		Rules:             rules,
+		BatchSize:         params.BatchSize,
+		ChunkSize:         params.ChunkSize,
+		DMLBatchSize:      params.DMLBatchSize,
+		ChunkHash:         params.ChunkHash,
+		BestEffort:        params.BestEffort,
+		SkipMissingTables: params.SkipMissingTables,
 	}, dir, tableProgress)
 	if err != nil {
 		return FullDiffResult{}, fmt.Errorf("data diff: %w", err)

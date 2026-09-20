@@ -32,6 +32,7 @@ func runDiffFull(cmd *cobra.Command, args []string) error {
 	chunkSize, _ := cmd.Flags().GetInt("chunk-size")
 	dmlBatchSize, _ := cmd.Flags().GetInt("dml-batch-size")
 	bestEffort, _ := cmd.Flags().GetBool("best-effort")
+	skipMissingTables, _ := cmd.Flags().GetBool("skip-missing-tables")
 	if err := validateDiffDataInputs(configPath, rulesPath, batchSize, chunkSize, enableChunkHash); err != nil {
 		return err
 	}
@@ -64,16 +65,17 @@ func runDiffFull(cmd *cobra.Command, args []string) error {
 	log.Printf("Output directory: %s\n", diffDir)
 
 	result, err := RunFullDiff(cmd.Context(), FullDiffParams{
-		Source:        &cfg.SourceDB,
-		Target:        &cfg.TargetDB,
-		IncludeTables: cfg.IncludeTables,
-		ExcludeTables: cfg.ExcludeTables,
-		Rules:         rules.Rules,
-		BatchSize:     batchSize,
-		ChunkSize:     chunkSize,
-		DMLBatchSize:  dmlBatchSize,
-		ChunkHash:     enableChunkHash,
-		BestEffort:    bestEffort,
+		Source:            &cfg.SourceDB,
+		Target:            &cfg.TargetDB,
+		IncludeTables:     cfg.IncludeTables,
+		ExcludeTables:     cfg.ExcludeTables,
+		Rules:             rules.Rules,
+		BatchSize:         batchSize,
+		ChunkSize:         chunkSize,
+		DMLBatchSize:      dmlBatchSize,
+		ChunkHash:         enableChunkHash,
+		BestEffort:        bestEffort,
+		SkipMissingTables: skipMissingTables,
 	}, diffDir, func(message string) { log.Printf("%s\n", message) }, nil)
 	if err != nil {
 		return err
@@ -214,6 +216,7 @@ func init() {
 	diffFullCmd.Flags().Int("chunk-size", 10000, "Chunk size for hash pre-filtering")
 	diffFullCmd.Flags().Int("dml-batch-size", 1000, "Maximum rows per generated multi-row INSERT or DELETE (hard limit 10000)")
 	diffFullCmd.Flags().Bool("best-effort", false, "Continue after table errors and emit an explicitly incomplete report")
+	diffFullCmd.Flags().Bool("skip-missing-tables", false, "Skip data rules whose table does not exist on either side and log a warning list instead of failing")
 	diffFullCmd.Flags().String("migrate-dir", "", "Migration script directory; when set, also assemble a V{version}__{title} up/down pair into it")
 	diffFullCmd.Flags().String("version", "", "Migration version for --migrate-dir (dotted number, e.g. 1.0)")
 	diffFullCmd.Flags().String("title", "", "Migration title for --migrate-dir (no dots or whitespace)")

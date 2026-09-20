@@ -144,6 +144,13 @@ func (a *MySQLAdapter) GetTableDataBatchContext(ctx context.Context, table strin
 }
 
 func (a *MySQLAdapter) ExtractTable(tableName string) (*conn.Table, error) {
+	exists, err := a.baseTableExists(tableName)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("%w: %s.%s", conn.ErrTableNotFound, a.Cfg.TableSchema, tableName)
+	}
 	table := &conn.Table{
 		Name:        tableName,
 		Type:        conn.TableTypeTable,
@@ -153,7 +160,7 @@ func (a *MySQLAdapter) ExtractTable(tableName string) (*conn.Table, error) {
 		ForeignKeys: map[string]*conn.ForeignKey{},
 	}
 	// 解析列
-	err := a.extractColumns(table)
+	err = a.extractColumns(table)
 	if err != nil {
 		return nil, err
 	}
@@ -199,6 +206,20 @@ func (a *MySQLAdapter) ExtractView(viewName string) (*conn.Table, error) {
 
 	view.Comment = a.getTableComment(a.Cfg.TableSchema, viewName)
 	return view, nil
+}
+
+// baseTableExists 判定目标 schema 下是否存在同名基础表。缺失表必须显式报错，
+// 而不是返回零列空模型让上层误报「缺少主键」。
+func (a *MySQLAdapter) baseTableExists(tableName string) (bool, error) {
+	var found bool
+	err := a.Conn.QueryRow(
+		`SELECT COUNT(*) > 0 FROM information_schema.tables
+		 WHERE table_schema = ? AND table_name = ? AND table_type = 'BASE TABLE'`,
+		a.Cfg.TableSchema, tableName).Scan(&found)
+	if err != nil {
+		return false, err
+	}
+	return found, nil
 }
 
 func (a *MySQLAdapter) GetConn() *sql.DB {

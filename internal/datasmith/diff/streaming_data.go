@@ -37,6 +37,10 @@ type prepareTableModelsFunc func(pkgconfig.Rule) (*tableModels, error)
 
 type streamTableCompareFunc func(pkgconfig.Rule, *tableModels, pkgdiff.DetailedDiffErrorHandler) error
 
+// errTableSkipped 标记「按配置跳过」的表（如 --skip-missing-tables 下不存在的
+// 表）：不是失败，不进入失败清单，也不生成 DML 分节。
+var errTableSkipped = errors.New("table skipped")
+
 type tableModelCache struct {
 	db     conn.DBAdapter
 	models map[string]*conn.Table
@@ -116,6 +120,12 @@ func generateStreamingDataDiffOutputs(
 	for index, rule := range rules {
 		models, err := prepare(rule)
 		if err != nil {
+			if errors.Is(err, errTableSkipped) {
+				if onTableDone != nil {
+					onTableDone(rule, tableDiffStats{}, nil)
+				}
+				continue
+			}
 			failures, err = recordTableFailure(failures, rule.Table, err, bestEffort)
 			if err != nil {
 				return failures, err

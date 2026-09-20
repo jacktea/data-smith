@@ -45,6 +45,7 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 	chunkSize, _ := cmd.Flags().GetInt("chunk-size")
 	dmlBatchSize, _ := cmd.Flags().GetInt("dml-batch-size")
 	bestEffort, _ := cmd.Flags().GetBool("best-effort")
+	skipMissingTables, _ := cmd.Flags().GetBool("skip-missing-tables")
 	if err := validateDiffDataInputs(configPath, rulesPath, batchSize, chunkSize, enableChunkHash); err != nil {
 		return err
 	}
@@ -80,19 +81,23 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 	log.Printf("Rollback Diff file: %s\n", rollbackFile)
 
 	result, err := RunDataDiff(cmd.Context(), DataDiffParams{
-		Source:       &cfg.SourceDB,
-		Target:       &cfg.TargetDB,
-		Rules:        rules.Rules,
-		BatchSize:    batchSize,
-		ChunkSize:    chunkSize,
-		DMLBatchSize: dmlBatchSize,
-		ChunkHash:    enableChunkHash,
-		BestEffort:   bestEffort,
-		ForwardPath:  diffFile,
-		RollbackPath: rollbackFile,
+		Source:            &cfg.SourceDB,
+		Target:            &cfg.TargetDB,
+		Rules:             rules.Rules,
+		BatchSize:         batchSize,
+		ChunkSize:         chunkSize,
+		DMLBatchSize:      dmlBatchSize,
+		ChunkHash:         enableChunkHash,
+		BestEffort:        bestEffort,
+		SkipMissingTables: skipMissingTables,
+		ForwardPath:       diffFile,
+		RollbackPath:      rollbackFile,
 	}, diffDir, func(event TableProgress) {
 		if event.Phase == "log" {
 			log.Printf("%s\n", event.Error)
+		}
+		if event.Phase == "skipped" {
+			log.Printf("WARNING: %s\n", event.Error)
 		}
 	})
 	if err != nil {
@@ -108,6 +113,9 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 	}
 	if failed > 0 {
 		log.Printf("WARNING: data diff is INCOMPLETE (--best-effort); %d table(s) failed:", failed)
+	}
+	for _, name := range result.SkippedTables {
+		log.Printf("WARNING: 表 %s 不存在, 已按 --skip-missing-tables 跳过; 该表将由后续版本的迁移轮次同步\n", name)
 	}
 	return nil
 }
@@ -299,6 +307,7 @@ func init() {
 	diffDataCmd.Flags().Int("chunk-size", 10000, "Chunk size for hash pre-filtering")
 	diffDataCmd.Flags().Int("dml-batch-size", 1000, "Maximum rows per generated multi-row INSERT or DELETE (hard limit 10000)")
 	diffDataCmd.Flags().Bool("best-effort", false, "Continue after table errors and emit an explicitly incomplete report")
+	diffDataCmd.Flags().Bool("skip-missing-tables", false, "Skip rules whose table does not exist on either side and log a warning list instead of failing")
 	diffDataCmd.MarkFlagRequired("config")
 	diffDataCmd.MarkFlagRequired("rules")
 }

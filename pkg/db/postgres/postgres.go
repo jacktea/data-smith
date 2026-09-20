@@ -287,6 +287,13 @@ func (a *PostgresAdapter) GetTableDataBatchContext(ctx context.Context, table st
 }
 
 func (a *PostgresAdapter) ExtractTable(tableName string) (*conn.Table, error) {
+	exists, err := a.baseTableExists(tableName)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("%w: %s.%s", conn.ErrTableNotFound, a.Cfg.TableSchema, tableName)
+	}
 	table := &conn.Table{
 		Name:        tableName,
 		Type:        conn.TableTypeTable,
@@ -296,7 +303,7 @@ func (a *PostgresAdapter) ExtractTable(tableName string) (*conn.Table, error) {
 		ForeignKeys: map[string]*conn.ForeignKey{},
 	}
 	// 解析列
-	err := a.extractColumns(table)
+	err = a.extractColumns(table)
 	if err != nil {
 		return nil, err
 	}

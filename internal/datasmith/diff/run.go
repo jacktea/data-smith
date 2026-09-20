@@ -81,6 +81,9 @@ type DataDiffParams struct {
 	DMLBatchSize int
 	ChunkHash    bool
 	BestEffort   bool
+	// SkipMissingTables：rules 引用的表在任一侧不存在时跳过并输出 warning
+	// 清单，而不是报错中断。关闭（默认）时显式报 "table not found: X"。
+	SkipMissingTables bool
 	// ForwardPath and RollbackPath optionally override the default output file
 	// names inside dir.
 	ForwardPath  string
@@ -91,6 +94,8 @@ type DataDiffParams struct {
 type DataDiffResult struct {
 	Complete bool               `json:"complete"`
 	Tables   []TableDiffSummary `json:"tables"`
+	// SkippedTables 列出因 --skip-missing-tables 被跳过的不存在表。
+	SkippedTables []string `json:"skippedTables,omitempty"`
 }
 
 const SchemaDiffForwardFile = "schema_diff.sql"
@@ -341,6 +346,44 @@ func columnModReasons(oldCol, newCol *conn.Column) string {
 	return strings.Join(reasons, ", ")
 }
 
+// buildPrepareTableFunc 构造流式数据比对的表模型准备闭包：取目标侧与源侧
+// 表模型并按 keep 列集裁剪。开启 --skip-missing-tables 时，任一侧缺表
+// （ErrTableNotFound）登记跳过并返回 errTableSkipped；关闭时显式报错。
+func buildPrepareTableFunc(params DataDiffParams, sourceModels, targetModels *tableModelCache, markSkipped func(pkgconfig.Rule, string)) prepareTableModelsFunc {
+	return func(rule pkgconfig.Rule) (*tableModels, error) {
+		tgtTable, err := targetModels.get(rule.Table)
+		if err != nil {
+			if params.SkipMissingTables && errors.Is(err, conn.ErrTableNotFound) {
+				markSkipped(rule, "目标")
+				return nil, errTableSkipped
+			}
+			return nil, fmt.Errorf("extract target table: %w", err)
+		}
+		if tgtTable == nil {
+			return nil, fmt.Errorf("extract target table: table not found: %s", rule.Table)
+		}
+		srcTable, err := sourceModels.get(rule.Table)
+		if err != nil {
+			if params.SkipMissingTables && errors.Is(err, conn.ErrTableNotFound) {
+				markSkipped(rule, "源")
+				return nil, errTableSkipped
+			}
+			return nil, fmt.Errorf("extract source table: %w", err)
+		}
+		compareRule := pkgdiff.CreateCompareRuleColumns(tgtTable, rule.Columns, rule.ComparisonKey, rule.IgnoreColumns)
+		var effectiveCols []string
+		if allRule, ok := compareRule.(*pkgdiff.AllFieldsEqualRule); ok {
+			effectiveCols = allRule.Columns
+		} else {
+			effectiveCols = rule.ComparisonKey
+		}
+		keep := dataDiffKeepColumns(tgtTable, srcTable, effectiveCols, rule.IgnoreColumns)
+		slimTarget := slimTable(tgtTable, keep)
+		slimSource := slimTable(srcTable, intersectNames(keep, srcTable))
+		return &tableModels{target: slimTarget, source: slimSource, effectiveCols: effectiveCols}, nil
+	}
+}
+
 // RunDataDiff streams row-level comparisons rule by rule and atomically writes
 // the forward and rollback SQL pair into dir. The forward SQL aligns the source
 // database to the target database and must be executed on the source.
@@ -388,30 +431,16 @@ func RunDataDiff(ctx context.Context, params DataDiffParams, dir string, progres
 	sourceModels := newTableModelCache(srcDB)
 	targetModels := newTableModelCache(tgtDB)
 
-	prepareTable := func(rule pkgconfig.Rule) (*tableModels, error) {
-		tgtTable, err := targetModels.get(rule.Table)
-		if err != nil {
-			return nil, fmt.Errorf("extract target table: %w", err)
+	// skippedByFlag 记录因 --skip-missing-tables 被跳过的表；onTableDone
+	// 回调据此把对应条目标记为 skipped 而非 failed。
+	skippedByFlag := make(map[string]bool)
+	markSkipped := func(rule pkgconfig.Rule, side string) {
+		if !skippedByFlag[rule.Table] {
+			skippedByFlag[rule.Table] = true
+			report(TableProgress{Table: rule.Table, Phase: "skipped", Error: fmt.Sprintf("表 %s 在%s侧不存在, 已按 --skip-missing-tables 跳过", rule.Table, side)})
 		}
-		if tgtTable == nil {
-			return nil, fmt.Errorf("extract target table: table not found")
-		}
-		srcTable, err := sourceModels.get(rule.Table)
-		if err != nil {
-			return nil, fmt.Errorf("extract source table: %w", err)
-		}
-		compareRule := pkgdiff.CreateCompareRuleColumns(tgtTable, rule.Columns, rule.ComparisonKey, rule.IgnoreColumns)
-		var effectiveCols []string
-		if allRule, ok := compareRule.(*pkgdiff.AllFieldsEqualRule); ok {
-			effectiveCols = allRule.Columns
-		} else {
-			effectiveCols = rule.ComparisonKey
-		}
-		keep := dataDiffKeepColumns(tgtTable, srcTable, effectiveCols, rule.IgnoreColumns)
-		slimTarget := slimTable(tgtTable, keep)
-		slimSource := slimTable(srcTable, intersectNames(keep, srcTable))
-		return &tableModels{target: slimTarget, source: slimSource, effectiveCols: effectiveCols}, nil
 	}
+	prepareTable := buildPrepareTableFunc(params, sourceModels, targetModels, markSkipped)
 	compareTable := func(rule pkgconfig.Rule, models *tableModels, handle pkgdiff.DetailedDiffErrorHandler) error {
 		start := time.Now()
 		compareRule := pkgdiff.CreateCompareRuleColumns(models.target, rule.Columns, rule.ComparisonKey, rule.IgnoreColumns)
@@ -494,6 +523,9 @@ func RunDataDiff(ctx context.Context, params DataDiffParams, dir string, progres
 					if tableErr != nil {
 						entry.Status = "failed"
 						entry.Error = tableErr.Error()
+					} else if skippedByFlag[rule.Table] {
+						entry.Status = "skipped"
+						entry.Error = "table not found (skipped by --skip-missing-tables)"
 					}
 				},
 			)
@@ -506,5 +538,9 @@ func RunDataDiff(ctx context.Context, params DataDiffParams, dir string, progres
 	if len(failures) > 0 {
 		result.Complete = false
 	}
+	for name := range skippedByFlag {
+		result.SkippedTables = append(result.SkippedTables, name)
+	}
+	sort.Strings(result.SkippedTables)
 	return result, nil
 }

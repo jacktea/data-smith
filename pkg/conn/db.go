@@ -34,6 +34,11 @@ func ParseTableType(t string) TableType {
 	}
 }
 
+// ErrTableNotFound is returned by DBAdapter.ExtractTable when the requested
+// table does not exist in the configured schema. Callers use errors.Is to
+// distinguish a missing table from extraction failures.
+var ErrTableNotFound = errors.New("table not found")
+
 type DatabaseSchema struct {
 	Tables map[string]*Table
 	// Routines 以身份签名 name(identity_args) 为键；Sequences 以名称为键。
