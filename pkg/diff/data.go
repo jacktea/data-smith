@@ -437,10 +437,10 @@ func RowIdentityColumns(tbl *conn.Table) []string {
 	sort.Strings(indexNames)
 	for _, name := range indexNames {
 		idx := tbl.Indexes[name]
-		if idx.Unique && len(idx.Columns) > 0 {
+		if idx != nil && idx.Unique && len(idx.Columns) > 0 && idx.Where == nil && idx.Expression == nil {
 			allNotNull := true
 			for _, colName := range idx.Columns {
-				if c := tbl.Columns[colName]; c != nil && c.Nullable {
+				if c := tbl.Columns[colName]; c == nil || c.Nullable {
 					allNotNull = false
 					break
 				}

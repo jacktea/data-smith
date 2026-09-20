@@ -31,9 +31,8 @@ type FullDiffParams struct {
 }
 
 // FullDiffResult merges the schema and data projections of a full diff run.
-// SkippedTables lists data rules skipped because the table exists on only one
-// side; those changes are already covered by the schema phase. 影子模式下
-// 单侧差异已在事务内对齐，本清单恒为空。
+// SkippedTables lists explicit source-only data rules skipped because schema
+// DROP fully covers them. Target-only rules always participate in data diff.
 type FullDiffResult struct {
 	Schema        SchemaDiffSummary `json:"schema"`
 	Data          DataDiffResult    `json:"data"`
@@ -45,22 +44,18 @@ func FullDiffFileNames() []string {
 	return append(SchemaDiffFileNames(), DataDiffFileNames()...)
 }
 
-// filterSingleSidedRules drops data rules whose table exists on only one side
-// (per the schema diff: TablesAdded = tables only in target, TablesDropped =
-// tables only in source). It returns the kept rules and the skipped table
-// names in rule order.
-func filterSingleSidedRules(rules []pkgconfig.Rule, tablesAdded, tablesDropped []string) ([]pkgconfig.Rule, []string) {
-	singleSided := make(map[string]bool, len(tablesAdded)+len(tablesDropped))
-	for _, name := range tablesAdded {
-		singleSided[name] = true
-	}
+// filterSourceOnlyRules drops source-only data rules. Target-only tables stay
+// in the data phase: direct mode treats source as an empty set and emits every
+// target row as INSERT; shadow mode has already created the empty source table.
+func filterSourceOnlyRules(rules []pkgconfig.Rule, tablesDropped []string) ([]pkgconfig.Rule, []string) {
+	sourceOnly := make(map[string]bool, len(tablesDropped))
 	for _, name := range tablesDropped {
-		singleSided[name] = true
+		sourceOnly[name] = true
 	}
 	kept := make([]pkgconfig.Rule, 0, len(rules))
 	skipped := []string{}
 	for _, rule := range rules {
-		if singleSided[rule.Table] {
+		if sourceOnly[rule.Table] {
 			skipped = append(skipped, rule.Table)
 			continue
 		}
@@ -107,6 +102,12 @@ func RunFullDiff(ctx context.Context, params FullDiffParams, dir string, progres
 		return FullDiffResult{}, fmt.Errorf("connect to target DB: %w", err)
 	}
 	defer tgtDB.Close()
+	outputs, err := beginFullOutputTransaction(dir, defaultAtomicOutputOps)
+	if err != nil {
+		return FullDiffResult{}, err
+	}
+	defer func() { _ = outputs.abort() }()
+	stagingDir := outputs.stagingDir
 
 	report("=== 结构比对阶段 ===")
 	phase, err := runSchemaDiffOnAdapters(ctx, srcDB, tgtDB, SchemaDiffParams{
@@ -114,7 +115,7 @@ func RunFullDiff(ctx context.Context, params FullDiffParams, dir string, progres
 		Target:        params.Target,
 		IncludeTables: params.IncludeTables,
 		ExcludeTables: params.ExcludeTables,
-	}, dir, report)
+	}, stagingDir, report)
 	if err != nil {
 		return FullDiffResult{}, fmt.Errorf("schema diff: %w", err)
 	}
@@ -128,20 +129,22 @@ func RunFullDiff(ctx context.Context, params FullDiffParams, dir string, progres
 		report("数据比对模式: direct — 数据差异跑在未对齐结构上(仅公共列/主键列集容错); 影子两阶段仅支持 PostgreSQL source")
 	}
 
-	// 影子模式：单侧表差异已被事务内 forward DDL 消除（新增表成为空表、
-	// 删除表消失），数据比对覆盖全部规则；直接模式沿用单侧过滤——单侧表
-	// 属结构差异，已由结构比对覆盖。
-	rules := params.Rules
-	if !shadow {
-		var skipped []string
-		rules, skipped = filterSingleSidedRules(params.Rules, phase.summary.TablesAdded, phase.summary.TablesDropped)
-		result.SkippedTables = skipped
-		for _, name := range skipped {
-			report(fmt.Sprintf("跳过表 %s: 仅单侧存在(结构差异已由结构比对覆盖)", name))
-		}
+	// target-only 规则保留：影子模式在事务内创建空表，direct 模式把
+	// source 视为空集。source-only 表在两种模式都由 schema DROP 覆盖，
+	// 不能进入数据阶段（影子对齐后两侧都已不存在）。
+	rules, skipped := filterSourceOnlyRules(params.Rules, phase.summary.TablesDropped)
+	result.SkippedTables = skipped
+	for _, name := range skipped {
+		report(fmt.Sprintf("跳过表 %s: 仅 source 侧存在(由结构 DROP 覆盖)", name))
 	}
 
 	opts := dataPhaseOptions{schemaSnapshot: &phase.tables, shadow: shadow}
+	if !shadow {
+		opts.targetOnly = make(map[string]bool, len(phase.summary.TablesAdded))
+		for _, name := range phase.summary.TablesAdded {
+			opts.targetOnly[name] = true
+		}
+	}
 	var (
 		shadowTransaction *shadowTx
 		unbindShadow      func()
@@ -185,7 +188,7 @@ func RunFullDiff(ctx context.Context, params FullDiffParams, dir string, progres
 		ChunkHash:         params.ChunkHash,
 		BestEffort:        params.BestEffort,
 		SkipMissingTables: params.SkipMissingTables,
-	}, opts, dir, dataPhaseProgress(report, tableProgress))
+	}, opts, stagingDir, dataPhaseProgress(report, tableProgress))
 	if shadowPending {
 		shadowPending = false
 		rollbackErr := finishShadowDataDiff(shadowTransaction, unbindShadow, report)
@@ -200,6 +203,9 @@ func RunFullDiff(ctx context.Context, params FullDiffParams, dir string, progres
 		return FullDiffResult{}, fmt.Errorf("data diff: %w", err)
 	}
 	result.Data = dataResult
+	if err := outputs.commit(); err != nil {
+		return FullDiffResult{}, fmt.Errorf("publish full diff outputs: %w", err)
+	}
 	return result, nil
 }
 

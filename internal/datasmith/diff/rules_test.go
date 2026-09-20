@@ -66,7 +66,7 @@ func TestValidateWildcardRulesRejectsFields(t *testing.T) {
 	}
 }
 
-func TestExpandRulesDirectModeIntersection(t *testing.T) {
+func TestExpandRulesDirectModeIncludesTargetOnlyTables(t *testing.T) {
 	src := map[string]*conn.Table{
 		"orders":         table("orders", "id"),
 		"src_only":       table("src_only", "id"),
@@ -85,14 +85,17 @@ func TestExpandRulesDirectModeIntersection(t *testing.T) {
 	var logs []string
 	rules, skipped := expandRules([]pkgconfig.Rule{{Table: "*"}}, src, tgt, false, func(msg string) { logs = append(logs, msg) })
 
-	if len(rules) != 1 || rules[0].Table != "orders" {
-		t.Fatalf("expanded rules = %#v, want [orders]", rules)
+	if len(rules) != 2 || rules[0].Table != "orders" || rules[1].Table != "tgt_only" {
+		t.Fatalf("expanded rules = %#v, want [orders tgt_only]", rules)
 	}
 	joined := strings.Join(skipped, ",")
-	for _, name := range []string{"src_only", "tgt_only", "no_identity"} {
+	for _, name := range []string{"src_only", "no_identity"} {
 		if !strings.Contains(joined, name) {
 			t.Fatalf("skipped = %v, want it to contain %s", skipped, name)
 		}
+	}
+	if strings.Contains(joined, "tgt_only") {
+		t.Fatalf("target-only table with row identity must participate in direct data diff, skipped=%v", skipped)
 	}
 	if len(logs) == 0 {
 		t.Fatal("expansion must report skips")

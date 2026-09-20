@@ -153,9 +153,10 @@ func (d *postgreDialect) GenerateCreateIndexSql(t *conn.Table, idx *conn.Index) 
 		return ""
 	}
 
-	// 如果 idx.Expression 已经是完整的 CREATE INDEX 定义（如来自 pg_get_indexdef）
-	if idx.Expression != nil && strings.HasPrefix(strings.TrimSpace(strings.ToUpper(*idx.Expression)), "CREATE ") {
-		def := strings.TrimSpace(*idx.Expression)
+	// 驱动保留 pg_get_indexdef 的完整定义以无损重建；Expression 只表示
+	// 真实表达式键，避免普通唯一索引被误判为表达式索引。
+	if strings.HasPrefix(strings.TrimSpace(strings.ToUpper(idx.Definition)), "CREATE ") {
+		def := strings.TrimSpace(idx.Definition)
 		if !strings.HasSuffix(def, ";") {
 			def += ";"
 		}

@@ -208,6 +208,40 @@ func TestGenerateSchemaSQLViewCommentChangeEmitsCommentOnly(t *testing.T) {
 	}
 }
 
+func TestGenerateSchemaSQLViewDefinitionAndCommentChangeRebuildsBeforeComment(t *testing.T) {
+	view := func(definition, comment string) *conn.Table {
+		v := tableViewDef("public", "v_report", definition, "public.base")
+		v.Comment = comment
+		return v
+	}
+	src := &conn.DatabaseSchema{Tables: map[string]*conn.Table{
+		"v_report": view(`SELECT "id" FROM "public"."base"`, "旧注释"),
+	}}
+	tgt := &conn.DatabaseSchema{Tables: map[string]*conn.Table{
+		"v_report": view(`SELECT "id", "name" FROM "public"."base"`, "新注释"),
+	}}
+
+	statements, err := GenerateSchemaSQLSafe(diff.CompareSchemas(src, tgt), consts.DBTypePostgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drop := indexOfContaining(statements, `DROP VIEW "public"."v_report"`)
+	create := indexOfContaining(statements, `CREATE VIEW "public"."v_report" AS`)
+	comment := -1
+	for i := len(statements) - 1; i >= 0; i-- {
+		if strings.Contains(statements[i], `COMMENT ON VIEW "public"."v_report" IS '新注释'`) {
+			comment = i
+			break
+		}
+	}
+	if drop < 0 || create < 0 || comment < 0 {
+		t.Fatalf("missing view rebuild/comment statements: %v", statements)
+	}
+	if !(drop < create && create < comment) {
+		t.Fatalf("view definition must rebuild before its new comment is restored: %v", statements)
+	}
+}
+
 // C12：依赖闭包弹跳重建的视图在 CREATE VIEW 时携带注释，重建不丢注释。
 func TestGenerateViewDDLKeepsTableCommentOnRebuild(t *testing.T) {
 	dialect := NewDialect(consts.DBTypePostgres)

@@ -148,7 +148,8 @@
   比对; ROLLBACK`），数据比对经 `base.BaseAdapter` 新增的会话路由
   （`BindSession`，`QueryContext/QueryRow` 统一走会话或连接池）读取对齐后的
   影子结构——不落库、单连接，单侧表差异也被事务内 DDL 消除（target 独有表
-  纳入数据比对、source 独有表随 DROP 消失），数据模型仅预热 target 侧。模式
+  纳入数据比对、source 独有表随 DROP 消失），数据模型仅预热 target 侧；direct
+  模式则把 target-only 的 source 视为空集生成全量 INSERT，source-only 仅走 DROP。模式
   由 `--data-diff-mode auto|shadow|direct` 控制（auto：PostgreSQL source 且
   存在结构差异时启用）；MySQL 无事务性 DDL，auto 自动回退直接比对并告警，
   强制 shadow 对 MySQL source 显式报错（DDL 隐式提交会污染库）。影子对齐
@@ -174,9 +175,10 @@
   `schema_migrations`/`flyway_schema_history` + 配置 `excludeTables` + CLI
   `--exclude-tables`），命中规则在展开后统一过滤并计入
   `DataDiffResult.ExcludedTables`；②规则省略（`--rules` 不传或空数组）与
-  通配（表名含 `*`/`?`，仅允许 `table` 字段）展开为「两侧均存在且具有行身份
-  （`pkg/diff.RowIdentityColumns`：主键 → 非空唯一索引）的基础表」，影子模式
-  下候选为 target 全集（单侧差异已被事务内 DDL 消除），展开确定性排序、显式
+  通配（表名含 `*`/`?`，仅允许 `table` 字段）展开为「target 侧存在且具有行身份
+  （`pkg/diff.RowIdentityColumns`：主键 → 普通、完整、全列非空唯一索引）的基础表」；
+  双侧表仍要求两侧均有行身份，target-only 在影子/direct 分别使用事务空表/空行集，
+  source-only 由结构 DROP 覆盖。展开确定性排序、显式
   规则优先不重复；③发现并修复账本**从属序列**缺口：被排除表拥有的 SERIAL
   隐式序列（如 `schema_migrations_id_seq`）随表一起排除
   （`filterSequencesByOwnedTable`），否则结构产物会对账本反向生成

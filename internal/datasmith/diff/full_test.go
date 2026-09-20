@@ -60,25 +60,25 @@ func TestAssembleVersionScriptsDropsBlankSections(t *testing.T) {
 	}
 }
 
-func TestFilterSingleSidedRules(t *testing.T) {
+func TestFilterSourceOnlyRulesKeepsTargetOnlyAndSkipsSourceOnly(t *testing.T) {
 	rules := []pkgconfig.Rule{
 		{Table: "users"},
 		{Table: "orders"},
 		{Table: "new_table"},
 		{Table: "old_table"},
 	}
-	kept, skipped := filterSingleSidedRules(rules, []string{"new_table"}, []string{"old_table"})
-	if len(kept) != 2 || kept[0].Table != "users" || kept[1].Table != "orders" {
-		t.Fatalf("expected both-sided rules kept, got %v", kept)
+	kept, skipped := filterSourceOnlyRules(rules, []string{"old_table"})
+	if len(kept) != 3 || kept[0].Table != "users" || kept[1].Table != "orders" || kept[2].Table != "new_table" {
+		t.Fatalf("expected both-sided and target-only rules kept, got %v", kept)
 	}
-	if len(skipped) != 2 || skipped[0] != "new_table" || skipped[1] != "old_table" {
-		t.Fatalf("expected single-sided rules skipped in rule order, got %v", skipped)
+	if len(skipped) != 1 || skipped[0] != "old_table" {
+		t.Fatalf("expected only source-only rules skipped, got %v", skipped)
 	}
 }
 
-func TestFilterSingleSidedRulesKeepsAllWhenNoSchemaDiff(t *testing.T) {
+func TestFilterSourceOnlyRulesKeepsAllWhenNoSchemaDiff(t *testing.T) {
 	rules := []pkgconfig.Rule{{Table: "users"}, {Table: "orders"}}
-	kept, skipped := filterSingleSidedRules(rules, nil, nil)
+	kept, skipped := filterSourceOnlyRules(rules, nil)
 	if len(kept) != 2 || len(skipped) != 0 {
 		t.Fatalf("expected no filtering without schema diff, got kept=%v skipped=%v", kept, skipped)
 	}

@@ -2,17 +2,18 @@
 
 ## 目标
 
-从当前 HEAD `0742d0e` 开始，按阶段修复 `docs/code-review-2026-09-20.md` 中的发现，使 DataSmith 已声明支持的迁移能力满足：产物可执行、失败不留下可误用状态、forward 后收敛、rollback 后恢复。
+从评审起点 `0742d0e` 开始，按阶段修复 `docs/code-review-2026-09-20.md` 中的发现，使 DataSmith 已声明支持的迁移能力满足：产物可执行、失败不留下可误用状态、forward 后收敛、rollback 后恢复。
 
 本交接不要求一次扩展所有数据库对象。trigger、identity/generated column、分区和用户定义类型等新能力在现有正确性闭环完成后再排期。
 
 ## 当前进度
 
 - 阶段 1（O1、O2、O3、S2）已于 2026-09-20 完成，起始提交为 `0742d0efdd671251047feb0d50dcf9c1ce755705`。
+- 阶段 2（SP1、SP2、S3、S4）已于 2026-09-20 完成，实际起始提交为 `6e09e2a33556f0b2419de1926c7275b7a9b73165`，起始工作树干净。
 - 完整门禁已通过：gofmt、单测、race、vet、staticcheck v0.8.1、govulncheck v1.1.4、前端/Go 构建、MySQL/PostgreSQL 双库集成测试和覆盖率 gate。
-- 覆盖率：overall 74.1%、db 78.8%、diff 78.1%、sql 73.6%、migrate 75.9%、exec 88.6%。
+- 阶段 2 覆盖率：overall 74.4%（5768/7754）、db 78.9%、diff 78.6%、sql 74.4%、migrate 75.9%、exec 89.1%。
 - Web 远程认证/授权/Origin/CSRF 仍是需要产品决策的独立设计项；当前默认仅监听 loopback，显式非 loopback 会清晰告警。
-- 下一阶段：阶段 2（SP1、SP2、S3、S4）。
+- 下一阶段：阶段 3（S1、S5、SP3、SP4），先用 `codebase-design` 确定对象依赖 DAG 接口。
 
 ## 开始前
 
@@ -52,7 +53,7 @@
 - 影子事务在主路径显式 rollback 并传播错误，恢复日志只在 rollback 成功后输出。
 - 每项均有先失败后修复的回归测试；未扩展 trigger、分区、generated column 等对象能力。
 
-## 阶段 2：diff-full 正确性与原子性
+## 阶段 2：diff-full 正确性与原子性（已完成 2026-09-20）
 
 范围：报告中的 SP1、SP2、S3、S4。
 
@@ -71,6 +72,14 @@
 - 数据阶段失败、磁盘写失败和发布失败时不存在混合产物。
 
 阶段完成标准：两种数据库的单侧表迁移 forward 后二次 diff 为空；失败注入后磁盘上只有上一组完整产物或没有产物。
+
+完成记录：
+
+- 视图定义与注释独立比较，同一个 `TableDiff` 可同时携带两类变化；生成顺序由回归测试固定为先重建定义、后恢复注释。
+- target-only 在 MySQL direct 中通过空 source 适配器生成完整行 INSERT，在 PostgreSQL shadow 中使用事务内空表；显式和通配 source-only 均只由 schema DROP 处理。
+- PostgreSQL 索引完整定义与表达式元数据分离；隐式行身份排除部分索引、纯/混合表达式索引、缺列索引和可空唯一索引。
+- `diff-full` 先在同目录 staging 中生成四产物，再作为一组发布；数据阶段、写盘和发布失败注入均验证上一组产物不变且无暂存泄漏。
+- 双库集成测试执行 forward 后二次完全对比为空；同时修复 MySQL 不接受的 `--- diff` 分节标记，统一为合法 `-- diff` SQL 注释。
 
 ## 阶段 3：PostgreSQL 非表对象闭环
 
@@ -134,9 +143,7 @@ pnpm --dir web build
 
 先完整阅读 AGENTS.md、CONTEXT.md、docs/code-review-2026-09-20.md 和 docs/code-review-remediation-handoff-2026-09-20.md。确认当前 commit 和工作树状态，不要覆盖用户已有改动。
 
-使用 $tdd，执行交接文档的“阶段 2：diff-full 正确性与原子性”。每个缺陷先写能失败的回归测试，再做最小修复；维持 AGENTS.md 的所有数据库操作安全红线。不要顺带扩展 trigger、分区、generated column 等新对象能力。
+使用 $codebase-design 先确定统一对象依赖 DAG 接口，再使用 $tdd 执行交接文档的“阶段 3：PostgreSQL 非表对象闭环”。每个缺陷先写能失败的回归测试，再做最小修复；维持 AGENTS.md 的所有数据库操作安全红线。不要顺带扩展 trigger、分区、generated column 等新对象能力。
 
-阶段 2 全部完成后运行相关测试、go test、race、vet、staticcheck、govulncheck、双库集成测试、覆盖率 gate 和前端构建。更新评审/交接文档中的状态，并汇报修改文件、关键设计决定、验证结果和尚未完成的后续阶段。持续推进，不要只停在分析。
+阶段 3 全部完成后运行相关测试、go test、race、vet、staticcheck、govulncheck、双库集成测试、覆盖率 gate 和前端构建。更新评审/交接文档中的状态，并汇报修改文件、关键设计决定、验证结果和尚未完成的后续阶段。持续推进，不要只停在分析。
 ```
-
-阶段 3 的提示词需同时加入“使用 `$codebase-design` 先确定对象依赖 DAG 接口”。

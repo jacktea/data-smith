@@ -64,6 +64,7 @@ func TestBuildPrepareTableFuncSkipsMissingTablesWhenEnabled(t *testing.T) {
 		DataDiffParams{SkipMissingTables: true},
 		newTableModelCache((source)),
 		newTableModelCache((target)),
+		nil,
 		func(rule pkgconfig.Rule, side string) {
 			skipped = append(skipped, rule.Table+"@"+side)
 		},
@@ -90,6 +91,7 @@ func TestBuildPrepareTableFuncFailsOnMissingTablesByDefault(t *testing.T) {
 		DataDiffParams{},
 		newTableModelCache((source)),
 		newTableModelCache((target)),
+		nil,
 		func(rule pkgconfig.Rule, side string) { t.Fatal("no table should be marked skipped") },
 	)
 
@@ -99,5 +101,36 @@ func TestBuildPrepareTableFuncFailsOnMissingTablesByDefault(t *testing.T) {
 	}
 	if !errors.Is(err, conn.ErrTableNotFound) || !strings.Contains(err.Error(), "air_late_table") {
 		t.Fatalf("error must name the missing table via ErrTableNotFound, got %v", err)
+	}
+}
+
+func TestBuildPrepareTableFuncTreatsTargetOnlySourceAsEmptyAndKeepsFullRow(t *testing.T) {
+	targetTable := pkTable("new_table")
+	targetTable.Columns["payload"] = &conn.Column{Name: "payload", DataType: "text", Position: 2}
+	targetTable.Columns["ignored_value"] = &conn.Column{Name: "ignored_value", DataType: "text", Position: 3}
+	source := &missingAwareDB{tables: map[string]*conn.Table{}, extracts: map[string]int{}}
+	target := &missingAwareDB{tables: map[string]*conn.Table{"new_table": targetTable}, extracts: map[string]int{}}
+
+	prepare := buildPrepareTableFunc(
+		DataDiffParams{},
+		newTableModelCache(source),
+		newTableModelCache(target),
+		map[string]bool{"new_table": true},
+		func(pkgconfig.Rule, string) { t.Fatal("target-only table must not be skipped") },
+	)
+	models, err := prepare(pkgconfig.Rule{Table: "new_table", Columns: []string{"payload"}, IgnoreColumns: []string{"ignored_value"}})
+	if err != nil {
+		t.Fatalf("prepare target-only table: %v", err)
+	}
+	if models.source != nil {
+		t.Fatalf("target-only source model = %+v, want nil empty-set marker", models.source)
+	}
+	if source.extracts["new_table"] != 0 {
+		t.Fatalf("target-only table must not be extracted from source, calls=%d", source.extracts["new_table"])
+	}
+	for _, name := range []string{"id", "payload", "ignored_value"} {
+		if models.target.Columns[name] == nil {
+			t.Fatalf("target-only INSERT model omitted column %q: %+v", name, models.target.Columns)
+		}
 	}
 }

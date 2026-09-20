@@ -172,7 +172,7 @@ func generateDataDiffOutputs(
 		if len(table.sqls) == 0 {
 			continue
 		}
-		if _, err := fmt.Fprintf(rollback, "--- rollback %s \n", table.tableName); err != nil {
+		if _, err := fmt.Fprintf(rollback, "-- rollback %s \n", table.tableName); err != nil {
 			return failures, err
 		}
 		for _, statement := range table.sqls {
@@ -192,7 +192,7 @@ func generateDataDiffOutputs(
 }
 
 func writeDataDiffTable(writer io.Writer, table string, result *tableDiffResult, dialect sql.IDialect) error {
-	if _, err := fmt.Fprintf(writer, "--- diff %s \n", table); err != nil {
+	if _, err := fmt.Fprintf(writer, "-- diff %s \n", table); err != nil {
 		return err
 	}
 	for _, row := range result.diff.Dropped {

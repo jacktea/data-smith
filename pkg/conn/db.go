@@ -123,6 +123,7 @@ type Index struct {
 	Method     string  // btree, hash, gin, gist等
 	Where      *string // 部分索引的WHERE条件
 	Expression *string // 表达式索引
+	Definition string  // 驱动提取的完整定义，仅用于无损重建
 }
 
 type PrimaryKey struct {

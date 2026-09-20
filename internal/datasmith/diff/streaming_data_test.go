@@ -153,14 +153,17 @@ func TestGenerateStreamingDataDiffOutputsBatchesAndReversesRollbackTables(t *tes
 	if !strings.HasPrefix(rollback.String(), executeOnSourceHeader+"\n") {
 		t.Fatalf("rollback execution target header missing:\n%s", rollback.String())
 	}
+	if !strings.Contains(forward.String(), "\n-- diff parent \n") || strings.Contains(forward.String(), "\n--- diff") {
+		t.Fatalf("table section marker must be a valid SQL line comment:\n%s", forward.String())
+	}
 	if got := strings.Count(forward.String(), "INSERT INTO `parent`"); got != 2 {
 		t.Fatalf("bounded batch statement count = %d, want 2\n%s", got, forward.String())
 	}
 	if strings.Contains(forward.String(), "`note` =") {
 		t.Fatalf("UPDATE wrote unchanged column:\n%s", forward.String())
 	}
-	child := strings.Index(rollback.String(), "--- rollback child")
-	parent := strings.Index(rollback.String(), "--- rollback parent")
+	child := strings.Index(rollback.String(), "-- rollback child")
+	parent := strings.Index(rollback.String(), "-- rollback parent")
 	if child < 0 || parent < 0 || child > parent {
 		t.Fatalf("rollback tables are not reverse-rule ordered:\n%s", rollback.String())
 	}
@@ -197,10 +200,10 @@ func TestGenerateStreamingDataDiffOutputsBestEffortDiscardsFailedTablePartialSQL
 	if len(failures) != 2 || failures[0].table != "bad_a" || failures[1].table != "bad_b" {
 		t.Fatalf("failures = %#v", failures)
 	}
-	if strings.Contains(forward.String(), "--- diff bad_") || strings.Contains(forward.String(), "'bad_") {
+	if strings.Contains(forward.String(), "-- diff bad_") || strings.Contains(forward.String(), "'bad_") {
 		t.Fatalf("failed table partial SQL was published:\n%s", forward.String())
 	}
-	if !strings.Contains(forward.String(), "--- diff good") || !strings.Contains(forward.String(), "DATASMITH RESULT: INCOMPLETE (--best-effort); 2 TABLE(S) FAILED") {
+	if !strings.Contains(forward.String(), "-- diff good") || !strings.Contains(forward.String(), "DATASMITH RESULT: INCOMPLETE (--best-effort); 2 TABLE(S) FAILED") {
 		t.Fatalf("successful table or incomplete report missing:\n%s", forward.String())
 	}
 	matches, err := filepath.Glob(filepath.Join(spoolParent, ".datasmith-diff-spool-*"))

@@ -122,6 +122,40 @@ func TestCompareSchemasViewCommentOnlyChange(t *testing.T) {
 	}
 }
 
+func TestCompareSchemasViewDefinitionAndCommentChange(t *testing.T) {
+	view := func(definition, comment string) *conn.Table {
+		return &conn.Table{
+			Name:    "v_report",
+			Schema:  "public",
+			Type:    conn.TableTypeView,
+			Comment: comment,
+			ViewDefinition: &conn.ViewDefinition{
+				SelectStatement: definition,
+				Dependencies:    []string{"public.base"},
+			},
+		}
+	}
+
+	src := &conn.DatabaseSchema{Tables: map[string]*conn.Table{
+		"v_report": view(`SELECT "id" FROM "public"."base"`, "旧注释"),
+	}}
+	tgt := &conn.DatabaseSchema{Tables: map[string]*conn.Table{
+		"v_report": view(`SELECT "id", "name" FROM "public"."base"`, "新注释"),
+	}}
+
+	delta := CompareSchemas(src, tgt)
+	if len(delta.TablesModified) != 1 {
+		t.Fatalf("expected one modified view, got %+v", delta.TablesModified)
+	}
+	modified := delta.TablesModified[0]
+	if modified.ViewDefinitionChange == nil {
+		t.Fatal("definition and comment change must retain ViewDefinitionChange")
+	}
+	if modified.CommentChange == nil || modified.CommentChange.Old != "旧注释" || modified.CommentChange.New != "新注释" {
+		t.Fatalf("definition and comment change must retain CommentChange, got %+v", modified.CommentChange)
+	}
+}
+
 // C13：主键背书索引名不同不构成表差异（生命周期跟随主键约束，与生成层
 // F1 语义对齐）；主键列集差异仍由 PrimaryKeyChange 检出；非背书索引的
 // 名称判异不受影响。

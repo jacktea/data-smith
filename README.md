@@ -196,7 +196,9 @@ PostgreSQL 且存在结构差异时，先把结构正向 DDL 应用在 source �
 （加列/删列/建表）轮的 up 一次执行即可对齐结构与数据，无需人工预对齐。
 影子对齐失败会直接报错（说明 forward 产物在真实结构上不可执行），不会静默
 降级。MySQL 无事务性 DDL，自动回退为直接比对（公共列/主键列集的漂移容错）
-并输出告警；`--data-diff-mode shadow` 强制影子（仅 PostgreSQL source），
+并输出告警；直接模式中的 target-only 表把 source 视为空集并生成全量 INSERT，
+source-only 表只由结构 DROP 处理。四份产物先完整写入同目录暂存区，全部成功后
+作为一组发布，失败时保留上一组完整产物。`--data-diff-mode shadow` 强制影子（仅 PostgreSQL source），
 `direct` 强制禁用。Web 控制台的「完全比对」页在高级参数中提供同一开关
 （数据比对模式：自动/强制影子事务/直接比对，默认自动），任务参数与日志
 记录生效模式，引擎语义（含 MySQL 拒绝强制影子）与 CLI 完全一致。

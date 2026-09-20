@@ -71,8 +71,8 @@ func validateWildcardRules(rules []pkgconfig.Rule) error {
 // 基础表集合：
 //   - 影子模式（结构 forward 已在事务内对齐 source）：候选为 target 全部
 //     基础表，行身份以 target 侧为准（对齐后两侧结构一致）；
-//   - 直接模式：候选为两侧交集，且两侧均具有行身份；单侧表属结构差异，
-//     无行身份表不可比对，均跳过并告警。
+//   - 直接模式：target-only 表以 source 空集参与，source-only 表由 schema
+//     DROP 覆盖；双侧表要求两侧均具有行身份。
 //
 // 显式（非通配）规则原样保留，排除过滤在之后统一进行。
 func expandRules(rules []pkgconfig.Rule, srcTables, tgtTables map[string]*conn.Table, shadow bool, report func(string)) ([]pkgconfig.Rule, []string) {
@@ -127,12 +127,8 @@ func expandRules(rules []pkgconfig.Rule, srcTables, tgtTables map[string]*conn.T
 		tgtTable := tgtTables[name]
 		srcTable := srcTables[name]
 		if srcTable == nil {
-			if !shadow {
-				log("跳过表 %s: 仅 target 侧存在(结构差异已由结构比对覆盖)", name)
-				skipped = append(skipped, name)
-				continue
-			}
-			// 影子模式：forward DDL 已在事务内补齐该表（空表），行身份以 target 为准。
+			// 影子模式由 forward DDL 补齐空表；direct 模式把 source 视为空集。
+			// 两种模式都以 target 模型的行身份与列集生成全量 INSERT。
 			if !hasIdentity(tgtTable) {
 				log("跳过表 %s: 无行身份(缺主键与非空唯一索引)", name)
 				skipped = append(skipped, name)

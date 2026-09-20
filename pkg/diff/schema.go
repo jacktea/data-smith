@@ -253,31 +253,29 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 		if src.ViewDefinition == nil || tgt.ViewDefinition == nil {
 			return nil
 		}
-		// 视图注释（C12）：定义相等后追加比较，仅注释差异生成 COMMENT 语句
-		// 而非整组删建。MySQL 视图无注释（提取为空），比较自然不触发。
+		d := &TableDiff{
+			SourceTable: src,
+			TargetTable: tgt,
+			Table:       tgt,
+		}
+		// 视图定义与注释是两个独立维度。两者同时变化时必须同时保留，
+		// 让生成层先重建定义、再恢复新注释。
 		if !equalTableComment(src.Comment, tgt.Comment) {
-			return &TableDiff{
-				SourceTable: src,
-				TargetTable: tgt,
-				Table:       tgt,
-				CommentChange: &CommentDiff{
-					Old: src.Comment,
-					New: tgt.Comment,
-				},
+			d.CommentChange = &CommentDiff{
+				Old: src.Comment,
+				New: tgt.Comment,
 			}
 		}
 		if !equalViewDefinition(src.ViewDefinition, tgt.ViewDefinition) {
-			return &TableDiff{
-				SourceTable: src,
-				TargetTable: tgt,
-				Table:       tgt,
-				ViewDefinitionChange: &ViewDefinitionDiff{
-					Old: src.ViewDefinition,
-					New: tgt.ViewDefinition,
-				},
+			d.ViewDefinitionChange = &ViewDefinitionDiff{
+				Old: src.ViewDefinition,
+				New: tgt.ViewDefinition,
 			}
 		}
-		return nil
+		if d.CommentChange == nil && d.ViewDefinitionChange == nil {
+			return nil
+		}
+		return d
 	}
 	d := &TableDiff{
 		SourceTable: src,
@@ -571,6 +569,9 @@ func equalIndex(a, b *conn.Index) bool {
 	} else if a.Expression == nil || b.Expression == nil {
 		return false
 	} else if *a.Expression != *b.Expression {
+		return false
+	}
+	if a.Definition != b.Definition {
 		return false
 	}
 	return true

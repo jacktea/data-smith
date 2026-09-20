@@ -409,7 +409,7 @@ func columnModReasons(oldCol, newCol *conn.Column) string {
 // buildPrepareTableFunc 构造流式数据比对的表模型准备闭包：取目标侧与源侧
 // 表模型并按 keep 列集裁剪。开启 --skip-missing-tables 时，任一侧缺表
 // （ErrTableNotFound）登记跳过并返回 errTableSkipped；关闭时显式报错。
-func buildPrepareTableFunc(params DataDiffParams, sourceModels, targetModels *tableModelCache, markSkipped func(pkgconfig.Rule, string)) prepareTableModelsFunc {
+func buildPrepareTableFunc(params DataDiffParams, sourceModels, targetModels *tableModelCache, targetOnly map[string]bool, markSkipped func(pkgconfig.Rule, string)) prepareTableModelsFunc {
 	return func(rule pkgconfig.Rule) (*tableModels, error) {
 		tgtTable, err := targetModels.get(rule.Table)
 		if err != nil {
@@ -422,13 +422,16 @@ func buildPrepareTableFunc(params DataDiffParams, sourceModels, targetModels *ta
 		if tgtTable == nil {
 			return nil, fmt.Errorf("extract target table: table not found: %s", rule.Table)
 		}
-		srcTable, err := sourceModels.get(rule.Table)
-		if err != nil {
-			if params.SkipMissingTables && errors.Is(err, conn.ErrTableNotFound) {
-				markSkipped(rule, "源")
-				return nil, errTableSkipped
+		var srcTable *conn.Table
+		if !targetOnly[rule.Table] {
+			srcTable, err = sourceModels.get(rule.Table)
+			if err != nil {
+				if params.SkipMissingTables && errors.Is(err, conn.ErrTableNotFound) {
+					markSkipped(rule, "源")
+					return nil, errTableSkipped
+				}
+				return nil, fmt.Errorf("extract source table: %w", err)
 			}
-			return nil, fmt.Errorf("extract source table: %w", err)
 		}
 		compareRule := pkgdiff.CreateCompareRuleColumns(tgtTable, rule.Columns, rule.ComparisonKey, rule.IgnoreColumns)
 		var effectiveCols []string
@@ -438,6 +441,13 @@ func buildPrepareTableFunc(params DataDiffParams, sourceModels, targetModels *ta
 			effectiveCols = rule.ComparisonKey
 		}
 		keep := dataDiffKeepColumns(tgtTable, srcTable, effectiveCols, rule.ComparisonKey, rule.IgnoreColumns)
+		if targetOnly[rule.Table] {
+			// source 为空集时每行都是 INSERT；读取完整 target 行，避免遗漏
+			// ignored/非比较列导致 NOT NULL 或默认值语义丢失。
+			for name := range tgtTable.Columns {
+				keep[name] = true
+			}
+		}
 		slimTarget := slimTable(tgtTable, keep)
 		// C4a：无键表按显式业务键比对时，把业务键注入裁剪后的 target 模型
 		// 作为行定位键，UPDATE/DELETE 以业务键定位行；否则生成层回退全列
@@ -497,6 +507,22 @@ func RunDataDiff(ctx context.Context, params DataDiffParams, dir string, progres
 type dataPhaseOptions struct {
 	schemaSnapshot *schemaPair
 	shadow         bool
+	targetOnly     map[string]bool
+}
+
+// emptyTableDataAdapter exposes an empty row set while retaining the source
+// adapter's connection/configuration behavior. It is used only for target-only
+// tables discovered by diff-full's schema phase.
+type emptyTableDataAdapter struct {
+	conn.DBAdapter
+}
+
+func (emptyTableDataAdapter) GetTableDataBatch(string, []string, []string, []any, int) ([]conn.Record, error) {
+	return nil, nil
+}
+
+func (emptyTableDataAdapter) GetTableDataBatchContext(context.Context, string, []string, []string, []any, int) ([]conn.Record, error) {
+	return nil, nil
 }
 
 // runDataDiffOnAdapters 在已打开的连接对上执行数据比对。规则先展开（省略/
@@ -551,15 +577,19 @@ func runDataDiffOnAdapters(ctx context.Context, srcDB, tgtDB conn.DBAdapter, par
 			report(TableProgress{Table: rule.Table, Phase: "skipped", Error: fmt.Sprintf("表 %s 在%s侧不存在, 已按 --skip-missing-tables 跳过", rule.Table, side)})
 		}
 	}
-	prepareTable := buildPrepareTableFunc(params, sourceModels, targetModels, markSkipped)
+	prepareTable := buildPrepareTableFunc(params, sourceModels, targetModels, opts.targetOnly, markSkipped)
 	compareTable := func(rule pkgconfig.Rule, models *tableModels, handle pkgdiff.DetailedDiffErrorHandler) error {
 		start := time.Now()
 		compareRule := pkgdiff.CreateCompareRuleColumns(models.target, rule.Columns, rule.ComparisonKey, rule.IgnoreColumns)
+		compareSource := srcDB
+		if opts.targetOnly[rule.Table] {
+			compareSource = emptyTableDataAdapter{DBAdapter: srcDB}
+		}
 		var compareErr error
 		if params.ChunkHash {
 			compareErr = pkgdiff.StreamCompareDataWithChunkFilterAndTableContext(
 				ctx,
-				srcDB,
+				compareSource,
 				tgtDB,
 				compareRule,
 				models.target,
@@ -570,7 +600,7 @@ func runDataDiffOnAdapters(ctx context.Context, srcDB, tgtDB conn.DBAdapter, par
 		} else {
 			compareErr = pkgdiff.StreamCompareDataDetailedWithTableContext(
 				ctx,
-				srcDB,
+				compareSource,
 				tgtDB,
 				compareRule,
 				models.target,

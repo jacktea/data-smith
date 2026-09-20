@@ -52,3 +52,61 @@ func TestRowIdentityColumnsNone(t *testing.T) {
 		t.Fatalf("nullable unique index must not count as identity, got %v", got)
 	}
 }
+
+func TestRowIdentityColumnsRejectsNonOrdinaryOrIncompleteUniqueIndexes(t *testing.T) {
+	where := "deleted_at IS NULL"
+	expression := "lower(email)"
+	columns := map[string]*conn.Column{
+		"tenant": {Name: "tenant", Nullable: false},
+		"email":  {Name: "email", Nullable: false},
+	}
+	tests := []struct {
+		name  string
+		index *conn.Index
+	}{
+		{
+			name:  "partial index",
+			index: &conn.Index{Name: "uq_active_email", Unique: true, Columns: []string{"email"}, Where: &where},
+		},
+		{
+			name:  "pure expression index",
+			index: &conn.Index{Name: "uq_lower_email", Unique: true, Expression: &expression},
+		},
+		{
+			name:  "mixed expression index",
+			index: &conn.Index{Name: "uq_tenant_lower_email", Unique: true, Columns: []string{"tenant"}, Expression: &expression},
+		},
+		{
+			name:  "missing metadata column",
+			index: &conn.Index{Name: "uq_missing", Unique: true, Columns: []string{"tenant", "missing"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl := &conn.Table{Columns: columns, Indexes: map[string]*conn.Index{tt.index.Name: tt.index}}
+			if got := RowIdentityColumns(tbl); got != nil {
+				t.Fatalf("RowIdentityColumns = %v, want nil for %+v", got, tt.index)
+			}
+		})
+	}
+}
+
+func TestRowIdentityColumnsAcceptsOrdinaryPostgresUniqueIndexDefinition(t *testing.T) {
+	tbl := &conn.Table{
+		Columns: map[string]*conn.Column{
+			"email": {Name: "email", Nullable: false},
+		},
+		Indexes: map[string]*conn.Index{
+			"uq_email": {
+				Name:       "uq_email",
+				Unique:     true,
+				Columns:    []string{"email"},
+				Definition: `CREATE UNIQUE INDEX uq_email ON public.users USING btree (email)`,
+			},
+		},
+	}
+	got := RowIdentityColumns(tbl)
+	if len(got) != 1 || got[0] != "email" {
+		t.Fatalf("RowIdentityColumns = %v, want ordinary PostgreSQL unique column", got)
+	}
+}

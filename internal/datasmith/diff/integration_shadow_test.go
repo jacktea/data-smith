@@ -71,8 +71,10 @@ func TestFullDiffShadowTwoPhaseOnPostgres(t *testing.T) {
 	// source 落后一版且带账本表（migrate 引擎账本，必须与 diff 共存）。
 	execShadow(t, srcDB,
 		"CREATE TABLE t_item (id BIGINT PRIMARY KEY, name TEXT NOT NULL)",
+		"CREATE TABLE t_old (id BIGINT PRIMARY KEY, label TEXT NOT NULL)",
 		"CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT now())",
 		"INSERT INTO t_item VALUES (1, 'a'), (9, 'legacy')",
+		"INSERT INTO t_old VALUES (8, 'legacy table')",
 		"INSERT INTO schema_migrations VALUES ('V1', now())",
 	)
 
@@ -114,6 +116,9 @@ func TestFullDiffShadowTwoPhaseOnPostgres(t *testing.T) {
 	if exists, err := shadowHasTable(srcDB, "t_new"); err != nil || exists {
 		t.Fatalf("source must be untouched after rollback (t_new exists=%v err=%v)", exists, err)
 	}
+	if exists, err := shadowHasTable(srcDB, "t_old"); err != nil || !exists {
+		t.Fatalf("source must retain source-only t_old after shadow rollback (exists=%v err=%v)", exists, err)
+	}
 	if count := shadowCount(t, srcDB, "t_item WHERE id = 2"); count != 0 {
 		t.Fatalf("source row 2 must not exist after rollback, got %d", count)
 	}
@@ -146,6 +151,37 @@ func TestFullDiffShadowTwoPhaseOnPostgres(t *testing.T) {
 		t.Fatalf("source must still own the notes column before applying up (exists=%v err=%v)", column, err)
 	}
 	applyForward(t, ctx, srcAdapter, dropDir)
+	assertClosedLoop(t, ctx, srcCfg, tgtCfg)
+
+	// —— 显式规则单侧表：target-only 全量 INSERT，source-only 仅 schema DROP ——
+	execShadow(t, tgtDB,
+		"CREATE TABLE t_explicit_new (id BIGINT PRIMARY KEY, label TEXT NOT NULL)",
+		"INSERT INTO t_explicit_new VALUES (21, 'explicit target')",
+	)
+	execShadow(t, srcDB,
+		"CREATE TABLE t_explicit_old (id BIGINT PRIMARY KEY, label TEXT NOT NULL)",
+		"INSERT INTO t_explicit_old VALUES (22, 'explicit source')",
+	)
+	explicitDir := t.TempDir()
+	explicit, err := RunFullDiff(ctx, FullDiffParams{
+		Source: srcCfg,
+		Target: tgtCfg,
+		Rules: []pkgconfig.Rule{
+			{Table: "t_explicit_new"},
+			{Table: "t_explicit_old"},
+		},
+		DataDiffMode: DataDiffModeShadow,
+		BatchSize:    100,
+		DMLBatchSize: 100,
+	}, explicitDir, func(message string) { t.Log(message) }, nil)
+	if err != nil {
+		t.Fatalf("explicit single-sided shadow full diff: %v", err)
+	}
+	if len(explicit.SkippedTables) != 1 || explicit.SkippedTables[0] != "t_explicit_old" {
+		t.Fatalf("explicit source-only skips = %v, want [t_explicit_old]", explicit.SkippedTables)
+	}
+	assertTargetOnlyRows(t, explicit.Data, "t_explicit_new")
+	applyForward(t, ctx, srcAdapter, explicitDir)
 	assertClosedLoop(t, ctx, srcCfg, tgtCfg)
 }
 
@@ -194,8 +230,8 @@ func assertShadowSchemaSummary(t *testing.T, result FullDiffResult) {
 	if cols := result.Schema.TablesModified[0].ColumnsAdded; len(cols) != 1 || cols[0] != "notes" {
 		t.Fatalf("columns added = %v, want [notes]", cols)
 	}
-	if len(result.Schema.TablesDropped) != 0 {
-		t.Fatalf("tables dropped = %v, want none (schema_migrations is excluded)", result.Schema.TablesDropped)
+	if len(result.Schema.TablesDropped) != 1 || result.Schema.TablesDropped[0] != "t_old" {
+		t.Fatalf("tables dropped = %v, want [t_old] (schema_migrations is excluded)", result.Schema.TablesDropped)
 	}
 }
 
@@ -216,6 +252,9 @@ func assertShadowDataSummary(t *testing.T, result FullDiffResult) {
 	fresh, ok := byTable["t_new"]
 	if !ok || fresh.Added != 1 {
 		t.Fatalf("t_new diff = %+v, want +1 (shadow mode covers target-only tables)", fresh)
+	}
+	if _, ok := byTable["t_old"]; ok {
+		t.Fatalf("source-only t_old must be handled by schema DROP, data tables=%v", result.Data.Tables)
 	}
 	// 账本表在结构阶段即被默认排除（filterTables），不会进入影子数据比对
 	// 的候选，也不会出现在 forward DDL 中——这正是与 migrate-script 共存的

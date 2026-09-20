@@ -153,8 +153,8 @@ func generateStreamingDataDiffOutputs(
 		}
 
 		stream := newTableDMLStream(tableForward, rollbackFile, dialect, models, dmlBatchSize)
-		if _, err = fmt.Fprintf(tableForward, "--- diff %s \n", rule.Table); err == nil {
-			_, err = fmt.Fprintf(rollbackFile, "--- rollback %s \n", rule.Table)
+		if _, err = fmt.Fprintf(tableForward, "-- diff %s \n", rule.Table); err == nil {
+			_, err = fmt.Fprintf(rollbackFile, "-- rollback %s \n", rule.Table)
 		}
 		if err == nil {
 			err = compare(rule, models, stream.handle)

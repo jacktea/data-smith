@@ -563,10 +563,11 @@ func (a *PostgresAdapter) extractIndexes(table *conn.Table) error {
 		if whereClause.Valid {
 			idx.Where = &whereClause.String
 		}
-		if indexDef.Valid && indexDef.String != "" {
-			idx.Expression = &indexDef.String
-		} else if expr.Valid && expr.String != "" {
+		if expr.Valid && expr.String != "" {
 			idx.Expression = &expr.String
+		}
+		if indexDef.Valid {
+			idx.Definition = indexDef.String
 		}
 		table.Indexes[idx.Name] = &idx
 	}

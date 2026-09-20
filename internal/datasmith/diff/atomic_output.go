@@ -48,6 +48,54 @@ type finalBackup struct {
 	existed    bool
 }
 
+type stagedFinal struct {
+	temp  string
+	final string
+	label string
+}
+
+type fullOutputTransaction struct {
+	stagingDir string
+	finalDir   string
+	ops        atomicOutputOps
+}
+
+func beginFullOutputTransaction(finalDir string, ops atomicOutputOps) (*fullOutputTransaction, error) {
+	finalDir = filepath.Clean(finalDir)
+	stagingDir, err := os.MkdirTemp(finalDir, ".datasmith-full-*")
+	if err != nil {
+		return nil, fmt.Errorf("create full-diff staging directory: %w", err)
+	}
+	return &fullOutputTransaction{stagingDir: stagingDir, finalDir: finalDir, ops: ops}, nil
+}
+
+func (t *fullOutputTransaction) commit() error {
+	outputs := make([]stagedFinal, 0, len(FullDiffFileNames()))
+	for _, name := range FullDiffFileNames() {
+		tempPath := filepath.Join(t.stagingDir, name)
+		if _, err := t.ops.stat(tempPath); err != nil {
+			return fmt.Errorf("verify staged full-diff output %s: %w", name, err)
+		}
+		outputs = append(outputs, stagedFinal{
+			temp:  tempPath,
+			final: filepath.Join(t.finalDir, name),
+			label: name,
+		})
+	}
+	if err := commitStagedOutputs(outputs, t.ops); err != nil {
+		return err
+	}
+	_ = os.RemoveAll(t.stagingDir)
+	return nil
+}
+
+func (t *fullOutputTransaction) abort() error {
+	if t == nil || t.stagingDir == "" {
+		return nil
+	}
+	return os.RemoveAll(t.stagingDir)
+}
+
 func writeAtomicPair(forwardPath, rollbackPath string, write func(io.Writer, io.Writer) error) error {
 	return writeAtomicPairWithOps(forwardPath, rollbackPath, write, defaultAtomicOutputOps)
 }
@@ -143,37 +191,38 @@ func abortStagedOutputs(ops atomicOutputOps, outputs ...*stagedOutput) error {
 }
 
 func commitStagedPair(forwardTemp, forwardFinal, rollbackTemp, rollbackFinal string, ops atomicOutputOps) error {
-	forwardBackup, err := backupFinal(forwardFinal, ops)
-	if err != nil {
-		return fmt.Errorf("prepare forward output replacement: %w", err)
-	}
-	rollbackBackup, err := backupFinal(rollbackFinal, ops)
-	if err != nil {
-		return errors.Join(
-			fmt.Errorf("prepare rollback output replacement: %w", err),
-			restoreFinals(ops, forwardBackup),
-		)
-	}
+	return commitStagedOutputs([]stagedFinal{
+		{temp: forwardTemp, final: forwardFinal, label: "forward output"},
+		{temp: rollbackTemp, final: rollbackFinal, label: "rollback output"},
+	}, ops)
+}
 
-	backups := []finalBackup{forwardBackup, rollbackBackup}
-	if err := ops.rename(forwardTemp, forwardFinal); err != nil {
-		return errors.Join(
-			fmt.Errorf("publish forward output: %w", err),
-			restoreFinals(ops, backups...),
-		)
+func commitStagedOutputs(outputs []stagedFinal, ops atomicOutputOps) error {
+	backups := make([]finalBackup, 0, len(outputs))
+	for _, output := range outputs {
+		backup, err := backupFinal(output.final, ops)
+		if err != nil {
+			return errors.Join(
+				fmt.Errorf("prepare %s replacement: %w", output.label, err),
+				restoreFinals(ops, backups...),
+			)
+		}
+		backups = append(backups, backup)
 	}
-	if err := ops.rename(rollbackTemp, rollbackFinal); err != nil {
-		return errors.Join(
-			fmt.Errorf("publish rollback output: %w", err),
-			restoreFinals(ops, backups...),
-		)
+	for _, output := range outputs {
+		if err := ops.rename(output.temp, output.final); err != nil {
+			return errors.Join(
+				fmt.Errorf("publish %s: %w", output.label, err),
+				restoreFinals(ops, backups...),
+			)
+		}
 	}
-	if err := syncOutputDirs(ops, forwardFinal, rollbackFinal); err != nil {
+	if err := syncOutputDirs(ops, finalPaths(backups)...); err != nil {
 		return errors.Join(err, restoreFinals(ops, backups...))
 	}
 
 	// The final files are durable at this point. Backup cleanup cannot make the
-	// committed pair partial, so cleanup is deliberately best-effort.
+	// committed group partial, so cleanup is deliberately best-effort.
 	for _, backup := range backups {
 		if backup.existed {
 			_ = removeIfExists(ops, backup.backupPath)

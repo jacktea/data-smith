@@ -206,6 +206,108 @@ func TestAtomicPairSuccessReplacesBothFinals(t *testing.T) {
 	assertNoTemporaryOutputs(t, dir)
 }
 
+func TestFullOutputTransactionDataPhaseFailurePreservesPreviousGeneration(t *testing.T) {
+	dir := t.TempDir()
+	writeOldFullFinals(t, dir)
+	tx, err := beginFullOutputTransaction(dir, defaultAtomicOutputOps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range SchemaDiffFileNames() {
+		writeArtifact(t, tx.stagingDir, name, "new "+name)
+	}
+	if err := tx.abort(); err != nil {
+		t.Fatalf("abort after injected data-phase failure: %v", err)
+	}
+	assertOldFullFinals(t, dir)
+	assertNoTemporaryOutputs(t, dir)
+}
+
+func TestFullOutputTransactionDiskWriteFailurePreservesPreviousGeneration(t *testing.T) {
+	dir := t.TempDir()
+	writeOldFullFinals(t, dir)
+	tx, err := beginFullOutputTransaction(dir, defaultAtomicOutputOps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	faultOps := defaultAtomicOutputOps
+	created := 0
+	faultOps.createTemp = func(dir, pattern string) (atomicOutputFile, error) {
+		file, err := os.CreateTemp(dir, pattern)
+		if err != nil {
+			return nil, err
+		}
+		created++
+		wrapped := &faultAtomicFile{atomicOutputFile: file}
+		if created == 1 {
+			wrapped.writeErr = errors.New("injected full-diff disk write failure")
+		}
+		return wrapped, nil
+	}
+	err = writeAtomicPairWithOps(
+		filepath.Join(tx.stagingDir, DataDiffForwardFile),
+		filepath.Join(tx.stagingDir, DataDiffRollbackFile),
+		func(forward, rollback io.Writer) error {
+			if _, err := fmt.Fprintln(forward, "new data forward"); err != nil {
+				return err
+			}
+			_, err := fmt.Fprintln(rollback, "new data rollback")
+			return err
+		},
+		faultOps,
+	)
+	if err == nil || !strings.Contains(err.Error(), "injected full-diff disk write failure") {
+		t.Fatalf("expected staged disk write failure, got %v", err)
+	}
+	if err := tx.abort(); err != nil {
+		t.Fatalf("abort after injected disk write failure: %v", err)
+	}
+	assertOldFullFinals(t, dir)
+	assertNoTemporaryOutputs(t, dir)
+}
+
+func TestFullOutputTransactionPublishFailureRestoresAllFourFinals(t *testing.T) {
+	dir := t.TempDir()
+	writeOldFullFinals(t, dir)
+	ops := defaultAtomicOutputOps
+	ops.rename = func(oldPath, newPath string) error {
+		if filepath.Base(newPath) == DataDiffForwardFile && strings.Contains(oldPath, ".datasmith-full-") {
+			return errors.New("injected third publish failure")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	tx, err := beginFullOutputTransaction(dir, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range FullDiffFileNames() {
+		writeArtifact(t, tx.stagingDir, name, "new "+name)
+	}
+	err = tx.commit()
+	if err == nil || !strings.Contains(err.Error(), "injected third publish failure") {
+		t.Fatalf("expected publish failure, got %v", err)
+	}
+	if err := tx.abort(); err != nil {
+		t.Fatalf("abort after publish failure: %v", err)
+	}
+	assertOldFullFinals(t, dir)
+	assertNoTemporaryOutputs(t, dir)
+}
+
+func writeOldFullFinals(t *testing.T, dir string) {
+	t.Helper()
+	for _, name := range FullDiffFileNames() {
+		writeArtifact(t, dir, name, "old "+name)
+	}
+}
+
+func assertOldFullFinals(t *testing.T, dir string) {
+	t.Helper()
+	for _, name := range FullDiffFileNames() {
+		assertFileContent(t, filepath.Join(dir, name), "old "+name)
+	}
+}
+
 func writeOldFinals(t *testing.T, forward, rollback string) {
 	t.Helper()
 	if err := os.WriteFile(forward, []byte("old forward"), 0o600); err != nil {
@@ -240,7 +342,7 @@ func assertNoTemporaryOutputs(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if strings.Contains(entry.Name(), ".tmp-") || strings.Contains(entry.Name(), ".backup-") {
+		if strings.Contains(entry.Name(), ".tmp-") || strings.Contains(entry.Name(), ".backup-") || strings.Contains(entry.Name(), ".datasmith-full-") {
 			t.Fatalf("temporary output was not cleaned up: %s", entry.Name())
 		}
 	}
