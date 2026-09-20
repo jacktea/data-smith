@@ -92,13 +92,140 @@ func buildPostgresDSN(cfg *config.ConnConfig) string {
 }
 
 func (a *PostgresAdapter) ReadSchema() (*conn.DatabaseSchema, error) {
-	dbSchema := &conn.DatabaseSchema{Tables: map[string]*conn.Table{}}
+	dbSchema := &conn.DatabaseSchema{
+		Tables:    map[string]*conn.Table{},
+		Routines:  map[string]*conn.Routine{},
+		Sequences: map[string]*conn.Sequence{},
+	}
 	tables, err := a.queryTables()
 	if err != nil {
 		return nil, err
 	}
 	dbSchema.Tables = tables
+	routines, err := a.ReadRoutines()
+	if err != nil {
+		return nil, err
+	}
+	dbSchema.Routines = routines
+	sequences, err := a.ReadSequences()
+	if err != nil {
+		return nil, err
+	}
+	dbSchema.Sequences = sequences
 	return dbSchema, nil
+}
+
+// ReadRoutines 提取当前 schema 下的普通函数（prokind='f'，含触发器函数）与
+// 存储过程（prokind='p'），键为身份签名 name(identity_args)。聚合函数
+// （prokind='a'）与窗口函数（prokind='w'）无法经 pg_get_functiondef 还原，
+// 首版明确排除；扩展自带的例程（pg_depend deptype='e'）一并排除。
+func (a *PostgresAdapter) ReadRoutines() (map[string]*conn.Routine, error) {
+	query := `
+		SELECT
+			p.proname,
+			p.prokind,
+			pg_get_function_identity_arguments(p.oid),
+			pg_get_functiondef(p.oid)
+		FROM pg_catalog.pg_proc p
+		JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname = $1
+		  AND p.prokind IN ('f', 'p')
+		  AND NOT EXISTS (
+			SELECT 1 FROM pg_catalog.pg_depend d
+			WHERE d.classid = 'pg_catalog.pg_proc'::regclass
+			  AND d.objid = p.oid
+			  AND d.deptype = 'e'
+		  )
+		ORDER BY p.proname
+	`
+	rows, err := a.Conn.Query(query, a.Cfg.TableSchema)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	routines := make(map[string]*conn.Routine)
+	for rows.Next() {
+		var name, kind, identityArgs, definition string
+		if err := rows.Scan(&name, &kind, &identityArgs, &definition); err != nil {
+			return nil, err
+		}
+		routine := &conn.Routine{
+			Name:         name,
+			Schema:       a.Cfg.TableSchema,
+			Kind:         conn.RoutineKindFunction,
+			IdentityArgs: identityArgs,
+			Definition:   definition,
+		}
+		if kind == "p" {
+			routine.Kind = conn.RoutineKindProcedure
+		}
+		routines[routine.Identity()] = routine
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return routines, nil
+}
+
+// ReadSequences 提取当前 schema 下全部序列（含 SERIAL 列拥有的隐式序列）。
+// OwnedBy 记录拥有列 "table.column"，用于区分显式序列与 SERIAL 隐式序列；
+// last_value 等易变状态不提取。
+func (a *PostgresAdapter) ReadSequences() (map[string]*conn.Sequence, error) {
+	query := `
+		SELECT
+			c.relname,
+			s.data_type::text,
+			s.start_value::text,
+			s.increment_by::text,
+			s.min_value::text,
+			s.max_value::text,
+			s.cycle,
+			s.cache_size::text,
+			COALESCE(own_tbl.relname || '.' || own_att.attname, '')
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		JOIN pg_catalog.pg_sequences s ON s.schemaname = n.nspname AND s.sequencename = c.relname
+		LEFT JOIN pg_catalog.pg_depend d
+			ON d.classid = 'pg_catalog.pg_class'::regclass
+			AND d.objid = c.oid
+			AND d.objsubid = 0
+			AND d.refclassid = 'pg_catalog.pg_class'::regclass
+			AND d.refobjsubid > 0
+			AND d.deptype = 'a'
+		LEFT JOIN pg_catalog.pg_class own_tbl ON own_tbl.oid = d.refobjid
+		LEFT JOIN pg_catalog.pg_attribute own_att
+			ON own_att.attrelid = d.refobjid AND own_att.attnum = d.refobjsubid
+		WHERE c.relkind = 'S' AND n.nspname = $1
+		ORDER BY c.relname
+	`
+	rows, err := a.Conn.Query(query, a.Cfg.TableSchema)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sequences := make(map[string]*conn.Sequence)
+	for rows.Next() {
+		var seq conn.Sequence
+		if err := rows.Scan(
+			&seq.Name,
+			&seq.DataType,
+			&seq.StartValue,
+			&seq.IncrementBy,
+			&seq.MinValue,
+			&seq.MaxValue,
+			&seq.Cycle,
+			&seq.CacheSize,
+			&seq.OwnedBy,
+		); err != nil {
+			return nil, err
+		}
+		seq.Schema = a.Cfg.TableSchema
+		sequences[seq.Name] = &seq
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return sequences, nil
 }
 
 func (a *PostgresAdapter) GetTableDataBatch(table string, cols, pk []string, lastPK []any, limit int) ([]conn.Record, error) {
@@ -193,6 +320,21 @@ func (a *PostgresAdapter) ExtractTable(tableName string) (*conn.Table, error) {
 
 	table.Comment = a.getTableComment(a.Cfg.TableSchema, tableName)
 	return table, nil
+}
+
+// baseTableExists 判定目标 schema 下是否存在同名基础表。此前缺失表会返回
+// 零列空模型，让上层把「表不存在」误报成「缺少主键」，这里显式拒绝。
+func (a *PostgresAdapter) baseTableExists(tableName string) (bool, error) {
+	var found bool
+	err := a.Conn.QueryRow(
+		`SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = $1 AND table_name = $2 AND table_type = 'BASE TABLE'
+		)`, a.Cfg.TableSchema, tableName).Scan(&found)
+	if err != nil {
+		return false, err
+	}
+	return found, nil
 }
 
 func (a *PostgresAdapter) ExtractView(viewName string) (*conn.Table, error) {

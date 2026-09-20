@@ -55,7 +55,197 @@ func CompareSchemas(src, tgt *conn.DatabaseSchema) *SchemaDiff {
 			}
 		}
 	}
+	diff.RoutinesAdded, diff.RoutinesDropped, diff.RoutinesModified = compareRoutines(src.Routines, tgt.Routines)
+	diff.SequencesAdded, diff.SequencesDropped, diff.SequencesModified = compareSequences(src.Sequences, tgt.Sequences)
+	diff.ViewsAffected = collectAffectedViews(src, tgt, diff)
 	return diff
+}
+
+func compareRoutines(src, tgt map[string]*conn.Routine) (added, dropped []*conn.Routine, modified []*RoutineDiff) {
+	for _, name := range sortedKeys(src, tgt) {
+		srcRoutine, srcOK := src[name]
+		tgtRoutine, tgtOK := tgt[name]
+		switch {
+		case !srcOK:
+			added = append(added, tgtRoutine)
+		case !tgtOK:
+			dropped = append(dropped, srcRoutine)
+		case !equalRoutineDefinition(srcRoutine, tgtRoutine):
+			modified = append(modified, &RoutineDiff{Old: srcRoutine, New: tgtRoutine})
+		}
+	}
+	return added, dropped, modified
+}
+
+func compareSequences(src, tgt map[string]*conn.Sequence) (added, dropped []*conn.Sequence, modified []*SequenceDiff) {
+	for _, name := range sortedKeys(src, tgt) {
+		srcSeq, srcOK := src[name]
+		tgtSeq, tgtOK := tgt[name]
+		switch {
+		case !srcOK:
+			added = append(added, tgtSeq)
+		case !tgtOK:
+			dropped = append(dropped, srcSeq)
+		case !srcSeq.Equal(tgtSeq):
+			modified = append(modified, &SequenceDiff{Old: srcSeq, New: tgtSeq})
+		}
+	}
+	return added, dropped, modified
+}
+
+func sortedKeys[T any](maps ...map[string]T) []string {
+	seen := make(map[string]struct{})
+	names := make([]string, 0)
+	for _, values := range maps {
+		for name := range values {
+			if _, ok := seen[name]; !ok {
+				seen[name] = struct{}{}
+				names = append(names, name)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func equalRoutineDefinition(a, b *conn.Routine) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	clean := func(s string) string {
+		s = strings.TrimSpace(s)
+		s = strings.TrimSuffix(s, ";")
+		s = strings.ReplaceAll(s, "\n", " ")
+		s = strings.ReplaceAll(s, "\r", " ")
+		for strings.Contains(s, "  ") {
+			s = strings.ReplaceAll(s, "  ", " ")
+		}
+		return strings.TrimSpace(s)
+	}
+	return clean(a.Definition) == clean(b.Definition)
+}
+
+// collectAffectedViews 计算需要「先删后建」弹跳的视图依赖闭包：所有（传递）
+// 依赖了被变更对象、且自身定义未变化的双侧视图。被变更对象包括被删除表/视图
+// 与全部被修改表/视图（列类型变更会令 PostgreSQL 以 cannot alter type of a
+// column used by a view 拒绝执行）。已在增/删/改集合中的视图不重复纳入。
+// 返回值取新态侧（tgt）视图模型，供重建使用。
+func collectAffectedViews(src, tgt *conn.DatabaseSchema, d *SchemaDiff) []*conn.Table {
+	breakers := make(map[string]struct{})
+	register := func(schema, name string) {
+		breakers[qualifiedName(schema, name)] = struct{}{}
+		breakers[name] = struct{}{}
+	}
+	for _, tbl := range d.TablesDropped {
+		register(tbl.Schema, tbl.Name)
+	}
+	for _, tblDiff := range d.TablesModified {
+		tbl := tblDiff.SourceTable
+		if tbl == nil {
+			tbl = tblDiff.Table
+		}
+		if tbl != nil {
+			register(tbl.Schema, tbl.Name)
+		}
+	}
+	if len(breakers) == 0 {
+		return nil
+	}
+
+	// dependents 把被引用对象（含简名别名）映射到引用它的双侧视图。
+	dependents := make(map[string]map[string]struct{})
+	for name, view := range tgt.Tables {
+		srcView, ok := src.Tables[name]
+		if !ok || view.Type != conn.TableTypeView || srcView.Type != conn.TableTypeView {
+			continue
+		}
+		deps := view.ViewDefinition
+		if deps == nil {
+			deps = srcView.ViewDefinition
+		}
+		if deps == nil {
+			continue
+		}
+		for _, dependency := range deps.Dependencies {
+			resolved := resolveQualifiedName(dependency, view.Schema)
+			for _, key := range resolved {
+				if dependents[key] == nil {
+					dependents[key] = make(map[string]struct{})
+				}
+				dependents[key][name] = struct{}{}
+			}
+		}
+	}
+
+	affected := make(map[string]struct{})
+	queue := make([]string, 0, len(breakers))
+	for breaker := range breakers {
+		queue = append(queue, breaker)
+	}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for dependent := range dependents[current] {
+			if _, seen := affected[dependent]; seen {
+				continue
+			}
+			affected[dependent] = struct{}{}
+			queue = append(queue, dependent)
+		}
+	}
+
+	handled := make(map[string]struct{})
+	for _, tbl := range d.TablesAdded {
+		handled[tbl.Name] = struct{}{}
+	}
+	for _, tbl := range d.TablesDropped {
+		handled[tbl.Name] = struct{}{}
+	}
+	for _, tblDiff := range d.TablesModified {
+		tbl := tblDiff.SourceTable
+		if tbl == nil {
+			tbl = tblDiff.Table
+		}
+		if tbl != nil {
+			handled[tbl.Name] = struct{}{}
+		}
+	}
+
+	names := make([]string, 0, len(affected))
+	for name := range affected {
+		if _, skip := handled[name]; skip {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]*conn.Table, 0, len(names))
+	for _, name := range names {
+		if view := tgt.Tables[name]; view != nil {
+			result = append(result, view)
+		}
+	}
+	return result
+}
+
+func qualifiedName(schema, name string) string {
+	if schema == "" {
+		return name
+	}
+	return schema + "." + name
+}
+
+// resolveQualifiedName 把依赖串（来自 view_table_usage 的 schema.name）解析为
+// 全限定与简名两种键，供闭包图匹配。
+func resolveQualifiedName(dependency, schema string) []string {
+	dependency = strings.TrimSpace(dependency)
+	if dependency == "" {
+		return nil
+	}
+	if idx := strings.LastIndex(dependency, "."); idx >= 0 {
+		return []string{dependency, dependency[idx+1:]}
+	}
+	return []string{dependency, qualifiedName(schema, dependency)}
 }
 
 func compareTable(src, tgt *conn.Table) *TableDiff {
@@ -172,15 +362,6 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 		return d
 	}
 	return nil
-}
-
-func sortedKeys[T any](values map[string]T) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 var typeAliases = map[string]string{

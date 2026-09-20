@@ -1,4 +1,4 @@
-DROP VIEW "sales""Ops"."Rebuild";
+DROP VIEW "sales""Ops"."Rebuild" CASCADE;
 DROP TABLE "sales""Ops"."Convert";
 CREATE TABLE "sales""Ops"."Alpha" (
 "ID" int4 NOT NULL,

@@ -1,6 +1,6 @@
-DROP VIEW "sales""Ops"."Summary";
-DROP VIEW "sales""Ops"."Convert";
-DROP VIEW "sales""Ops"."BaseView";
+DROP VIEW "sales""Ops"."Summary" CASCADE;
+DROP VIEW "sales""Ops"."Convert" CASCADE;
+DROP VIEW "sales""Ops"."BaseView" CASCADE;
 ALTER TABLE "sales""Ops"."Alpha" DROP CONSTRAINT IF EXISTS "Alpha_to_Beta";
 ALTER TABLE "sales""Ops"."Beta" DROP CONSTRAINT IF EXISTS "Beta_to_Alpha";
 DROP TABLE "sales""Ops"."Beta";

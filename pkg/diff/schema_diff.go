@@ -6,6 +6,24 @@ type SchemaDiff struct {
 	TablesAdded    []*conn.Table
 	TablesDropped  []*conn.Table
 	TablesModified []*TableDiff
+
+	// RoutinesAdded/Dropped 以身份签名区分；Modified 表示定义文本变化，
+	// 以 CREATE OR REPLACE 重新应用。
+	RoutinesAdded    []*conn.Routine
+	RoutinesDropped  []*conn.Routine
+	RoutinesModified []*RoutineDiff
+
+	// SequencesAdded/Dropped 按名称区分；Modified 仅比较建序参数
+	// （start/increment/min/max/cycle/cache/data_type），以 ALTER SEQUENCE 对齐。
+	SequencesAdded    []*conn.Sequence
+	SequencesDropped  []*conn.Sequence
+	SequencesModified []*SequenceDiff
+
+	// ViewsAffected 是「定义未变、但依赖了被变更对象」的视图依赖闭包。
+	// 它们必须先于表 DDL 被 DROP，之后按本字段中的定义（新态侧）重建，
+	// 否则 PostgreSQL 会以 cannot alter type of a column used by a view
+	// 拒绝列类型变更。每项为新态侧（forward 为 target、回滚为 source）的视图模型。
+	ViewsAffected []*conn.Table
 }
 
 type TableDiff struct {
@@ -49,6 +67,16 @@ type ForeignKeyDiff struct {
 type ViewDefinitionDiff struct {
 	Old *conn.ViewDefinition
 	New *conn.ViewDefinition
+}
+
+type RoutineDiff struct {
+	Old *conn.Routine
+	New *conn.Routine
+}
+
+type SequenceDiff struct {
+	Old *conn.Sequence
+	New *conn.Sequence
 }
 
 type CommentDiff struct {

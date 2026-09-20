@@ -362,8 +362,135 @@ func (d *postgreDialect) GenerateDropViewSql(t *conn.Table) string {
 	var ddl strings.Builder
 	ddl.WriteString("DROP VIEW ")
 	ddl.WriteString(postgresTableName(t))
+	// 依赖闭包外的遗漏引用（如跨 schema 视图）交由 CASCADE 兜底，
+	// 闭包内的依赖已在生成层显式排序删除。
+	ddl.WriteString(" CASCADE;")
+	return ddl.String()
+}
+
+// GenerateCreateRoutineSql 输出 pg_get_functiondef 全文并补结尾分号。
+// 定义变更经 CREATE OR REPLACE 重放；若签名或返回类型发生不兼容变化，
+// PostgreSQL 会拒绝执行并显式报错，而不是静默破坏依赖。
+func (d *postgreDialect) GenerateCreateRoutineSql(r *conn.Routine) string {
+	if r == nil {
+		return ""
+	}
+	def := strings.TrimSpace(r.Definition)
+	if def == "" {
+		return ""
+	}
+	if !strings.HasSuffix(def, ";") {
+		def += ";"
+	}
+	return def
+}
+
+func (d *postgreDialect) GenerateDropRoutineSql(r *conn.Routine) string {
+	if r == nil || r.Name == "" {
+		return ""
+	}
+	kind := "FUNCTION"
+	if r.Kind == conn.RoutineKindProcedure {
+		kind = "PROCEDURE"
+	}
+	args := strings.TrimSpace(r.IdentityArgs)
+	signature := ident.Quote(ident.DoubleQuote, r.Name) + "(" + args + ")"
+	return fmt.Sprintf("DROP %s IF EXISTS %s.%s CASCADE;", kind,
+		ident.Quote(ident.DoubleQuote, postgresSchema(r.Schema)), signature)
+}
+
+func (d *postgreDialect) GenerateCreateSequenceSql(s *conn.Sequence) string {
+	if s == nil || s.Name == "" {
+		return ""
+	}
+	var ddl strings.Builder
+	ddl.WriteString("CREATE SEQUENCE ")
+	ddl.WriteString(ident.Qualified(ident.DoubleQuote, postgresSchema(s.Schema), s.Name))
+	if dataType := strings.TrimSpace(s.DataType); dataType != "" {
+		ddl.WriteString(" AS ")
+		ddl.WriteString(dataType)
+	}
+	if v := strings.TrimSpace(s.StartValue); v != "" {
+		ddl.WriteString(" START WITH ")
+		ddl.WriteString(v)
+	}
+	if v := strings.TrimSpace(s.IncrementBy); v != "" {
+		ddl.WriteString(" INCREMENT BY ")
+		ddl.WriteString(v)
+	}
+	if v := strings.TrimSpace(s.MinValue); v != "" {
+		ddl.WriteString(" MINVALUE ")
+		ddl.WriteString(v)
+	}
+	if v := strings.TrimSpace(s.MaxValue); v != "" {
+		ddl.WriteString(" MAXVALUE ")
+		ddl.WriteString(v)
+	}
+	ddl.WriteString(" CACHE ")
+	ddl.WriteString(strings.TrimSpace(orDefault(s.CacheSize, "1")))
+	if s.Cycle {
+		ddl.WriteString(" CYCLE")
+	} else {
+		ddl.WriteString(" NO CYCLE")
+	}
 	ddl.WriteString(";")
 	return ddl.String()
+}
+
+// GenerateAlterSequenceSql 把 old 的建序参数对齐到 new，仅生成发生变化的子句。
+// 用 ALTER 而非 DROP+CREATE，避免破坏列默认值对序列的依赖。
+func (d *postgreDialect) GenerateAlterSequenceSql(old, new *conn.Sequence) []string {
+	if old == nil || new == nil || old.Name == "" || new.Name == "" {
+		return nil
+	}
+	var clauses []string
+	if strings.TrimSpace(old.DataType) != strings.TrimSpace(new.DataType) && new.DataType != "" {
+		clauses = append(clauses, "AS "+new.DataType)
+	}
+	if old.StartValue != new.StartValue && new.StartValue != "" {
+		clauses = append(clauses, "START WITH "+new.StartValue)
+	}
+	if old.IncrementBy != new.IncrementBy && new.IncrementBy != "" {
+		clauses = append(clauses, "INCREMENT BY "+new.IncrementBy)
+	}
+	if old.MinValue != new.MinValue && new.MinValue != "" {
+		clauses = append(clauses, "MINVALUE "+new.MinValue)
+	}
+	if old.MaxValue != new.MaxValue && new.MaxValue != "" {
+		clauses = append(clauses, "MAXVALUE "+new.MaxValue)
+	}
+	if old.CacheSize != new.CacheSize && new.CacheSize != "" {
+		clauses = append(clauses, "CACHE "+new.CacheSize)
+	}
+	if old.Cycle != new.Cycle {
+		if new.Cycle {
+			clauses = append(clauses, "CYCLE")
+		} else {
+			clauses = append(clauses, "NO CYCLE")
+		}
+	}
+	if len(clauses) == 0 {
+		return nil
+	}
+	qualified := ident.Qualified(ident.DoubleQuote, postgresSchema(new.Schema), new.Name)
+	return []string{fmt.Sprintf("ALTER SEQUENCE %s %s;", qualified, strings.Join(clauses, " "))}
+}
+
+func (d *postgreDialect) GenerateDropSequenceSql(s *conn.Sequence) string {
+	if s == nil || s.Name == "" {
+		return ""
+	}
+	qualified := ident.Qualified(ident.DoubleQuote, postgresSchema(s.Schema), s.Name)
+	// IF EXISTS：被删表携带的 SERIAL 隐式序列已随 DROP TABLE 消失，幂等兜底；
+	// CASCADE：独立序列若残留依赖，显式级联而非中断整个迁移脚本。
+	return fmt.Sprintf("DROP SEQUENCE IF EXISTS %s CASCADE;", qualified)
+}
+
+func orDefault(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func (d *postgreDialect) GenerateAddColumnSql(t *conn.Table, col *conn.Column) string {

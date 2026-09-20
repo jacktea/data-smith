@@ -136,6 +136,24 @@ type IDataBatchDialect interface {
 	GenerateDeleteBatchSql(tbl *conn.Table, rows []conn.Record) string
 }
 
+// INonTableObjectDialect is an additive capability for dialects that can emit
+// DDL for schema-level non-table objects: routines (functions/procedures) and
+// sequences. Only PostgreSQL implements it for now; other dialects skip the
+// phases in the schema generator. This mirrors the IDataBatchDialect pattern.
+type INonTableObjectDialect interface {
+	// GenerateCreateRoutineSql 输出例程的 CREATE 语句（pg_get_functiondef 全文，
+	// 补结尾分号）；定义变更同样经 CREATE OR REPLACE 重新应用。
+	GenerateCreateRoutineSql(r *conn.Routine) string
+	// GenerateDropRoutineSql 按身份签名删除例程。
+	GenerateDropRoutineSql(r *conn.Routine) string
+	// GenerateCreateSequenceSql 生成 CREATE SEQUENCE。
+	GenerateCreateSequenceSql(s *conn.Sequence) string
+	// GenerateAlterSequenceSql 生成把 old 对齐到 new 的 ALTER SEQUENCE 语句集。
+	GenerateAlterSequenceSql(old, new *conn.Sequence) []string
+	// GenerateDropSequenceSql 生成删除序列语句。
+	GenerateDropSequenceSql(s *conn.Sequence) string
+}
+
 func NewDialect(dbType consts.DBType) IDialect {
 	switch dbType {
 	case consts.DBTypePostgres:

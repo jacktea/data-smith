@@ -35,10 +35,36 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 	modified := sortedTableDiffs(schemaDiff.TablesModified)
 
 	var dropViews, dropDependencies, dropTables []string
+	var sequencesDropped, routinesDropped, sequencesCreated, sequencesAltered, routinesCreated []string
 	var alterColumns, createTables, buildKeys, addForeignKeys, createViews, comments []string
 	add := func(destination *[]string, statement string) {
 		if statement = strings.TrimSpace(statement); statement != "" {
 			*destination = append(*destination, statement)
+		}
+	}
+
+	// 序列与例程的增删改由实现 INonTableObjectDialect 的方言生成；其余方言
+	// （如 MySQL）其驱动本就不会提取这些对象，直接跳过。
+	if objectDialect, ok := dbDialect.(INonTableObjectDialect); ok {
+		for _, sequence := range sortedSequences(schemaDiff.SequencesDropped) {
+			add(&sequencesDropped, objectDialect.GenerateDropSequenceSql(sequence))
+		}
+		for _, routine := range sortedRoutines(schemaDiff.RoutinesDropped) {
+			add(&routinesDropped, objectDialect.GenerateDropRoutineSql(routine))
+		}
+		for _, sequence := range sortedSequences(schemaDiff.SequencesAdded) {
+			add(&sequencesCreated, objectDialect.GenerateCreateSequenceSql(sequence))
+		}
+		for _, change := range sortedSequenceDiffs(schemaDiff.SequencesModified) {
+			for _, statement := range objectDialect.GenerateAlterSequenceSql(change.Old, change.New) {
+				add(&sequencesAltered, statement)
+			}
+		}
+		for _, routine := range sortedRoutines(schemaDiff.RoutinesAdded) {
+			add(&routinesCreated, objectDialect.GenerateCreateRoutineSql(routine))
+		}
+		for _, change := range sortedRoutineDiffs(schemaDiff.RoutinesModified) {
+			add(&routinesCreated, objectDialect.GenerateCreateRoutineSql(change.New))
 		}
 	}
 
@@ -57,6 +83,9 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 			viewsToDrop = append(viewsToDrop, view)
 		}
 	}
+	// 定义未变但依赖被变更对象的视图（依赖闭包）同样要先 DROP 再重建，
+	// 否则列类型/列删除类 DDL 会被视图依赖拒绝。
+	viewsToDrop = append(viewsToDrop, schemaDiff.ViewsAffected...)
 	orderedDropViews, err := orderViews(viewsToDrop, true)
 	if err != nil {
 		return nil, fmt.Errorf("order dropped views: %w", err)
@@ -165,6 +194,8 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 		view.ViewDefinition = tableDiff.ViewDefinitionChange.New
 		viewsToCreate = append(viewsToCreate, &view)
 	}
+	// 受影响视图按新态定义参与拓扑排序重建。
+	viewsToCreate = append(viewsToCreate, schemaDiff.ViewsAffected...)
 	orderedCreateViews, err := orderViews(viewsToCreate, false)
 	if err != nil {
 		return nil, fmt.Errorf("order created views: %w", err)
@@ -180,10 +211,19 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 		}
 	}
 
-	result := make([]string, 0, len(dropViews)+len(dropDependencies)+len(dropTables)+len(alterColumns)+len(createTables)+len(buildKeys)+len(addForeignKeys)+len(createViews)+len(comments))
+	result := make([]string, 0, len(dropViews)+len(dropDependencies)+len(dropTables)+
+		len(sequencesDropped)+len(routinesDropped)+len(sequencesCreated)+len(sequencesAltered)+len(routinesCreated)+
+		len(alterColumns)+len(createTables)+len(buildKeys)+len(addForeignKeys)+len(createViews)+len(comments))
 	result = append(result, dropViews...)
 	result = append(result, dropDependencies...)
 	result = append(result, dropTables...)
+	// 序列/例程删除放在表删除之后（被删表的 SERIAL 隐式序列已随表消失，
+	// IF EXISTS 兜底）；创建放在表 DDL 之前（列默认值 nextval / 函数依赖）。
+	result = append(result, sequencesDropped...)
+	result = append(result, routinesDropped...)
+	result = append(result, sequencesCreated...)
+	result = append(result, sequencesAltered...)
+	result = append(result, routinesCreated...)
 	result = append(result, alterColumns...)
 	result = append(result, createTables...)
 	result = append(result, buildKeys...)
@@ -421,6 +461,52 @@ func sortedTables(tables []*conn.Table) []*conn.Table {
 	result := append([]*conn.Table(nil), tables...)
 	sort.SliceStable(result, func(i, j int) bool {
 		return objectKey(result[i].Schema, result[i].Name) < objectKey(result[j].Schema, result[j].Name)
+	})
+	return result
+}
+
+func sortedSequences(sequences []*conn.Sequence) []*conn.Sequence {
+	result := append([]*conn.Sequence(nil), sequences...)
+	sort.SliceStable(result, func(i, j int) bool {
+		return objectKey(result[i].Schema, result[i].Name) < objectKey(result[j].Schema, result[j].Name)
+	})
+	return result
+}
+
+func sortedSequenceDiffs(changes []*diff.SequenceDiff) []*diff.SequenceDiff {
+	result := append([]*diff.SequenceDiff(nil), changes...)
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := result[i].New, result[j].New
+		if left == nil {
+			left = result[i].Old
+		}
+		if right == nil {
+			right = result[j].Old
+		}
+		return objectKey(left.Schema, left.Name) < objectKey(right.Schema, right.Name)
+	})
+	return result
+}
+
+func sortedRoutines(routines []*conn.Routine) []*conn.Routine {
+	result := append([]*conn.Routine(nil), routines...)
+	sort.SliceStable(result, func(i, j int) bool {
+		return objectKey(result[i].Schema, result[i].Identity()) < objectKey(result[j].Schema, result[j].Identity())
+	})
+	return result
+}
+
+func sortedRoutineDiffs(changes []*diff.RoutineDiff) []*diff.RoutineDiff {
+	result := append([]*diff.RoutineDiff(nil), changes...)
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := result[i].New, result[j].New
+		if left == nil {
+			left = result[i].Old
+		}
+		if right == nil {
+			right = result[j].Old
+		}
+		return objectKey(left.Schema, left.Identity()) < objectKey(right.Schema, right.Identity())
 	})
 	return result
 }

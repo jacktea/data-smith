@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"sort"
+	"strings"
 
 	"github.com/jacktea/data-smith/pkg/config"
 )
@@ -35,6 +36,10 @@ func ParseTableType(t string) TableType {
 
 type DatabaseSchema struct {
 	Tables map[string]*Table
+	// Routines 以身份签名 name(identity_args) 为键；Sequences 以名称为键。
+	// 两者由支持例程/序列的驱动（当前仅 PostgreSQL）填充，其余驱动为空映射。
+	Routines  map[string]*Routine
+	Sequences map[string]*Sequence
 }
 
 func (s *DatabaseSchema) GetTable(name string) *Table {
@@ -153,6 +158,66 @@ type ViewDefinition struct {
 }
 
 type Record map[string]any
+
+// RoutineKind 区分 PostgreSQL 例程类别：普通函数（prokind='f'）与存储过程
+// （prokind='p'）。聚合函数（prokind='a'）与窗口函数（prokind='w'）首版不支持，
+// 提取时被排除（pg_get_functiondef 无法还原聚合定义）。
+type RoutineKind string
+
+const (
+	RoutineKindFunction  RoutineKind = "function"
+	RoutineKindProcedure RoutineKind = "procedure"
+)
+
+// Routine 是一个函数或存储过程。Definition 是 pg_get_functiondef 返回的完整
+// CREATE OR REPLACE 语句（不含结尾分号）；IdentityArgs 是
+// pg_get_function_identity_arguments 的结果，与 Name 一起构成重载下的唯一身份。
+type Routine struct {
+	Name         string
+	Schema       string
+	Kind         RoutineKind
+	IdentityArgs string
+	Definition   string
+}
+
+// Identity 返回 name(identity_args) 形式的身份签名。
+func (r *Routine) Identity() string {
+	args := strings.TrimSpace(r.IdentityArgs)
+	if args == "" {
+		return r.Name + "()"
+	}
+	return r.Name + "(" + args + ")"
+}
+
+// Sequence 是一个 PostgreSQL 序列。数值字段以规范化的字符串形式保存
+// （来自 pg_sequences），便于直接参与 DDL 生成与相等比较；LastValue 是易变
+// 状态，不参与结构比对。OwnedBy 形如 "table.column"（SERIAL 等列拥有的
+// 隐式序列），独立序列为空。
+type Sequence struct {
+	Name        string
+	Schema      string
+	DataType    string
+	StartValue  string
+	IncrementBy string
+	MinValue    string
+	MaxValue    string
+	Cycle       bool
+	CacheSize   string
+	OwnedBy     string
+}
+
+func (s *Sequence) Equal(other *Sequence) bool {
+	if s == nil || other == nil {
+		return s == other
+	}
+	return s.DataType == other.DataType &&
+		s.StartValue == other.StartValue &&
+		s.IncrementBy == other.IncrementBy &&
+		s.MinValue == other.MinValue &&
+		s.MaxValue == other.MaxValue &&
+		s.Cycle == other.Cycle &&
+		s.CacheSize == other.CacheSize
+}
 
 type DBAdapter interface {
 	ReadSchema() (*DatabaseSchema, error)
