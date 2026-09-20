@@ -72,15 +72,18 @@ type TableDiffSummary struct {
 }
 
 // DataDiffParams carries the inputs of a data diff run without a rules file.
+// Rules 为空或含通配条目时按整库语义展开（见 rules.go）；排除清单（含默认
+// 账本表）对显式与展开规则一律生效。
 type DataDiffParams struct {
-	Source       *pkgconfig.ConnConfig
-	Target       *pkgconfig.ConnConfig
-	Rules        []pkgconfig.Rule
-	BatchSize    int
-	ChunkSize    int
-	DMLBatchSize int
-	ChunkHash    bool
-	BestEffort   bool
+	Source        *pkgconfig.ConnConfig
+	Target        *pkgconfig.ConnConfig
+	Rules         []pkgconfig.Rule
+	ExcludeTables []string
+	BatchSize     int
+	ChunkSize     int
+	DMLBatchSize  int
+	ChunkHash     bool
+	BestEffort    bool
 	// SkipMissingTables：rules 引用的表在任一侧不存在时跳过并输出 warning
 	// 清单，而不是报错中断。关闭（默认）时显式报 "table not found: X"。
 	SkipMissingTables bool
@@ -96,6 +99,9 @@ type DataDiffResult struct {
 	Tables   []TableDiffSummary `json:"tables"`
 	// SkippedTables 列出因 --skip-missing-tables 被跳过的不存在表。
 	SkippedTables []string `json:"skippedTables,omitempty"`
+	// ExcludedTables 列出因排除配置（含默认账本表 schema_migrations 等）
+	// 被过滤的数据规则表。
+	ExcludedTables []string `json:"excludedTables,omitempty"`
 }
 
 const SchemaDiffForwardFile = "schema_diff.sql"
@@ -113,6 +119,32 @@ func DataDiffFileNames() []string {
 	return []string{DataDiffForwardFile, DataDiffRollbackFile}
 }
 
+// schemaPair 缓存结构阶段读取（并经 include/exclude 过滤）后的两侧基础表，
+// 供数据阶段复用：通配展开的候选清单与 target 模型预热。
+type schemaPair struct {
+	src map[string]*conn.Table
+	tgt map[string]*conn.Table
+}
+
+// baseTables 只保留基础表（视图/物化视图不参与数据比对）。
+func baseTables(tables map[string]*conn.Table) map[string]*conn.Table {
+	result := make(map[string]*conn.Table, len(tables))
+	for name, tbl := range tables {
+		if tbl != nil && tbl.Type == conn.TableTypeTable {
+			result[name] = tbl
+		}
+	}
+	return result
+}
+
+// schemaPhase 汇总结构阶段产物：摘要、forward 语句序列（影子事务的应用序
+// 列）与两侧过滤后的表集合。
+type schemaPhase struct {
+	summary SchemaDiffSummary
+	forward []string
+	tables  schemaPair
+}
+
 // RunSchemaDiff reads both schemas, compares them, and atomically writes the
 // forward and rollback SQL pair into dir. The forward SQL upgrades the source
 // database towards the target database and must be executed on the source.
@@ -123,13 +155,6 @@ func RunSchemaDiff(ctx context.Context, params SchemaDiffParams, dir string, pro
 	if dir == "" {
 		return SchemaDiffSummary{}, errors.New("output directory is required")
 	}
-	report := func(message string) {
-		if progress != nil {
-			progress(message)
-		}
-	}
-
-	report("连接源库与目标库")
 	srcDB, err := db.NewDBAdapterContext(ctx, params.Source)
 	if err != nil {
 		return SchemaDiffSummary{}, fmt.Errorf("connect to source DB: %w", err)
@@ -140,38 +165,57 @@ func RunSchemaDiff(ctx context.Context, params SchemaDiffParams, dir string, pro
 		return SchemaDiffSummary{}, fmt.Errorf("connect to target DB: %w", err)
 	}
 	defer tgtDB.Close()
+	phase, err := runSchemaDiffOnAdapters(ctx, srcDB, tgtDB, params, dir, progress)
+	return phase.summary, err
+}
+
+// runSchemaDiffOnAdapters 在已打开的连接对上执行结构比对并写出产物，返回
+// 供 diff-full 两阶段复用的完整阶段产物（forward 语句序列与表集合）。
+func runSchemaDiffOnAdapters(ctx context.Context, srcDB, tgtDB conn.DBAdapter, params SchemaDiffParams, dir string, progress func(string)) (schemaPhase, error) {
+	report := func(message string) {
+		if progress != nil {
+			progress(message)
+		}
+	}
 
 	report("读取两侧数据库结构")
 	start := time.Now()
 	srcSchema, err := srcDB.ReadSchema()
 	if err != nil {
-		return SchemaDiffSummary{}, fmt.Errorf("read source schema: %w", err)
+		return schemaPhase{}, fmt.Errorf("read source schema: %w", err)
 	}
 	tgtSchema, err := tgtDB.ReadSchema()
 	if err != nil {
-		return SchemaDiffSummary{}, fmt.Errorf("read target schema: %w", err)
+		return schemaPhase{}, fmt.Errorf("read target schema: %w", err)
 	}
 
 	effectiveExcludes := pkgconfig.EffectiveExcludeTables(params.ExcludeTables)
 	if len(params.IncludeTables) > 0 || len(effectiveExcludes) > 0 {
 		srcSchema.Tables = filterTables(srcSchema.Tables, params.IncludeTables, effectiveExcludes)
 		tgtSchema.Tables = filterTables(tgtSchema.Tables, params.IncludeTables, effectiveExcludes)
+		// 被排除表的 SERIAL 隐式序列随表一起排除（如迁移账本
+		// schema_migrations 的 id_seq），否则序列单独成为差异对象，产物会
+		// 对账本的从属结构产生反向污染。
+		srcSchema.Sequences = filterSequencesByOwnedTable(srcSchema.Sequences, effectiveExcludes)
+		tgtSchema.Sequences = filterSequencesByOwnedTable(tgtSchema.Sequences, effectiveExcludes)
 	}
+	phase := schemaPhase{tables: schemaPair{src: baseTables(srcSchema.Tables), tgt: baseTables(tgtSchema.Tables)}}
 
 	report("比对结构差异")
 	forwardDiff := pkgdiff.CompareSchemas(srcSchema, tgtSchema)
 	rollbackDiff := pkgdiff.CompareSchemas(tgtSchema, srcSchema)
-	summary := projectSchemaDiff(forwardDiff)
+	phase.summary = projectSchemaDiff(forwardDiff)
 
 	report("生成正向与回滚 SQL")
 	forwardSQLs, err := pkgsql.GenerateSchemaSQLSafe(forwardDiff, params.Source.Type)
 	if err != nil {
-		return SchemaDiffSummary{}, fmt.Errorf("generate forward schema SQL: %w", err)
+		return schemaPhase{}, fmt.Errorf("generate forward schema SQL: %w", err)
 	}
 	rollbackSQLs, err := pkgsql.GenerateSchemaSQLSafe(rollbackDiff, params.Source.Type)
 	if err != nil {
-		return SchemaDiffSummary{}, fmt.Errorf("generate rollback schema SQL: %w", err)
+		return schemaPhase{}, fmt.Errorf("generate rollback schema SQL: %w", err)
 	}
+	phase.forward = forwardSQLs
 
 	forwardPath := filepath.Join(dir, SchemaDiffForwardFile)
 	rollbackPath := filepath.Join(dir, SchemaDiffRollbackFile)
@@ -191,10 +235,10 @@ func RunSchemaDiff(ctx context.Context, params SchemaDiffParams, dir string, pro
 		return nil
 	})
 	if err != nil {
-		return SchemaDiffSummary{}, err
+		return schemaPhase{}, err
 	}
 	report(fmt.Sprintf("结构比对完成, 耗时 %v", time.Since(start)))
-	return summary, nil
+	return phase, nil
 }
 
 func projectSchemaDiff(d *pkgdiff.SchemaDiff) SchemaDiffSummary {
@@ -394,28 +438,6 @@ func RunDataDiff(ctx context.Context, params DataDiffParams, dir string, progres
 	if dir == "" {
 		return DataDiffResult{}, errors.New("output directory is required")
 	}
-	if len(params.Rules) == 0 {
-		return DataDiffResult{}, errors.New("at least one comparison rule is required")
-	}
-	if params.BatchSize <= 0 {
-		return DataDiffResult{}, errors.New("batch size must be greater than zero")
-	}
-	if params.ChunkHash && params.ChunkSize <= 0 {
-		return DataDiffResult{}, errors.New("chunk size must be greater than zero when chunk hashing is enabled")
-	}
-	if err := validateDMLBatchSize(params.DMLBatchSize); err != nil {
-		return DataDiffResult{}, err
-	}
-	ruleSet := &pkgconfig.RuleSet{Rules: params.Rules}
-	if err := validateRules(ruleSet); err != nil {
-		return DataDiffResult{}, err
-	}
-	report := func(event TableProgress) {
-		if progress != nil {
-			progress(event)
-		}
-	}
-
 	srcDB, err := db.NewDBAdapterContext(ctx, params.Source)
 	if err != nil {
 		return DataDiffResult{}, fmt.Errorf("connect to source DB: %w", err)
@@ -426,10 +448,59 @@ func RunDataDiff(ctx context.Context, params DataDiffParams, dir string, progres
 		return DataDiffResult{}, fmt.Errorf("connect to target DB: %w", err)
 	}
 	defer tgtDB.Close()
+	return runDataDiffOnAdapters(ctx, srcDB, tgtDB, params, dataPhaseOptions{}, dir, progress)
+}
+
+// dataPhaseOptions 携带 diff-full 编排注入的上下文：结构阶段的表集合快照
+// （通配展开与 target 模型预热复用）与影子模式标记（source 结构已在事务内
+// 对齐，展开候选取 target 全集）。
+type dataPhaseOptions struct {
+	schemaSnapshot *schemaPair
+	shadow         bool
+}
+
+// runDataDiffOnAdapters 在已打开的连接对上执行数据比对。规则先展开（省略/
+// 通配 → 整库有行身份的表）再排除（默认账本表 + 配置排除），随后逐表流式
+// 比对并原子写出 forward/rollback 对。
+func runDataDiffOnAdapters(ctx context.Context, srcDB, tgtDB conn.DBAdapter, params DataDiffParams, opts dataPhaseOptions, dir string, progress func(TableProgress)) (DataDiffResult, error) {
+	if params.BatchSize <= 0 {
+		return DataDiffResult{}, errors.New("batch size must be greater than zero")
+	}
+	if params.ChunkHash && params.ChunkSize <= 0 {
+		return DataDiffResult{}, errors.New("chunk size must be greater than zero when chunk hashing is enabled")
+	}
+	if err := validateDMLBatchSize(params.DMLBatchSize); err != nil {
+		return DataDiffResult{}, err
+	}
+	if err := validateWildcardRules(params.Rules); err != nil {
+		return DataDiffResult{}, err
+	}
+	report := func(event TableProgress) {
+		if progress != nil {
+			progress(event)
+		}
+	}
+
+	rules, excludedTables, err := resolveDataRules(srcDB, tgtDB, params, opts, func(message string) {
+		report(TableProgress{Phase: "log", Error: message})
+	})
+	if err != nil {
+		return DataDiffResult{}, err
+	}
+	if err := validateRules(&pkgconfig.RuleSet{Rules: rules}); err != nil {
+		return DataDiffResult{}, err
+	}
 
 	dbDialect := pkgsql.NewDialect(params.Target.Type)
 	sourceModels := newTableModelCache(srcDB)
 	targetModels := newTableModelCache(tgtDB)
+	// target 模型复用结构阶段读取结果；source 模型始终现取——影子模式下
+	// source 结构已被事务内 DDL 改变，预读模型不再成立。
+	if opts.schemaSnapshot != nil {
+		for name, tbl := range opts.schemaSnapshot.tgt {
+			targetModels.models[name] = tbl
+		}
+	}
 
 	// skippedByFlag 记录因 --skip-missing-tables 被跳过的表；onTableDone
 	// 回调据此把对应条目标记为 skipped 而非 failed。
@@ -474,9 +545,9 @@ func RunDataDiff(ctx context.Context, params DataDiffParams, dir string, progres
 		return nil
 	}
 
-	result := DataDiffResult{Complete: true, Tables: make([]TableDiffSummary, 0, len(params.Rules))}
-	tablesByRule := make(map[string]int, len(params.Rules))
-	for i, rule := range params.Rules {
+	result := DataDiffResult{Complete: true, Tables: make([]TableDiffSummary, 0, len(rules)), ExcludedTables: excludedTables}
+	tablesByRule := make(map[string]int, len(rules))
+	for i, rule := range rules {
 		tablesByRule[rule.Table] = i
 		result.Tables = append(result.Tables, TableDiffSummary{Table: rule.Table, Status: "ok"})
 	}
@@ -500,7 +571,7 @@ func RunDataDiff(ctx context.Context, params DataDiffParams, dir string, progres
 				forward,
 				rollback,
 				filepath.Dir(rollbackPath),
-				params.Rules,
+				rules,
 				dbDialect,
 				params.DMLBatchSize,
 				params.BestEffort,

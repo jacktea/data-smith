@@ -18,6 +18,40 @@ type BaseAdapter struct {
 	Conn   *sql.DB
 	tunnel *proxy.SSHTunnel
 	Cfg    *config.ConnConfig
+	// session 非空时，读取通道整体切换到该会话（影子事务），nil 恢复连接池。
+	session Querier
+}
+
+// Querier 是读取通道的最小查询接口：*sql.DB（连接池）与 *sql.Tx（事务会话）均满足。
+type Querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// SessionBinder 由支持会话路由的适配器实现；影子数据比对（diff-full 两阶段）
+// 借助它把未提交的结构 DDL 与行读取收敛到同一个会话。
+type SessionBinder interface {
+	BindSession(session Querier)
+}
+
+// BindSession 把适配器全部读取查询切换到给定会话；传 nil 恢复连接池。
+// 影子事务期间未提交的 DDL 仅对同一会话可见，行读取必须同会话路由才一致。
+func (p *BaseAdapter) BindSession(session Querier) {
+	p.session = session
+}
+
+func (p *BaseAdapter) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if p.session != nil {
+		return p.session.QueryContext(ctx, query, args...)
+	}
+	return p.Conn.QueryContext(ctx, query, args...)
+}
+
+func (p *BaseAdapter) QueryRow(ctx context.Context, query string, args ...any) *sql.Row {
+	if p.session != nil {
+		return p.session.QueryRowContext(ctx, query, args...)
+	}
+	return p.Conn.QueryRowContext(ctx, query, args...)
 }
 
 const (

@@ -138,7 +138,7 @@ func (a *PostgresAdapter) ReadRoutines() (map[string]*conn.Routine, error) {
 		  )
 		ORDER BY p.proname
 	`
-	rows, err := a.Conn.Query(query, a.Cfg.TableSchema)
+	rows, err := a.QueryContext(context.Background(), query, a.Cfg.TableSchema)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +198,7 @@ func (a *PostgresAdapter) ReadSequences() (map[string]*conn.Sequence, error) {
 		WHERE c.relkind = 'S' AND n.nspname = $1
 		ORDER BY c.relname
 	`
-	rows, err := a.Conn.Query(query, a.Cfg.TableSchema)
+	rows, err := a.QueryContext(context.Background(), query, a.Cfg.TableSchema)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +262,7 @@ func (a *PostgresAdapter) GetTableDataBatchContext(ctx context.Context, table st
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s %s ORDER BY %s LIMIT $%d", colList, a.quotedTable(table), where, orderBy, argIdx)
 	args = append(args, limit)
-	rows, err := a.Conn.QueryContext(ctx, query, args...)
+	rows, err := a.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +333,7 @@ func (a *PostgresAdapter) ExtractTable(tableName string) (*conn.Table, error) {
 // 零列空模型，让上层把「表不存在」误报成「缺少主键」，这里显式拒绝。
 func (a *PostgresAdapter) baseTableExists(tableName string) (bool, error) {
 	var found bool
-	err := a.Conn.QueryRow(
+	err := a.QueryRow(context.Background(),
 		`SELECT EXISTS (
 			SELECT 1 FROM information_schema.tables
 			WHERE table_schema = $1 AND table_name = $2 AND table_type = 'BASE TABLE'
@@ -375,7 +375,7 @@ func (a *PostgresAdapter) GetConfig() *config.ConnConfig {
 }
 
 func (a *PostgresAdapter) queryTables() (map[string]*conn.Table, error) {
-	rows, err := a.Conn.Query(`SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1`, a.Cfg.TableSchema)
+	rows, err := a.QueryContext(context.Background(), `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1`, a.Cfg.TableSchema)
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +410,7 @@ func (a *PostgresAdapter) queryTables() (map[string]*conn.Table, error) {
 }
 
 func (a *PostgresAdapter) extractColumns(table *conn.Table) error {
-	colRows, err := a.Conn.Query(`SELECT
+	colRows, err := a.QueryContext(context.Background(), `SELECT
 			c.column_name,
 			c.data_type,
 			c.udt_name,
@@ -498,7 +498,7 @@ func (a *PostgresAdapter) extractPrimaryKey(table *conn.Table) error {
 	`
 	var constraintName string
 	var columns pq.StringArray
-	err := a.Conn.QueryRow(query, table.Schema, table.Name).Scan(&constraintName, &columns)
+	err := a.QueryRow(context.Background(), query, table.Schema, table.Name).Scan(&constraintName, &columns)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
@@ -514,7 +514,7 @@ func (a *PostgresAdapter) extractPrimaryKey(table *conn.Table) error {
 
 func (a *PostgresAdapter) extractIndexes(table *conn.Table) error {
 	// Indexes
-	idxRows, err := a.Conn.Query(`
+	idxRows, err := a.QueryContext(context.Background(), `
 	SELECT 
 			i.relname as index_name,
 			ix.indisunique,
@@ -604,7 +604,7 @@ func (a *PostgresAdapter) extractForeignKeys(table *conn.Table) error {
 		  AND c.contype = 'f'
 		GROUP BY c.conname, ref_ns.nspname, ref_cls.relname, c.confdeltype, c.confupdtype
 	`
-	fkRows, err := a.Conn.Query(query, table.Schema, table.Name)
+	fkRows, err := a.QueryContext(context.Background(), query, table.Schema, table.Name)
 	if err != nil {
 		return err
 	}

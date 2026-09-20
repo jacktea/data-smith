@@ -392,6 +392,10 @@ func (s *Server) runDiffFull(ctx context.Context, job *Job, sourceID, targetID s
 			IgnoreColumns: table.IgnoreColumns,
 		})
 	}
+	// Web 侧保持显式选择语义：整库通配展开（空规则 = 全表）仅 CLI/引擎层开放。
+	if len(rules) == 0 {
+		return errBad("请选择数据表或比对方案")
+	}
 	job.SetProgressTotal(len(rules))
 	job.Logf("开始完全比对: source=%s(%s) target=%s(%s), 结构范围 %d 张表, 数据 %d 张表",
 		source.Name, source.ID, target.Name, target.ID, len(includeTables)+len(excludeTables), len(rules))

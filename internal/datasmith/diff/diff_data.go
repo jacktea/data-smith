@@ -40,13 +40,14 @@ type tableDiffFunc func(pkgconfig.Rule) (*tableDiffResult, error)
 func runDiffData(cmd *cobra.Command, args []string) error {
 	configPath, _ := cmd.Flags().GetString("config")
 	rulesPath, _ := cmd.Flags().GetString("rules")
+	excludeFlag, _ := cmd.Flags().GetString("exclude-tables")
 	batchSize, _ := cmd.Flags().GetInt("batch-size")
 	enableChunkHash, _ := cmd.Flags().GetBool("chunk-hash")
 	chunkSize, _ := cmd.Flags().GetInt("chunk-size")
 	dmlBatchSize, _ := cmd.Flags().GetInt("dml-batch-size")
 	bestEffort, _ := cmd.Flags().GetBool("best-effort")
 	skipMissingTables, _ := cmd.Flags().GetBool("skip-missing-tables")
-	if err := validateDiffDataInputs(configPath, rulesPath, batchSize, chunkSize, enableChunkHash); err != nil {
+	if err := validateDiffDataInputs(configPath, batchSize, chunkSize, enableChunkHash); err != nil {
 		return err
 	}
 	if err := validateDMLBatchSize(dmlBatchSize); err != nil {
@@ -57,9 +58,15 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	rules, err := config.LoadRules(rulesPath)
-	if err != nil {
-		return fmt.Errorf("load rules: %w", err)
+	var rules *pkgconfig.RuleSet
+	if strings.TrimSpace(rulesPath) == "" {
+		// 规则省略：整库模式，展开为全部有行身份的表（排除默认账本表）。
+		rules = &pkgconfig.RuleSet{}
+	} else {
+		rules, err = config.LoadRules(rulesPath)
+		if err != nil {
+			return fmt.Errorf("load rules: %w", err)
+		}
 	}
 	if err := validateRules(rules); err != nil {
 		return err
@@ -84,6 +91,7 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 		Source:            &cfg.SourceDB,
 		Target:            &cfg.TargetDB,
 		Rules:             rules.Rules,
+		ExcludeTables:     append(cfg.ExcludeTables, splitCSVExcludeTables(excludeFlag)...),
 		BatchSize:         batchSize,
 		ChunkSize:         chunkSize,
 		DMLBatchSize:      dmlBatchSize,
@@ -254,7 +262,7 @@ func writeCompletionReport(writer io.Writer, bestEffort bool, failures []tableDi
 	return nil
 }
 
-func validateDiffDataInputs(configPath, rulesPath string, batchSize, chunkSize int, enableChunkHash bool) error {
+func validateDiffDataInputs(configPath string, batchSize, chunkSize int, enableChunkHash bool) error {
 	if batchSize <= 0 {
 		return fmt.Errorf("batch size must be greater than zero")
 	}
@@ -264,10 +272,18 @@ func validateDiffDataInputs(configPath, rulesPath string, batchSize, chunkSize i
 	if strings.TrimSpace(configPath) == "" {
 		return fmt.Errorf("config path is required")
 	}
-	if strings.TrimSpace(rulesPath) == "" {
-		return fmt.Errorf("rules path is required")
-	}
 	return nil
+}
+
+// splitCSVExcludeTables 解析逗号分隔的 --exclude-tables 取值，忽略空白项。
+func splitCSVExcludeTables(raw string) []string {
+	items := []string{}
+	for _, item := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			items = append(items, trimmed)
+		}
+	}
+	return items
 }
 
 func validateRules(rules *pkgconfig.RuleSet) error {
@@ -275,6 +291,12 @@ func validateRules(rules *pkgconfig.RuleSet) error {
 		return fmt.Errorf("rules are required")
 	}
 	for i, rule := range rules.Rules {
+		if isWildcardPattern(rule.Table) {
+			if err := validateWildcardRules([]pkgconfig.Rule{rule}); err != nil {
+				return fmt.Errorf("rule %d: %w", i, err)
+			}
+			continue
+		}
 		if strings.TrimSpace(rule.Table) == "" {
 			return fmt.Errorf("rule %d table name is required", i)
 		}
@@ -299,7 +321,8 @@ func validateRules(rules *pkgconfig.RuleSet) error {
 
 func init() {
 	diffDataCmd.Flags().StringP("config", "c", "", "Path to config file")
-	diffDataCmd.Flags().StringP("rules", "r", "", "Path to rules file")
+	diffDataCmd.Flags().StringP("rules", "r", "", "Path to rules file; omit for whole-database mode (all tables with row identity, ledger tables excluded)")
+	diffDataCmd.Flags().String("exclude-tables", "", "Comma-separated tables to exclude from data comparison (ledger tables are always excluded)")
 	diffDataCmd.Flags().StringP("output", "o", "", "Path to output forward diff SQL file")
 	diffDataCmd.Flags().String("rollback-output", "", "Path to output rollback SQL file")
 	diffDataCmd.Flags().Int("batch-size", 1000, "Batch size for data diff and SQL output")
@@ -309,5 +332,4 @@ func init() {
 	diffDataCmd.Flags().Bool("best-effort", false, "Continue after table errors and emit an explicitly incomplete report")
 	diffDataCmd.Flags().Bool("skip-missing-tables", false, "Skip rules whose table does not exist on either side and log a warning list instead of failing")
 	diffDataCmd.MarkFlagRequired("config")
-	diffDataCmd.MarkFlagRequired("rules")
 }

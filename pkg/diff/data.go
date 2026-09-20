@@ -419,6 +419,40 @@ func chunkHashColumns(cols []string, rule ICompareRule) []string {
 	return hashCols
 }
 
+// RowIdentityColumns 返回表的行身份列：主键优先，否则回退首个全部列均
+// NOT NULL 的唯一索引（确定性取名顺序）。无行身份返回 nil。数据比对的
+// 校验与「全部有行身份的表」通配展开共用该判定。
+func RowIdentityColumns(tbl *conn.Table) []string {
+	if tbl == nil {
+		return nil
+	}
+	if tbl.PrimaryKey != nil && len(tbl.PrimaryKey.Columns) > 0 {
+		return tbl.PrimaryKey.Columns
+	}
+	// 回退查找非空唯一索引
+	indexNames := make([]string, 0, len(tbl.Indexes))
+	for name := range tbl.Indexes {
+		indexNames = append(indexNames, name)
+	}
+	sort.Strings(indexNames)
+	for _, name := range indexNames {
+		idx := tbl.Indexes[name]
+		if idx.Unique && len(idx.Columns) > 0 {
+			allNotNull := true
+			for _, colName := range idx.Columns {
+				if c := tbl.Columns[colName]; c != nil && c.Nullable {
+					allNotNull = false
+					break
+				}
+			}
+			if allNotNull {
+				return idx.Columns
+			}
+		}
+	}
+	return nil
+}
+
 func tableColumnsAndTypes(tbl *conn.Table, rule ICompareRule) ([]string, []string, map[string]string, error) {
 	if tbl == nil {
 		return nil, nil, nil, fmt.Errorf("table %s not found", rule.GetTable())
@@ -451,33 +485,7 @@ func tableColumnsAndTypes(tbl *conn.Table, rule ICompareRule) ([]string, []strin
 		cols = append(cols, name)
 		colTypes[name] = col.DataType
 	}
-	var pks []string
-	if tbl.PrimaryKey != nil && len(tbl.PrimaryKey.Columns) > 0 {
-		pks = tbl.PrimaryKey.Columns
-	} else if tbl.Indexes != nil {
-		// 回退查找非空唯一索引
-		indexNames := make([]string, 0, len(tbl.Indexes))
-		for name := range tbl.Indexes {
-			indexNames = append(indexNames, name)
-		}
-		sort.Strings(indexNames)
-		for _, name := range indexNames {
-			idx := tbl.Indexes[name]
-			if idx.Unique && len(idx.Columns) > 0 {
-				allNotNull := true
-				for _, colName := range idx.Columns {
-					if c := tbl.Columns[colName]; c != nil && c.Nullable {
-						allNotNull = false
-						break
-					}
-				}
-				if allNotNull {
-					pks = idx.Columns
-					break
-				}
-			}
-		}
-	}
+	pks := RowIdentityColumns(tbl)
 	if len(pks) == 0 {
 		return nil, nil, nil, fmt.Errorf("primary key or not-null unique index required for table %s", rule.GetTable())
 	}

@@ -119,7 +119,7 @@ func (a *MySQLAdapter) GetTableDataBatchContext(ctx context.Context, table strin
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s %s ORDER BY %s LIMIT ?", colList, a.quotedTable(table), where, orderBy)
 	args = append(args, limit)
-	rows, err := a.Conn.QueryContext(ctx, query, args...)
+	rows, err := a.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +212,7 @@ func (a *MySQLAdapter) ExtractView(viewName string) (*conn.Table, error) {
 // 而不是返回零列空模型让上层误报「缺少主键」。
 func (a *MySQLAdapter) baseTableExists(tableName string) (bool, error) {
 	var found bool
-	err := a.Conn.QueryRow(
+	err := a.QueryRow(context.Background(),
 		`SELECT COUNT(*) > 0 FROM information_schema.tables
 		 WHERE table_schema = ? AND table_name = ? AND table_type = 'BASE TABLE'`,
 		a.Cfg.TableSchema, tableName).Scan(&found)
@@ -231,7 +231,7 @@ func (a *MySQLAdapter) GetConfig() *config.ConnConfig {
 }
 
 func (a *MySQLAdapter) queryTables() (map[string]*conn.Table, error) {
-	rows, err := a.Conn.Query(`SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ?`, a.Cfg.TableSchema)
+	rows, err := a.QueryContext(context.Background(), `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ?`, a.Cfg.TableSchema)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +266,7 @@ func (a *MySQLAdapter) queryTables() (map[string]*conn.Table, error) {
 }
 
 func (a *MySQLAdapter) extractColumns(table *conn.Table) error {
-	colRows, err := a.Conn.Query(`SELECT
+	colRows, err := a.QueryContext(context.Background(), `SELECT
 			column_name,
 			data_type,
 			is_nullable,
@@ -346,7 +346,7 @@ func (a *MySQLAdapter) extractPrimaryKey(table *conn.Table) error {
 		GROUP BY tc.constraint_schema, tc.table_schema, tc.table_name, tc.constraint_name
 	`
 	var constraintName, columns string
-	err := a.Conn.QueryRow(query, table.Schema, table.Name).Scan(&constraintName, &columns)
+	err := a.QueryRow(context.Background(), query, table.Schema, table.Name).Scan(&constraintName, &columns)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
@@ -371,7 +371,7 @@ func (a *MySQLAdapter) extractIndexes(table *conn.Table) error {
 		WHERE table_schema = ? AND table_name = ? AND index_name != 'PRIMARY'
 		GROUP BY index_name, non_unique, index_type
 	`
-	idxRows, err := a.Conn.Query(query, table.Schema, table.Name)
+	idxRows, err := a.QueryContext(context.Background(), query, table.Schema, table.Name)
 	if err != nil {
 		return err
 	}
@@ -418,7 +418,7 @@ func (a *MySQLAdapter) extractForeignKeys(table *conn.Table) error {
 		  AND tc.constraint_type = 'FOREIGN KEY'
 		GROUP BY tc.constraint_name, kcu.referenced_table_schema, kcu.referenced_table_name, rc.delete_rule, rc.update_rule
 	`
-	fkRows, err := a.Conn.Query(query, table.Schema, table.Name)
+	fkRows, err := a.QueryContext(context.Background(), query, table.Schema, table.Name)
 	if err != nil {
 		return err
 	}
@@ -458,7 +458,7 @@ func (a *MySQLAdapter) extractViewDefinition(table *conn.Table) error {
 	var viewDef conn.ViewDefinition
 	var isUpdatable, checkOption sql.NullString
 
-	err := a.Conn.QueryRow(query, table.Schema, table.Name).Scan(
+	err := a.QueryRow(context.Background(), query, table.Schema, table.Name).Scan(
 		&viewDef.SelectStatement,
 		&isUpdatable,
 		&checkOption,
@@ -471,7 +471,7 @@ func (a *MySQLAdapter) extractViewDefinition(table *conn.Table) error {
 	if checkOption.Valid {
 		viewDef.CheckOption = checkOption.String
 	}
-	dependencyRows, err := a.Conn.Query(`
+	dependencyRows, err := a.QueryContext(context.Background(), `
 		SELECT table_schema, table_name
 		FROM information_schema.view_table_usage
 		WHERE view_schema = ? AND view_name = ?
@@ -504,7 +504,7 @@ func (a *MySQLAdapter) getTableComment(schemaName, tableName string) string {
 	`
 
 	var comment sql.NullString
-	err := a.Conn.QueryRow(query, schemaName, tableName).Scan(&comment)
+	err := a.QueryRow(context.Background(), query, schemaName, tableName).Scan(&comment)
 	if err != nil {
 		return ""
 	}
@@ -561,7 +561,7 @@ func (a *MySQLAdapter) GetChunkRangesWithStats(table string, pk string, chunkSiz
 		}
 		query += fmt.Sprintf(" ORDER BY %s ASC LIMIT ?", quotedPK)
 		args = append(args, chunkSize+1)
-		rows, err := a.Conn.Query(query, args...)
+		rows, err := a.QueryContext(context.Background(), query, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -608,7 +608,7 @@ func (a *MySQLAdapter) GetChunkStats(table string, pk string) (chunk.ChunkStats,
 	quotedPK := ident.Quote(ident.Backtick, pk)
 	query := fmt.Sprintf("SELECT COUNT(*), MIN(%s), MAX(%s) FROM %s", quotedPK, quotedPK, a.quotedTable(table))
 	var stats chunk.ChunkStats
-	if err := a.Conn.QueryRow(query).Scan(&stats.Count, &stats.MinPK, &stats.MaxPK); err != nil {
+	if err := a.QueryRow(context.Background(), query).Scan(&stats.Count, &stats.MinPK, &stats.MaxPK); err != nil {
 		return chunk.ChunkStats{}, err
 	}
 	return stats, nil
@@ -648,7 +648,7 @@ func (a *MySQLAdapter) GetChunkHash(table string, cols []string, pk string, minP
 	query := fmt.Sprintf("SELECT COALESCE(HEX(BIT_XOR(CAST(CRC32(%s) AS UNSIGNED))), '0') FROM %s WHERE %s", concatExpr, a.quotedTable(table), whereClause)
 
 	var hash sql.NullString
-	err := a.Conn.QueryRow(query, args...).Scan(&hash)
+	err := a.QueryRow(context.Background(), query, args...).Scan(&hash)
 	if err != nil {
 		return "", err
 	}

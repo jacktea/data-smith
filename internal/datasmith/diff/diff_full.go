@@ -10,6 +10,7 @@ import (
 
 	"github.com/jacktea/data-smith/internal/config"
 	local "github.com/jacktea/data-smith/internal/datasmith/migrate/local"
+	pkgconfig "github.com/jacktea/data-smith/pkg/config"
 
 	"github.com/spf13/cobra"
 )
@@ -27,16 +28,21 @@ var versionOnlyPattern = regexp.MustCompile(`^[vV]?(\d+(?:\.\d+)*)$`)
 func runDiffFull(cmd *cobra.Command, args []string) error {
 	configPath, _ := cmd.Flags().GetString("config")
 	rulesPath, _ := cmd.Flags().GetString("rules")
+	excludeFlag, _ := cmd.Flags().GetString("exclude-tables")
+	dataDiffMode, _ := cmd.Flags().GetString("data-diff-mode")
 	batchSize, _ := cmd.Flags().GetInt("batch-size")
 	enableChunkHash, _ := cmd.Flags().GetBool("chunk-hash")
 	chunkSize, _ := cmd.Flags().GetInt("chunk-size")
 	dmlBatchSize, _ := cmd.Flags().GetInt("dml-batch-size")
 	bestEffort, _ := cmd.Flags().GetBool("best-effort")
 	skipMissingTables, _ := cmd.Flags().GetBool("skip-missing-tables")
-	if err := validateDiffDataInputs(configPath, rulesPath, batchSize, chunkSize, enableChunkHash); err != nil {
+	if err := validateDiffDataInputs(configPath, batchSize, chunkSize, enableChunkHash); err != nil {
 		return err
 	}
 	if err := validateDMLBatchSize(dmlBatchSize); err != nil {
+		return err
+	}
+	if err := ValidateDataDiffMode(dataDiffMode); err != nil {
 		return err
 	}
 	migrateDir, _ := cmd.Flags().GetString("migrate-dir")
@@ -50,9 +56,15 @@ func runDiffFull(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	rules, err := config.LoadRules(rulesPath)
-	if err != nil {
-		return fmt.Errorf("load rules: %w", err)
+	var rules *pkgconfig.RuleSet
+	if strings.TrimSpace(rulesPath) == "" {
+		// 规则省略：整库模式，展开为全部有行身份的表（排除默认账本表）。
+		rules = &pkgconfig.RuleSet{}
+	} else {
+		rules, err = config.LoadRules(rulesPath)
+		if err != nil {
+			return fmt.Errorf("load rules: %w", err)
+		}
 	}
 	if err := validateRules(rules); err != nil {
 		return err
@@ -68,8 +80,9 @@ func runDiffFull(cmd *cobra.Command, args []string) error {
 		Source:            &cfg.SourceDB,
 		Target:            &cfg.TargetDB,
 		IncludeTables:     cfg.IncludeTables,
-		ExcludeTables:     cfg.ExcludeTables,
+		ExcludeTables:     append(cfg.ExcludeTables, splitCSVExcludeTables(excludeFlag)...),
 		Rules:             rules.Rules,
+		DataDiffMode:      dataDiffMode,
 		BatchSize:         batchSize,
 		ChunkSize:         chunkSize,
 		DMLBatchSize:      dmlBatchSize,
@@ -209,7 +222,9 @@ func importMigrationVersion(diffDir, migrateDir, version, title string) (string,
 
 func init() {
 	diffFullCmd.Flags().StringP("config", "c", "", "Path to config file")
-	diffFullCmd.Flags().StringP("rules", "r", "", "Path to rules file")
+	diffFullCmd.Flags().StringP("rules", "r", "", "Path to rules file; omit for whole-database mode (all tables with row identity, ledger tables excluded)")
+	diffFullCmd.Flags().String("exclude-tables", "", "Comma-separated tables to exclude from schema and data comparison (ledger tables are always excluded)")
+	diffFullCmd.Flags().String("data-diff-mode", DataDiffModeAuto, "Data comparison mode: auto (shadow transaction for PostgreSQL sources with schema changes), shadow, or direct")
 	diffFullCmd.Flags().StringP("output", "o", "", "Directory for the four diff artifacts (default: current directory)")
 	diffFullCmd.Flags().Int("batch-size", 1000, "Batch size for data diff and SQL output")
 	diffFullCmd.Flags().Bool("chunk-hash", false, "Enable probabilistic chunk fingerprints after exact count/min/max checks (opt-in)")
@@ -221,5 +236,4 @@ func init() {
 	diffFullCmd.Flags().String("version", "", "Migration version for --migrate-dir (dotted number, e.g. 1.0)")
 	diffFullCmd.Flags().String("title", "", "Migration title for --migrate-dir (no dots or whitespace)")
 	diffFullCmd.MarkFlagRequired("config")
-	diffFullCmd.MarkFlagRequired("rules")
 }

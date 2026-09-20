@@ -127,6 +127,20 @@
   b. data diff 原生支持漂移：行读取 source 用公共列、target 用全列；INSERT 用 target
      全行；UPDATE 覆盖新增列。
 - **验收**：2.2.0（加列）与 3.0.0（删列）轮的 up 一次执行通过，无需预对齐编排。
+- **完成情况（第 2 批）**：采用方案 a。`diff-full` 内建两阶段：结构比对后，把
+  结构 forward 语句逐条应用在 source 连接内的**影子事务**（`BEGIN; DDL; 数据
+  比对; ROLLBACK`），数据比对经 `base.BaseAdapter` 新增的会话路由
+  （`BindSession`，`QueryContext/QueryRow` 统一走会话或连接池）读取对齐后的
+  影子结构——不落库、单连接，单侧表差异也被事务内 DDL 消除（target 独有表
+  纳入数据比对、source 独有表随 DROP 消失），数据模型仅预热 target 侧。模式
+  由 `--data-diff-mode auto|shadow|direct` 控制（auto：PostgreSQL source 且
+  存在结构差异时启用）；MySQL 无事务性 DDL，auto 自动回退直接比对并告警，
+  强制 shadow 对 MySQL source 显式报错（DDL 隐式提交会污染库）。影子对齐
+  失败即整体失败（forward 产物不可执行的信号），绝不静默降级；影子内只应用
+  forward，绝不触碰 down。单测：模式决策/语句预览/会话路由
+  （`TestDecideShadowDataDiff`、`TestBindSessionRoutesReadsToSession` 等）；
+  集成：`TestFullDiffShadowTwoPhaseOnPostgres`（加列/删列轮 up 一次执行、
+  影子 ROLLBACK 零残留、闭环收敛）。airedge 实测见「六」。
 
 ### C6【P1】表选择 / 排除能力（含账本表污染）
 
@@ -140,6 +154,20 @@
   - rules 支持省略/通配（如 `air_sys_*`）时比对「全部有行身份的表」。
 - **验收**：不写 rules 可出整库链；账本表不出现在任何产物；migrate-script 推进与
   diff 共存互不干扰（主链恢复使用 migrate-script，找回账本/checksum/回退通道的全程验证）。
+- **完成情况（第 2 批）**：①数据比对全面接入排除清单（默认账本表
+  `schema_migrations`/`flyway_schema_history` + 配置 `excludeTables` + CLI
+  `--exclude-tables`），命中规则在展开后统一过滤并计入
+  `DataDiffResult.ExcludedTables`；②规则省略（`--rules` 不传或空数组）与
+  通配（表名含 `*`/`?`，仅允许 `table` 字段）展开为「两侧均存在且具有行身份
+  （`pkg/diff.RowIdentityColumns`：主键 → 非空唯一索引）的基础表」，影子模式
+  下候选为 target 全集（单侧差异已被事务内 DDL 消除），展开确定性排序、显式
+  规则优先不重复；③发现并修复账本**从属序列**缺口：被排除表拥有的 SERIAL
+  隐式序列（如 `schema_migrations_id_seq`）随表一起排除
+  （`filterSequencesByOwnedTable`），否则结构产物会对账本反向生成
+  `DROP SEQUENCE`/`CREATE SEQUENCE`（88 轮链实测抓到）；④Web 完全比对保持
+  显式选择语义（空表选择仍报错），整库通配仅 CLI/引擎层开放。单测：
+  `TestExpandRules*`、`TestFilterRulesByExcludes*`、
+  `TestFilterSequencesByOwnedTable`、`TestResolveDataRules*` 等。
 
 ### C7【P2·DX】不合规迁移文件名静默跳过
 
@@ -174,7 +202,7 @@
 | 批次 | 内容 | 出口标准 |
 |---|---|---|
 | 第 1 批 | F0 提交；C1；C2；C3 | ✅ 完成（2026-09-20）。实测超出出口标准：**88 个版本全链 2.1.0→3.7.0.35 纯 datasmith 命令跑通**，末轮结构比对 0 语句、数据比对 0 DML，双闭环为空 |
-| 第 2 批 | C5；C6 | 撤销两阶段预对齐编排，diff-full 单命令出链；账本共存 |
+| 第 2 批 | C5；C6 | ✅ 完成（2026-09-20）。两阶段预对齐编排与外部 rules 生成脚本全部废弃：**88 轮以 `exec-sql 回放 → diff-full 单命令（整库通配 + auto 影子两阶段 + --migrate-dir）→ migrate-script 推进 source` 重跑全链成功**，39 轮触发影子对齐，账本 88/88 success，末轮结构 0 语句 / 数据 0 DML |
 | 第 3 批 | C4a；C7；C8；C9 | 无键表按配置可比；DX 项完成 |
 | 回归 | C10 + 全链重跑（88 轮） | 闭环 diff 为空；全新回放库经 migrate-script 全链应用成功；回退冒烟通过；登记脚本库 |
 
@@ -192,15 +220,27 @@
 5. 输出报告：逐版本产物摘要、函数/序列/视图增强清单、Java 迁移（8 个）效果缺口、
    回退对破坏性变更的固有限制。
 
-## 六、当前状态（第 1 批完成后）
+## 六、当前状态（第 2 批完成后，2026-09-20）
 
-- **全链演练已完成**：postgres14_22 上重建 airedge_mig_src/tgt，88 轮
-  （回放→diff-schema→diff-data --skip-missing-tables --best-effort→exec-sql 推进 source）
-  全部 OK；末轮 diff-schema 0 语句、diff-data 0 DML（闭环收敛）。
-- 视图弹跳在 23 轮触发；例程 DDL 覆盖 2.1.0/2.2.0/2.7.0/3.0.0 等轮；
-  序列增删覆盖 air_ws_items_index_seq_* 等。C5 列漂移在 2.2.0 轮复现一次
-  （air_sys_list_item.parent_id，--best-effort 跳过后下一轮自愈），按计划留待第 2 批。
-- 旧临时工作区 `/tmp/airedge-migration/` 及其外部脚本已废弃；第 1 批演练工作区为
-  `/tmp/ds-acceptance/`（含 run-chain.sh 驱动与逐轮产物）。
-- **下一批（第 2 批）**：C5（diff-full 影子事务两阶段数据比对）+ C6（表排除/通配与
-  账本默认排除）；随后第 3 批 C4a/C7/C8/C9，回归批 C10 已提前大半解除。
+- **C5+C6 已补齐并经 airedge 全链实测**：`/tmp/ds-acceptance-batch2/` 工作区，
+  一次性库全量重建后 88 轮（2.1.0→3.7.0.35）以最终形态跑通——
+  `exec-sql --tx 回放 target → diff-full 单命令（省略 rules 整库通配、auto
+  影子两阶段、--migrate-dir 生成 up/down）→ migrate-script 推进 source`。
+  全程 **0 次预对齐编排、0 次外部脚本加工、0 次 --best-effort /
+  --skip-missing-tables、0 次 psql 回退**；39 轮触发影子对齐，每轮产物
+  grep 校验账本零出现；migrate-script 推进 88/88 success（账本/checksum
+  与 diff 全程共存）；末轮 diff-schema 0 语句、整库 diff-data 0 DML，
+  两侧各 248 张表。C5 热点轮 2.2.0（加列）与 3.0.0（删列）的 up 均一次
+  执行通过。
+- **本批新增修复**：账本从属序列缺口（被排除表的 SERIAL 隐式序列曾以
+  `DROP/CREATE SEQUENCE` 出现在结构产物，`schema_migrations_id_seq` 实测）。
+- 第 1 批演练工作区 `/tmp/ds-acceptance/` 保留作对照；第 2 批迁移脚本库在
+  `/tmp/ds-acceptance-batch2/migrations/`（88 对 up/down，40MB，尚未登记
+  脚本库，留回归批）。
+- **未竟事项（如实）**：airedge 有 8 个 Java 迁移无法 SQL 回放，效果缺口
+  报告留回归批；`--data-diff-mode` 与影子机制当前仅 CLI，Web 完全比对走
+  引擎默认 auto（行为自动受益），无独立开关。
+- **下一批（第 3 批）**：C4a（无键表按配置可比）+ C7（迁移文件名静默跳过
+  告警）+ C8（Web 删除脚本孤儿版本清理）+ C9（exec-sql 失败定位增强）；
+  随后回归批：全链重跑 + verify 库 migrate-script 全链应用 + 回退冒烟 +
+  脚本库登记 + Java 迁移缺口报告。

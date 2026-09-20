@@ -158,6 +158,13 @@ SSH 代理必须配置主机身份验证，二选一使用 `knownHostsPath` 或�
 }
 ```
 
+规则支持省略与通配：表名含 `*` 或 `?` 的条目按模式展开；`--rules` 整个
+省略（或 `rules` 为空数组）时按整库模式比对「全部具有行身份（主键或非空
+唯一索引）的表」。通配条目只允许 `table` 字段。排除清单（配置文件
+`excludeTables` + CLI `--exclude-tables`）默认始终包含迁移账本表
+`schema_migrations` 与 `flyway_schema_history`，被排除表拥有的 SERIAL
+隐式序列一并排除，账本结构不会出现在任何比对产物中。
+
 ### 3. 数据或结构比对
 
 ```bash
@@ -167,12 +174,24 @@ SSH 代理必须配置主机身份验证，二选一使用 `knownHostsPath` 或�
 ./datasmith diff-data -c configs/config.yaml -r configs/rules.json
 # 数据比对跳过尚不存在的表(迁移链场景: 晚建表由后续版本轮次同步),并输出 warning 清单
 ./datasmith diff-data -c configs/config.yaml -r configs/rules.json --skip-missing-tables
+# 整库数据比对(省略规则, 账本表自动排除)
+./datasmith diff-data -c configs/config.yaml
 # 完全对比:一次同时比对结构与数据,产出四份 SQL(结构/数据 × 正向/回滚)
 ./datasmith diff-full -c configs/config.yaml -r configs/rules.json -o output/diff
 # 完全对比并一步生成迁移 up/down 对(仅生成脚本;执行仍需 migrate-script 显式进行)
 ./datasmith diff-full -c configs/config.yaml -r configs/rules.json -o output/diff \
   --migrate-dir data/dbscripts --version 1.0.0 --title full-sync
 ```
+
+完全对比的数据比对默认两阶段（`--data-diff-mode auto`）：source 为
+PostgreSQL 且存在结构差异时，先把结构正向 DDL 应用在 source 连接内的
+**影子事务**（`BEGIN; 结构 forward; 数据比对; ROLLBACK`），数据比对经同一
+会话读取对齐后的影子结构再生成 up/down——不污染库、单连接，两侧结构漂移
+（加列/删列/建表）轮的 up 一次执行即可对齐结构与数据，无需人工预对齐。
+影子对齐失败会直接报错（说明 forward 产物在真实结构上不可执行），不会静默
+降级。MySQL 无事务性 DDL，自动回退为直接比对（公共列/主键列集的漂移容错）
+并输出告警；`--data-diff-mode shadow` 强制影子（仅 PostgreSQL source），
+`direct` 强制禁用。
 
 ### 4. 执行 SQL 文件 (`exec-sql`)
 

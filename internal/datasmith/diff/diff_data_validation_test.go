@@ -14,13 +14,23 @@ import (
 )
 
 func TestValidateDiffDataInputsRejectsSizesBeforePaths(t *testing.T) {
-	err := validateDiffDataInputs("missing-config.yml", "missing-rules.json", 0, 100, false)
+	err := validateDiffDataInputs("missing-config.yml", 0, 100, false)
 	if err == nil || !strings.Contains(err.Error(), "batch size") {
 		t.Fatalf("expected batch-size preflight error, got %v", err)
 	}
-	err = validateDiffDataInputs("missing-config.yml", "missing-rules.json", 1, 0, true)
+	err = validateDiffDataInputs("missing-config.yml", 1, 0, true)
 	if err == nil || !strings.Contains(err.Error(), "chunk size") {
 		t.Fatalf("expected chunk-size preflight error, got %v", err)
+	}
+}
+
+func TestValidateRulesRejectsWildcardEntriesWithColumns(t *testing.T) {
+	rules := &config.RuleSet{Rules: []config.Rule{{Table: "air_sys_*", IgnoreColumns: []string{"updated_at"}}}}
+	if err := validateRules(rules); err == nil || !strings.Contains(err.Error(), "wildcard") {
+		t.Fatalf("expected wildcard field rejection, got %v", err)
+	}
+	if err := validateRules(&config.RuleSet{Rules: []config.Rule{{Table: "air_sys_*"}}}); err != nil {
+		t.Fatalf("bare wildcard entry must be accepted, got %v", err)
 	}
 }
 
