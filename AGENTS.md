@@ -28,7 +28,7 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 ./scripts/check-coverage.sh
 ```
 
-CLI 子命令：`diff-schema`、`diff-data`、`exec-sql`、`reset-db`、`migrate-script`、`web`（Web 控制台，`--addr`/`--data-dir`；示例配置在 `configs/`）。
+CLI 子命令：`diff-schema`、`diff-data`、`diff-full`（一次比对结构+数据，可经 `--migrate-dir` 一步生成迁移 up/down）、`exec-sql`、`reset-db`、`migrate-script`、`migrate-rollback`（回退最新或 `--target` 指定版本）、`web`（Web 控制台，`--addr`/`--data-dir`；示例配置在 `configs/`）。
 
 ## 架构
 
@@ -37,11 +37,12 @@ cmd/main.go                 仅入口；禁止业务逻辑
 internal/
   config/                   配置加载与解析（YAML/JSON）
   datasmith/root.go         cobra 根命令；子命令包经 Install(rootCmd) 注册
-  datasmith/diff/           diff-schema、diff-data（streaming_data.go 流水线，
-                            atomic_output.go 原子写文件，run.go 供 Web 复用的编排入口）
+  datasmith/diff/           diff-schema、diff-data、diff-full（streaming_data.go 流水线，
+                            atomic_output.go 原子写文件，run.go 供 Web 复用的编排入口，
+                            full.go 一次比结构与数据，migration_assembly.go 合成 up/down）
   datasmith/exec/           exec-sql（sql_scanner.go：词法级 SQL 语句拆分器）
-  datasmith/migrate/        reset-db、migrate-script（RunMigrations/RollbackLatest
-                            供 Web 复用；down 脚本仅经 RollbackLatest 执行）
+  datasmith/migrate/        reset-db、migrate-script、migrate-rollback（RunMigrations/
+                            RollbackLatest/RollbackTo 供 Web 复用；down 脚本仅经回退通道执行）
   datasmith/web/            Web 控制台子命令（--addr、--data-dir）
   server/                   Web 控制台后端：连接管理、比对/执行/重置/迁移任务、
                             命名连接与比对方案存储（store.json）、脚本库托管、

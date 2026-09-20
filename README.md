@@ -164,6 +164,11 @@ SSH 代理必须配置主机身份验证，二选一使用 `knownHostsPath` 或�
 ./datasmith diff-schema -c configs/config.yaml
 # 数据比对
 ./datasmith diff-data -c configs/config.yaml -r configs/rules.json
+# 完全对比:一次同时比对结构与数据,产出四份 SQL(结构/数据 × 正向/回滚)
+./datasmith diff-full -c configs/config.yaml -r configs/rules.json -o output/diff
+# 完全对比并一步生成迁移 up/down 对(仅生成脚本;执行仍需 migrate-script 显式进行)
+./datasmith diff-full -c configs/config.yaml -r configs/rules.json -o output/diff \
+  --migrate-dir data/dbscripts --version 1.0.0 --title full-sync
 ```
 
 ### 4. 执行 SQL 文件 (`exec-sql`)
@@ -221,6 +226,12 @@ SSH 代理必须配置主机身份验证，二选一使用 `knownHostsPath` 或�
 ./datasmith migrate-script -c configs/config.yaml -d data/dbscripts
 # 执行迁移脚本, 模拟执行
 ./datasmith migrate-script -c configs/config.yaml -d data/dbscripts -n
+# 回退最新一个已应用版本(破坏性操作,必须显式 --yes)
+./datasmith migrate-rollback -c configs/config.yaml -d data/dbscripts --yes
+# 回退到指定版本:从最新版本起逐个回退,直到该版本成为最新(该版本本身保留)
+./datasmith migrate-rollback -c configs/config.yaml -d data/dbscripts --target 1.0.0 --yes
+# 预览将回退的版本清单,不执行任何数据库变更
+./datasmith migrate-rollback -c configs/config.yaml -d data/dbscripts --target 1.0.0 --dry-run
 ```
 
 ---
