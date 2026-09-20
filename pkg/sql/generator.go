@@ -118,10 +118,15 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 			}
 		}
 		for _, index := range sortedIndexes(tableDiff.IndexesDropped) {
+			// 主键背书索引只能随约束删除 (DROP INDEX 会被 PG 拒绝),
+			// 其生命周期跟随下方 PrimaryKeyChange 的 DROP CONSTRAINT。
+			if index.Primary {
+				continue
+			}
 			add(&dropDependencies, dbDialect.GenerateDropIndexSql(table, index))
 		}
 		for _, change := range sortedIndexDiffs(tableDiff.IndexesModified) {
-			if change.Old != nil {
+			if change.Old != nil && !change.Old.Primary {
 				add(&dropDependencies, dbDialect.GenerateDropIndexSql(table, change.Old))
 			}
 		}

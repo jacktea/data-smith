@@ -169,6 +169,38 @@ func TestGenerateSchemaSQLAffectedViewsBounceAroundTableDDL(t *testing.T) {
 	}
 }
 
+// 主键背书索引的生命周期跟随约束: 删除主键时不得再生成 DROP INDEX。
+func TestGenerateSchemaSQLSkipsPrimaryKeyBackingIndexDrop(t *testing.T) {
+	tbl := nontableTable("public", "events")
+	tbl.PrimaryKey = &conn.PrimaryKey{Name: "events_pkey", Columns: []string{"id"}}
+	tbl.Indexes = map[string]*conn.Index{
+		"events_pkey": {Name: "events_pkey", Primary: true, Unique: true, Columns: []string{"id"}},
+		"events_kind": {Name: "events_kind", Columns: []string{"kind"}},
+	}
+	src := &diff.SchemaDiff{
+		TablesModified: []*diff.TableDiff{{
+			SourceTable:      tbl,
+			TargetTable:      tbl,
+			Table:            tbl,
+			PrimaryKeyChange: &diff.PrimaryKeyDiff{Old: tbl.PrimaryKey, New: nil},
+			IndexesDropped:   []*conn.Index{tbl.Indexes["events_pkey"], tbl.Indexes["events_kind"]},
+		}},
+	}
+	statements, err := GenerateSchemaSQLSafe(src, consts.DBTypePostgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := indexOfContaining(statements, `DROP INDEX "public"."events_pkey"`); got >= 0 {
+		t.Fatalf("primary-key backing index must not be dropped directly: %v", statements)
+	}
+	if got := indexOfContaining(statements, `DROP INDEX "public"."events_kind"`); got < 0 {
+		t.Fatalf("ordinary index drop is still required: %v", statements)
+	}
+	if got := indexOfContaining(statements, `DROP CONSTRAINT "events_pkey"`); got < 0 {
+		t.Fatalf("primary key constraint drop is required: %v", statements)
+	}
+}
+
 func tableViewDef(schema, name, definition string, deps ...string) *conn.Table {
 	return &conn.Table{
 		Name:   name,
