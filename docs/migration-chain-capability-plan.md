@@ -3,10 +3,13 @@
 > 背景：以「把 airedge 的 88 个 Flyway 迁移脚本改造为 datasmith 迁移链」作为能力探针，
 > 逐版本回放原脚本到演练库 target，用 datasmith 的 diff-schema / diff-data / exec-sql /
 > migrate-script 生成并应用 up/down 对。本文记录实测暴露的工具缺陷、已完成的修复、
-> 待补齐的 feature 与实施顺序。**改造任务暂停，能力补齐后重跑验收。**
+> 待补齐的 feature 与实施顺序。**能力补齐（第 1–3 批）与回归批均已完成，
+> 遗留项滚动至「八」。**
 >
 > 实测窗口：2026-09-20。环境：本机 Docker PG 14.22，一次性库
 > `airedge_mig_src`（落后一版）/ `airedge_mig_tgt`（领先一版）。
+> **状态：能力补齐（第 1–3 批）与回归批均已完成，airedge 88 版本全链
+> 纯 datasmith 命令跑通；遗留 C11/C12/C13 与 Java 缺口见「八」。**
 
 ## 一、实测结论总览
 
@@ -238,6 +241,38 @@
 - **第 1 批实测结论（2026-09-20）**：**88/88 全部经 exec-sql --tx 回放成功，scanner
   零拒绝**，C10 风险对 PG 链基本解除。唯一注意事项：重复回放已应用脚本会在
   `DROP TABLE` 处被正确拒绝（事务回滚，无副作用）——符合预期语义。
+- **回归批复核结论（2026-09-20，逐条执行新路径）**：第 3 批将 `--tx`/`--dry-run`
+  改为事务内逐条执行后，回归批 88 个原脚本（含 `$$` DO 块、CREATE FUNCTION、
+  DDL/DML 混排）再次全数通过——**零拒绝、零错拆、零语句级定位触发**，C10 正式关闭。
+
+### C11【P2】CHECK 约束不参与结构比对（回归批发现）
+
+- **现象（2026-09-20 回归批闭环 catalog 复核）**：原脚本内联创建的 CHECK 约束
+  （`air_inst_bug`、`air_inst_testconfig` 的 `delete_flag` 检查）只存在于回放侧
+  target，链推进的 source/verify 侧缺失；diff 产物与回退产物均不覆盖。
+- **根因**：`pkg/conn` Table 模型无 CHECK 约束；提取/比对/生成全链未建模。
+- **方案**：PG 侧经 `pg_constraint contype='c'` 提取（含表达式规范化），diff 增加
+  ChecksAdded/Dropped，生成 `ADD CONSTRAINT ... CHECK` / `DROP CONSTRAINT`，
+  回滚对称；MySQL 8 同源支持。不阻断链收敛，列为独立子项。
+- **验收**：含内联 CHECK 的表在 diff 产物中出现约束语句，删建闭环为空。
+
+### C12【P3】视图注释（COMMENT ON VIEW）不参与比对（回归批发现）
+
+- **现象（同上复核）**：4 个视图在 target 有 `COMMENT ON VIEW`，source/verify
+  缺失；`compareTable` 对视图按定义相等短路返回，不比注释；生成层无 COMMENT 语句。
+- **方案**：视图比对在定义相等后追加 Comment 比较；`generateView` 补
+  `COMMENT ON VIEW`；表注释已有（`equalTableComment`），对齐即可。
+- **验收**：仅注释差异的视图在产物中生成 COMMENT 语句而非整组删建。
+
+### C13【P3·DX】TablesModified 计数含「零语句差异」表（回归批发现）
+
+- **现象（同上复核）**：末轮闭环产物为空（0 语句）但汇总行报「修改 1 张表」——
+  `air_inst_checklist_item` 主键背书索引名不同（原脚本整表复制建出），
+  `equalIndex` 按名称判异计入修改，而生成层按 F1 语义跳过主键背书索引 →
+  计数与产物不自洽。
+- **方案**：生成后回收「该表实际产语句数」再汇总；或 `equalIndex` 对 `Primary`
+  索引忽略名称（与 `equalPrimaryKey`「仅比对列及顺序」口径对齐）。
+- **验收**：闭环场景 diff-full 汇总行为「新增 0 / 删除 0 / 修改 0」。
 
 ## 四、实施顺序
 
@@ -246,7 +281,7 @@
 | 第 1 批 | F0 提交；C1；C2；C3 | ✅ 完成（2026-09-20）。实测超出出口标准：**88 个版本全链 2.1.0→3.7.0.35 纯 datasmith 命令跑通**，末轮结构比对 0 语句、数据比对 0 DML，双闭环为空 |
 | 第 2 批 | C5；C6 | ✅ 完成（2026-09-20）。两阶段预对齐编排与外部 rules 生成脚本全部废弃：**88 轮以 `exec-sql 回放 → diff-full 单命令（整库通配 + auto 影子两阶段 + --migrate-dir）→ migrate-script 推进 source` 重跑全链成功**，39 轮触发影子对齐，账本 88/88 success，末轮结构 0 语句 / 数据 0 DML |
 | 第 3 批 | C4a；C7；C8；C9 | ✅ 完成（2026-09-20）。无键表按 comparisonKey 业务键可比（物理身份基线不变）；迁移文件名跳过清单 CLI/Web 告警；Web 删除脚本同步清理版本登记 + 启动 store 自检；exec-sql 事务模式逐条执行并定位失败语句（整文件原子语义不变） |
-| 回归 | C10 + 全链重跑（88 轮） | 闭环 diff 为空；全新回放库经 migrate-script 全链应用成功；回退冒烟通过；登记脚本库 |
+| 回归 | C10 + 全链重跑（88 轮） | ✅ 完成（2026-09-20）。闭环 diff 产物为空；verify 从零 migrate-script 全链应用成功；回退冒烟通过；88 对产物登记脚本库。详见 `docs/migration-chain-regression-report.md` |
 
 ## 五、回归计划（能力补齐后的重跑）
 
@@ -307,3 +342,32 @@
   → migrate-script 推进）+ verify 库从零全链应用 + 最近版本回退冒烟 +
   产物登记 `datasmith-web-data/libraries/lib_8989e9f44806929e/` 并同步
   store.json + Java 迁移效果缺口报告。
+
+## 八、当前状态（回归批完成后，2026-09-20）
+
+**回归批验收通过**，全部使用 datasmith 命令（0 外部脚本加工、0 psql 回退、
+0 `--best-effort` / `--skip-missing-tables`）。完整数据与报告见
+`docs/migration-chain-regression-report.md`。要点：
+
+- **全链重跑**：reset-db 全量重建 src/tgt（`--dry-run` 审阅后 `--yes`）、新建
+  verify 空库；88 轮（2.1.0→3.7.0.35）零失败，12 分钟跑完；39 轮影子对齐
+  （最大单轮 133 条 DDL）；账本 88/88 success、checksum 全非空（V2.6.1/V2.6.2
+  与 V3.7.0.8/V3.7.0.10 两对原脚本内容相同，属原仓库重复）。
+- **C10 正式关闭**：`exec-sql --tx` 逐条执行新路径吃下 88/88 原脚本，零拒绝、
+  零错拆（含 `$$` DO 块与 CREATE FUNCTION），语句级定位未触发。
+- **三闭环为空**：末轮、verify（从零 migrate-script 88/88 后与 target，
+  194 表参与）、回退往返复原（V3.7.0.35 down→账本 `rolled_back`→再推进
+  `success`→闭环仍空），产物均为结构 0 语句、数据 0 DML。
+- **登记**：88 对 176 文件（40MB）入 `lib_8989e9f44806929e`，store.json 88 条
+  版本元数据（expectedConnectionId 沿用），清理旧样例 `V3.7.0__update.*` 与
+  孤儿条目 `3.7.1`，一致性复核通过。
+- **新发现（已列 C11/C12/C13，均不阻断收敛，留下一批）**：CHECK 约束不参与
+  比对（target 侧 2 条 delete_flag 检查链上缺失）、视图注释不参与比对
+  （4 个视图 COMMENT 缺失）、TablesModified 计数含零语句差异表（闭环报
+  「修改 1 张表」而产物为空，`air_inst_checklist_item` 主键背书索引名）。
+- **Java 迁移缺口**：8 个跳过；V3_0_1（链断级）与 V3_2_0_99（登录不可用）
+  为最高优先，全部原则上可 PL/pgSQL 等效重写，建议顺序与影响分级见报告「七」。
+- **未竟事项（如实）**：C11/C12/C13 未实施；`--data-diff-mode` 与影子机制仍仅
+  CLI 暴露；Java 缺口未闭合。
+- **下一批建议**：C11 → C12 → C13（各带单测 + 集成用例），随后可选重跑一次
+  闭环验证「修改 0 张表」；如需闭合 Java 缺口，按报告「七」顺序 PL/pgSQL 重写。
