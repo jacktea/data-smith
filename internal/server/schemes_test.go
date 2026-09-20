@@ -79,7 +79,7 @@ func TestSchemeUpdateValidationAndMissingID(t *testing.T) {
 	}
 
 	created := mustJSON(t, front, http.MethodPost, "/api/schemes", map[string]any{
-		"name":  "空名校验",
+		"name":   "空名校验",
 		"tables": []map[string]any{{"table": "orders"}},
 	}, http.StatusOK)
 	id, _ := created["id"].(string)
