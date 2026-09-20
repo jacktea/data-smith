@@ -17,10 +17,10 @@ func GenerateSchemaSQL(schemaDiff *diff.SchemaDiff, dialect consts.DBType) []str
 	return statements
 }
 
-// GenerateSchemaSQLSafe generates deterministic SQL in dependency-safe phases.
-// Tables are created without foreign keys; every foreign key is added only
-// after all table creates have completed. View dependency cycles are rejected
-// because no executable CREATE VIEW ordering exists for them.
+// GenerateSchemaSQLSafe generates deterministic SQL through a unified schema
+// object dependency DAG. Tables are created without foreign keys; foreign keys
+// and sequence ownership are separate operations whose prerequisites are
+// explicit graph edges. Unreliable dependencies and cycles are rejected.
 func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) ([]string, error) {
 	if schemaDiff == nil {
 		return nil, fmt.Errorf("schema diff is required")
@@ -34,37 +34,51 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 	dropped := sortedTables(schemaDiff.TablesDropped)
 	modified := sortedTableDiffs(schemaDiff.TablesModified)
 
-	var dropViews, dropDependencies, dropTables []string
-	var sequencesDropped, routinesDropped, sequencesCreated, sequencesAltered, routinesCreated []string
-	var alterColumns, createTables, buildKeys, addForeignKeys, createViews, comments []string
-	add := func(destination *[]string, statement string) {
-		if statement = strings.TrimSpace(statement); statement != "" {
-			*destination = append(*destination, statement)
-		}
+	dropPlan := newSchemaObjectPlan()
+	createPlan := newSchemaObjectPlan()
+	addPlanned := func(plan *schemaObjectPlan, id schemaOperationID, statement string) {
+		plan.add(id, statement)
 	}
 
 	// 序列与例程的增删改由实现 INonTableObjectDialect 的方言生成；其余方言
 	// （如 MySQL）其驱动本就不会提取这些对象，直接跳过。
 	if objectDialect, ok := dbDialect.(INonTableObjectDialect); ok {
 		for _, sequence := range sortedSequences(schemaDiff.SequencesDropped) {
-			add(&sequencesDropped, objectDialect.GenerateDropSequenceSql(sequence))
+			statement := objectDialect.GenerateDropSequenceSql(sequence)
+			dropPlan.add(operationID(objectID(conn.SchemaObjectSequence, sequence.Schema, sequence.Name), "base"), statement)
 		}
 		for _, routine := range sortedRoutines(schemaDiff.RoutinesDropped) {
-			add(&routinesDropped, objectDialect.GenerateDropRoutineSql(routine))
+			statement := objectDialect.GenerateDropRoutineSql(routine)
+			dropPlan.add(operationID(objectID(conn.SchemaObjectRoutine, routine.Schema, routine.Identity()), "base"), statement)
 		}
 		for _, sequence := range sortedSequences(schemaDiff.SequencesAdded) {
-			add(&sequencesCreated, objectDialect.GenerateCreateSequenceSql(sequence))
+			object := objectID(conn.SchemaObjectSequence, sequence.Schema, sequence.Name)
+			statement := objectDialect.GenerateCreateSequenceSql(sequence)
+			createPlan.add(operationID(object, "base"), statement)
+			if sequence.OwnedBy != "" {
+				withoutOwner := *sequence
+				withoutOwner.OwnedBy = ""
+				for _, ownership := range objectDialect.GenerateAlterSequenceSql(&withoutOwner, sequence) {
+					createPlan.add(operationID(object, "ownership"), ownership)
+				}
+			}
 		}
 		for _, change := range sortedSequenceDiffs(schemaDiff.SequencesModified) {
 			for _, statement := range objectDialect.GenerateAlterSequenceSql(change.Old, change.New) {
-				add(&sequencesAltered, statement)
+				step := "base"
+				if change.Old.OwnedBy != change.New.OwnedBy && change.New.OwnedBy != "" {
+					step = "ownership"
+				}
+				createPlan.add(operationID(objectID(conn.SchemaObjectSequence, change.New.Schema, change.New.Name), step), statement)
 			}
 		}
 		for _, routine := range sortedRoutines(schemaDiff.RoutinesAdded) {
-			add(&routinesCreated, objectDialect.GenerateCreateRoutineSql(routine))
+			statement := objectDialect.GenerateCreateRoutineSql(routine)
+			createPlan.add(operationID(objectID(conn.SchemaObjectRoutine, routine.Schema, routine.Identity()), "base"), statement)
 		}
 		for _, change := range sortedRoutineDiffs(schemaDiff.RoutinesModified) {
-			add(&routinesCreated, objectDialect.GenerateCreateRoutineSql(change.New))
+			statement := objectDialect.GenerateCreateRoutineSql(change.New)
+			createPlan.add(operationID(objectID(conn.SchemaObjectRoutine, change.New.Schema, change.New.Identity()), "base"), statement)
 		}
 	}
 
@@ -86,12 +100,9 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 	// 定义未变但依赖被变更对象的视图（依赖闭包）同样要先 DROP 再重建，
 	// 否则列类型/列删除类 DDL 会被视图依赖拒绝。
 	viewsToDrop = append(viewsToDrop, schemaDiff.ViewsAffected...)
-	orderedDropViews, err := orderViews(viewsToDrop, true)
-	if err != nil {
-		return nil, fmt.Errorf("order dropped views: %w", err)
-	}
-	for _, view := range orderedDropViews {
-		add(&dropViews, dbDialect.GenerateDropViewSql(view))
+	for _, view := range sortedTables(viewsToDrop) {
+		statement := dbDialect.GenerateDropViewSql(view)
+		dropPlan.add(operationID(objectID(conn.SchemaObjectView, view.Schema, view.Name), "base"), statement)
 	}
 
 	// Remove constraints owned by tables that will disappear. This makes
@@ -100,8 +111,9 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 		if table.Type != conn.TableTypeTable {
 			continue
 		}
+		tableDrop := operationID(objectID(conn.SchemaObjectTable, table.Schema, table.Name), "foreign-keys")
 		for _, foreignKey := range sortedForeignKeyMap(table.ForeignKeys) {
-			add(&dropDependencies, dbDialect.GenerateDropForeignKeySql(table, foreignKey))
+			addPlanned(dropPlan, tableDrop, dbDialect.GenerateDropForeignKeySql(table, foreignKey))
 		}
 	}
 	for _, tableDiff := range modified {
@@ -109,12 +121,13 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 		if table == nil || table.Type == conn.TableTypeView {
 			continue
 		}
+		tableChange := operationID(objectID(conn.SchemaObjectTable, table.Schema, table.Name), "base")
 		for _, foreignKey := range sortedForeignKeys(tableDiff.ForeignKeysDropped) {
-			add(&dropDependencies, dbDialect.GenerateDropForeignKeySql(table, foreignKey))
+			addPlanned(createPlan, tableChange, dbDialect.GenerateDropForeignKeySql(table, foreignKey))
 		}
 		for _, change := range sortedForeignKeyDiffs(tableDiff.ForeignKeysModified) {
 			if change.Old != nil {
-				add(&dropDependencies, dbDialect.GenerateDropForeignKeySql(table, change.Old))
+				addPlanned(createPlan, tableChange, dbDialect.GenerateDropForeignKeySql(table, change.Old))
 			}
 		}
 		for _, index := range sortedIndexes(tableDiff.IndexesDropped) {
@@ -123,35 +136,39 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 			if index.Primary {
 				continue
 			}
-			add(&dropDependencies, dbDialect.GenerateDropIndexSql(table, index))
+			addPlanned(createPlan, tableChange, dbDialect.GenerateDropIndexSql(table, index))
 		}
 		for _, change := range sortedIndexDiffs(tableDiff.IndexesModified) {
 			if change.Old != nil && !change.Old.Primary {
-				add(&dropDependencies, dbDialect.GenerateDropIndexSql(table, change.Old))
+				addPlanned(createPlan, tableChange, dbDialect.GenerateDropIndexSql(table, change.Old))
 			}
 		}
 		// CHECK 约束删除（C11）：先于列删除执行——被删列上的 CHECK 若不先删
 		// 会令 DROP COLUMN 被拒绝； modified 的旧约束同样在此删除。
 		if checkDialect, ok := dbDialect.(ICheckConstraintDialect); ok {
 			for _, check := range sortedChecks(tableDiff.ChecksDropped) {
-				add(&dropDependencies, checkDialect.GenerateDropCheckConstraintSql(table, check))
+				addPlanned(createPlan, tableChange, checkDialect.GenerateDropCheckConstraintSql(table, check))
 			}
 			for _, change := range sortedCheckDiffs(tableDiff.ChecksModified) {
 				if change.Old != nil {
-					add(&dropDependencies, checkDialect.GenerateDropCheckConstraintSql(table, change.Old))
+					addPlanned(createPlan, tableChange, checkDialect.GenerateDropCheckConstraintSql(table, change.Old))
 				}
 			}
 		}
 		if tableDiff.PrimaryKeyChange != nil && tableDiff.PrimaryKeyChange.Old != nil {
-			add(&dropDependencies, dbDialect.GenerateDropPrimaryKeySql(table, tableDiff.PrimaryKeyChange.Old))
+			addPlanned(createPlan, tableChange, dbDialect.GenerateDropPrimaryKeySql(table, tableDiff.PrimaryKeyChange.Old))
 		}
 		for _, column := range sortedColumns(tableDiff.ColumnsDropped) {
-			add(&dropDependencies, dbDialect.GenerateDropColumnSql(table, column))
+			addPlanned(createPlan, tableChange, dbDialect.GenerateDropColumnSql(table, column))
 		}
 	}
 
-	for _, table := range orderTablesForDrop(dropped) {
-		add(&dropTables, dbDialect.GenerateDropTableSql(table))
+	for _, table := range dropped {
+		if table.Type != conn.TableTypeTable {
+			continue
+		}
+		statement := dbDialect.GenerateDropTableSql(table)
+		dropPlan.add(operationID(objectID(conn.SchemaObjectTable, table.Schema, table.Name), "base"), statement)
 	}
 
 	for _, tableDiff := range modified {
@@ -159,17 +176,19 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 		if table == nil || table.Type == conn.TableTypeView {
 			continue
 		}
+		tableChange := operationID(objectID(conn.SchemaObjectTable, table.Schema, table.Name), "base")
 		for _, change := range sortedColumnDiffs(tableDiff.ColumnsModified) {
-			add(&alterColumns, dbDialect.GenerateAlterColumnSql(table, change.Old, change.New))
+			addPlanned(createPlan, tableChange, dbDialect.GenerateAlterColumnSql(table, change.Old, change.New))
 		}
 		for _, column := range sortedColumns(tableDiff.ColumnsAdded) {
-			add(&alterColumns, dbDialect.GenerateAddColumnSql(table, column))
+			addPlanned(createPlan, tableChange, dbDialect.GenerateAddColumnSql(table, column))
 		}
 	}
 
 	for _, table := range added {
 		if table.Type == conn.TableTypeTable {
-			add(&createTables, dbDialect.GenerateTableDDL(tableWithoutForeignKeys(table)))
+			statement := dbDialect.GenerateTableDDL(tableWithoutForeignKeys(table))
+			createPlan.add(operationID(objectID(conn.SchemaObjectTable, table.Schema, table.Name), "base"), statement)
 		}
 	}
 
@@ -178,33 +197,35 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 		if table == nil || table.Type == conn.TableTypeView {
 			continue
 		}
+		tableChange := operationID(objectID(conn.SchemaObjectTable, table.Schema, table.Name), "base")
 		if tableDiff.PrimaryKeyChange != nil && tableDiff.PrimaryKeyChange.New != nil {
-			add(&buildKeys, dbDialect.GenerateAddPrimaryKeySql(table, tableDiff.PrimaryKeyChange.New))
+			addPlanned(createPlan, tableChange, dbDialect.GenerateAddPrimaryKeySql(table, tableDiff.PrimaryKeyChange.New))
 		}
 		for _, change := range sortedIndexDiffs(tableDiff.IndexesModified) {
 			if change.New != nil {
-				add(&buildKeys, dbDialect.GenerateCreateIndexSql(table, change.New))
+				addPlanned(createPlan, tableChange, dbDialect.GenerateCreateIndexSql(table, change.New))
 			}
 		}
 		for _, index := range sortedIndexes(tableDiff.IndexesAdded) {
-			add(&buildKeys, dbDialect.GenerateCreateIndexSql(table, index))
+			addPlanned(createPlan, tableChange, dbDialect.GenerateCreateIndexSql(table, index))
 		}
 		// CHECK 约束新增/变更（C11）：在列 DDL 之后添加，引用新增列的约束
 		// 可直接执行；与既有索引/主键同属建表后的键与约束阶段。
 		if checkDialect, ok := dbDialect.(ICheckConstraintDialect); ok {
 			for _, check := range sortedChecks(tableDiff.ChecksAdded) {
-				add(&buildKeys, checkDialect.GenerateAddCheckConstraintSql(table, check))
+				addPlanned(createPlan, tableChange, checkDialect.GenerateAddCheckConstraintSql(table, check))
 			}
 			for _, change := range sortedCheckDiffs(tableDiff.ChecksModified) {
 				if change.New != nil {
-					add(&buildKeys, checkDialect.GenerateAddCheckConstraintSql(table, change.New))
+					addPlanned(createPlan, tableChange, checkDialect.GenerateAddCheckConstraintSql(table, change.New))
 				}
 			}
 		}
 	}
 
 	for _, operation := range orderForeignKeyOperations(collectForeignKeyOperations(added, modified)) {
-		add(&addForeignKeys, dbDialect.GenerateAddForeignKeySql(operation.table, operation.foreignKey))
+		foreignKeys := operationID(objectID(conn.SchemaObjectTable, operation.table.Schema, operation.table.Name), "foreign-keys")
+		addPlanned(createPlan, foreignKeys, dbDialect.GenerateAddForeignKeySql(operation.table, operation.foreignKey))
 	}
 
 	viewsToCreate := make([]*conn.Table, 0)
@@ -225,12 +246,9 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 	}
 	// 受影响视图按新态定义参与拓扑排序重建。
 	viewsToCreate = append(viewsToCreate, schemaDiff.ViewsAffected...)
-	orderedCreateViews, err := orderViews(viewsToCreate, false)
-	if err != nil {
-		return nil, fmt.Errorf("order created views: %w", err)
-	}
-	for _, view := range orderedCreateViews {
-		add(&createViews, dbDialect.GenerateViewDDL(view))
+	for _, view := range sortedTables(viewsToCreate) {
+		statement := dbDialect.GenerateViewDDL(view)
+		createPlan.add(operationID(objectID(conn.SchemaObjectView, view.Schema, view.Name), "base"), statement)
 	}
 
 	for _, tableDiff := range modified {
@@ -245,35 +263,195 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 		// 不支持视图注释的方言（MySQL）跳过，不产生删建。
 		if table.Type == conn.TableTypeView {
 			if viewCommentDialect, ok := dbDialect.(IViewCommentDialect); ok {
-				add(&comments, viewCommentDialect.GenerateAlterViewCommentSql(table, tableDiff.CommentChange.New))
+				addPlanned(createPlan,
+					operationID(objectID(conn.SchemaObjectView, table.Schema, table.Name), "comment"),
+					viewCommentDialect.GenerateAlterViewCommentSql(table, tableDiff.CommentChange.New))
 			}
 			continue
 		}
 		if table.Type == conn.TableTypeTable {
-			add(&comments, dbDialect.GenerateAlterTableCommentSql(table, tableDiff.CommentChange.New))
+			addPlanned(createPlan,
+				operationID(objectID(conn.SchemaObjectTable, table.Schema, table.Name), "comment"),
+				dbDialect.GenerateAlterTableCommentSql(table, tableDiff.CommentChange.New))
 		}
 	}
 
-	result := make([]string, 0, len(dropViews)+len(dropDependencies)+len(dropTables)+
-		len(sequencesDropped)+len(routinesDropped)+len(sequencesCreated)+len(sequencesAltered)+len(routinesCreated)+
-		len(alterColumns)+len(createTables)+len(buildKeys)+len(addForeignKeys)+len(createViews)+len(comments))
-	result = append(result, dropViews...)
-	result = append(result, dropDependencies...)
-	result = append(result, dropTables...)
-	// 序列/例程删除放在表删除之后（被删表的 SERIAL 隐式序列已随表消失，
-	// IF EXISTS 兜底）；创建放在表 DDL 之前（列默认值 nextval / 函数依赖）。
-	result = append(result, sequencesDropped...)
-	result = append(result, routinesDropped...)
-	result = append(result, sequencesCreated...)
-	result = append(result, sequencesAltered...)
-	result = append(result, routinesCreated...)
-	result = append(result, alterColumns...)
-	result = append(result, createTables...)
-	result = append(result, buildKeys...)
-	result = append(result, addForeignKeys...)
-	result = append(result, createViews...)
-	result = append(result, comments...)
-	return result, nil
+	if err := wireSchemaObjectPlans(dropPlan, createPlan, schemaDiff); err != nil {
+		return nil, err
+	}
+	dropStatements, err := dropPlan.ordered(true)
+	if err != nil {
+		return nil, fmt.Errorf("order dropped schema objects: %w", err)
+	}
+	createStatements, err := createPlan.ordered(false)
+	if err != nil {
+		return nil, fmt.Errorf("order created schema objects: %w", err)
+	}
+	return append(dropStatements, createStatements...), nil
+}
+
+func wireSchemaObjectPlans(dropPlan, createPlan *schemaObjectPlan, schemaDiff *diff.SchemaDiff) error {
+	wire := func(plan *schemaObjectPlan, dependent schemaOperationID, dependencies []conn.SchemaObjectRef) error {
+		for _, dependency := range dependencies {
+			prerequisite, err := plan.baseFor(dependency)
+			if err != nil {
+				return fmt.Errorf("resolve dependency for %s: %w", dependent.display(), err)
+			}
+			if prerequisite != (schemaOperationID{}) {
+				plan.require(dependent, prerequisite)
+			}
+		}
+		return nil
+	}
+	wireTable := func(plan *schemaObjectPlan, table *conn.Table) error {
+		if table == nil {
+			return nil
+		}
+		kind := conn.SchemaObjectTable
+		if table.Type == conn.TableTypeView {
+			kind = conn.SchemaObjectView
+		}
+		base := operationID(objectID(kind, table.Schema, table.Name), "base")
+		if !plan.has(base) {
+			return nil
+		}
+		dependencies := append([]conn.SchemaObjectRef(nil), table.Dependencies...)
+		inferred, err := inferTableDependencies(table, plan)
+		if err != nil {
+			return err
+		}
+		dependencies = append(dependencies, inferred...)
+		if table.Type == conn.TableTypeView && table.ViewDefinition != nil {
+			for _, dependency := range table.ViewDefinition.Dependencies {
+				schema, name := splitObjectName(dependency, table.Schema)
+				dependencyKind := conn.SchemaObjectTable
+				viewRef := conn.SchemaObjectRef{Kind: conn.SchemaObjectView, Schema: schema, Name: name}
+				if candidate, _ := plan.baseFor(viewRef); candidate != (schemaOperationID{}) {
+					dependencyKind = conn.SchemaObjectView
+				}
+				dependencies = append(dependencies, conn.SchemaObjectRef{Kind: dependencyKind, Schema: schema, Name: name})
+			}
+		}
+		if err := wire(plan, base, dependencies); err != nil {
+			return err
+		}
+		comment := operationID(base.object, "comment")
+		plan.require(comment, base)
+		foreignKeys := operationID(base.object, "foreign-keys")
+		plan.require(foreignKeys, base)
+		for _, foreignKey := range table.ForeignKeys {
+			schema := foreignKey.ReferencedSchema
+			if schema == "" {
+				schema = table.Schema
+			}
+			prerequisite, err := plan.baseFor(conn.SchemaObjectRef{Kind: conn.SchemaObjectTable, Schema: schema, Name: foreignKey.ReferencedTable})
+			if err != nil {
+				return err
+			}
+			if prerequisite != (schemaOperationID{}) {
+				plan.require(foreignKeys, prerequisite)
+			}
+		}
+		return nil
+	}
+
+	for _, table := range schemaDiff.TablesDropped {
+		if err := wireTable(dropPlan, table); err != nil {
+			return err
+		}
+	}
+	for _, table := range schemaDiff.TablesAdded {
+		if err := wireTable(createPlan, table); err != nil {
+			return err
+		}
+	}
+	for _, change := range schemaDiff.TablesModified {
+		if err := wireTable(dropPlan, change.SourceTable); err != nil {
+			return err
+		}
+		if err := wireTable(createPlan, targetTable(change)); err != nil {
+			return err
+		}
+	}
+	for _, view := range schemaDiff.ViewsAffected {
+		if err := wireTable(dropPlan, view); err != nil {
+			return err
+		}
+		if err := wireTable(createPlan, view); err != nil {
+			return err
+		}
+	}
+
+	wireRoutine := func(plan *schemaObjectPlan, routine *conn.Routine) error {
+		if routine == nil {
+			return nil
+		}
+		base := operationID(objectID(conn.SchemaObjectRoutine, routine.Schema, routine.Identity()), "base")
+		if !plan.has(base) {
+			return nil
+		}
+		inferred, err := inferRoutineDependencies(routine, plan)
+		if err != nil {
+			return err
+		}
+		dependencies := append(append([]conn.SchemaObjectRef(nil), routine.Dependencies...), inferred...)
+		return wire(plan, base, dependencies)
+	}
+	for _, routine := range schemaDiff.RoutinesDropped {
+		if err := wireRoutine(dropPlan, routine); err != nil {
+			return err
+		}
+	}
+	for _, routine := range schemaDiff.RoutinesAdded {
+		if err := wireRoutine(createPlan, routine); err != nil {
+			return err
+		}
+	}
+	for _, change := range schemaDiff.RoutinesModified {
+		if err := wireRoutine(createPlan, change.New); err != nil {
+			return err
+		}
+	}
+
+	wireSequenceOwnership := func(sequence *conn.Sequence) error {
+		if sequence == nil || sequence.OwnedBy == "" {
+			return nil
+		}
+		table, column, ok := strings.Cut(sequence.OwnedBy, ".")
+		if !ok || table == "" || column == "" || strings.Contains(column, ".") {
+			return fmt.Errorf("sequence:%s.%s has unresolvable ownership %q", sequence.Schema, sequence.Name, sequence.OwnedBy)
+		}
+		ownership := operationID(objectID(conn.SchemaObjectSequence, sequence.Schema, sequence.Name), "ownership")
+		base := operationID(ownership.object, "base")
+		createPlan.require(ownership, base)
+		owner, err := createPlan.baseFor(conn.SchemaObjectRef{Kind: conn.SchemaObjectTable, Schema: sequence.Schema, Name: table})
+		if err != nil {
+			return err
+		}
+		if owner != (schemaOperationID{}) {
+			createPlan.require(ownership, owner)
+		}
+		return nil
+	}
+	for _, sequence := range schemaDiff.SequencesAdded {
+		if err := wireSequenceOwnership(sequence); err != nil {
+			return err
+		}
+	}
+	for _, change := range schemaDiff.SequencesModified {
+		if err := wireSequenceOwnership(change.New); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func splitObjectName(value, defaultSchema string) (string, string) {
+	value = strings.TrimSpace(value)
+	if schema, name, ok := strings.Cut(value, "."); ok {
+		return schema, name
+	}
+	return defaultSchema, value
 }
 
 type foreignKeyOperation struct {
@@ -343,87 +521,8 @@ func orderForeignKeyOperations(operations []foreignKeyOperation) []foreignKeyOpe
 	return operations
 }
 
-func orderTablesForDrop(tables []*conn.Table) []*conn.Table {
-	candidates := make(map[string]*conn.Table)
-	dependencies := make(map[string]map[string]struct{})
-	for _, table := range tables {
-		if table.Type != conn.TableTypeTable {
-			continue
-		}
-		key := objectKey(table.Schema, table.Name)
-		candidates[key] = table
-		dependencies[key] = make(map[string]struct{})
-	}
-	for key, table := range candidates {
-		for _, foreignKey := range table.ForeignKeys {
-			refSchema := foreignKey.ReferencedSchema
-			if refSchema == "" {
-				refSchema = table.Schema
-			}
-			refKey := objectKey(refSchema, foreignKey.ReferencedTable)
-			if _, ok := candidates[refKey]; ok && refKey != key {
-				dependencies[key][refKey] = struct{}{}
-			}
-		}
-	}
-	creationOrder, _ := stableDependencyOrder(dependencies)
-	result := make([]*conn.Table, 0, len(creationOrder))
-	for index := len(creationOrder) - 1; index >= 0; index-- {
-		result = append(result, candidates[creationOrder[index]])
-	}
-	return result
-}
-
-func orderViews(views []*conn.Table, reverse bool) ([]*conn.Table, error) {
-	candidates := make(map[string]*conn.Table)
-	aliases := make(map[string][]string)
-	for _, view := range views {
-		if view == nil {
-			continue
-		}
-		key := objectKey(view.Schema, view.Name)
-		candidates[key] = view
-		aliases[view.Name] = append(aliases[view.Name], key)
-		alias := qualifiedAlias(view.Schema, view.Name)
-		aliases[alias] = append(aliases[alias], key)
-	}
-	dependencies := make(map[string]map[string]struct{}, len(candidates))
-	for key, view := range candidates {
-		dependencies[key] = make(map[string]struct{})
-		if view.ViewDefinition == nil {
-			continue
-		}
-		for _, dependency := range view.ViewDefinition.Dependencies {
-			resolved := resolveDependency(dependency, view.Schema, candidates, aliases)
-			if resolved != "" {
-				dependencies[key][resolved] = struct{}{}
-			}
-		}
-	}
-	order, cyclic := stableDependencyOrder(dependencies)
-	if len(cyclic) > 0 {
-		display := make([]string, len(cyclic))
-		for index, key := range cyclic {
-			display[index] = strings.ReplaceAll(key, "\x00", ".")
-		}
-		return nil, fmt.Errorf("view dependency cycle: %s", strings.Join(display, ", "))
-	}
-	result := make([]*conn.Table, 0, len(order))
-	if reverse {
-		for index := len(order) - 1; index >= 0; index-- {
-			result = append(result, candidates[order[index]])
-		}
-		return result, nil
-	}
-	for _, key := range order {
-		result = append(result, candidates[key])
-	}
-	return result, nil
-}
-
 // stableDependencyOrder returns dependencies before dependents. Cyclic nodes
-// are appended in stable order so table/FK cycles can be handled by the
-// surrounding two-phase algorithm; view callers reject the returned cycle.
+// are appended in stable order so callers can either handle or reject them.
 func stableDependencyOrder(dependencies map[string]map[string]struct{}) ([]string, []string) {
 	remaining := make(map[string]map[string]struct{}, len(dependencies))
 	for key, values := range dependencies {
@@ -463,20 +562,6 @@ func stableDependencyOrder(dependencies map[string]map[string]struct{}) ([]strin
 		}
 	}
 	return result, nil
-}
-
-func resolveDependency(raw, schema string, candidates map[string]*conn.Table, aliases map[string][]string) string {
-	dependency := strings.TrimSpace(raw)
-	if keys := aliases[dependency]; len(keys) == 1 {
-		return keys[0]
-	}
-	if !strings.Contains(dependency, ".") {
-		key := objectKey(schema, dependency)
-		if _, ok := candidates[key]; ok {
-			return key
-		}
-	}
-	return ""
 }
 
 func tableWithoutForeignKeys(table *conn.Table) *conn.Table {

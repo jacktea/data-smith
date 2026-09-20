@@ -13,8 +13,8 @@ type SchemaDiff struct {
 	RoutinesDropped  []*conn.Routine
 	RoutinesModified []*RoutineDiff
 
-	// SequencesAdded/Dropped 按名称区分；Modified 仅比较建序参数
-	// （start/increment/min/max/cycle/cache/data_type），以 ALTER SEQUENCE 对齐。
+	// SequencesAdded/Dropped 按名称区分；Modified 比较建序参数与 ownership，
+	// 以 ALTER SEQUENCE 对齐并在拥有表/列存在后附着 OWNED BY。
 	SequencesAdded    []*conn.Sequence
 	SequencesDropped  []*conn.Sequence
 	SequencesModified []*SequenceDiff

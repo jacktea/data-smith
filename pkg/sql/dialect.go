@@ -139,7 +139,7 @@ type IDataBatchDialect interface {
 // INonTableObjectDialect is an additive capability for dialects that can emit
 // DDL for schema-level non-table objects: routines (functions/procedures) and
 // sequences. Only PostgreSQL implements it for now; other dialects skip the
-// phases in the schema generator. This mirrors the IDataBatchDialect pattern.
+// object operations in the schema generator. This mirrors the IDataBatchDialect pattern.
 type INonTableObjectDialect interface {
 	// GenerateCreateRoutineSql 输出例程的 CREATE 语句（pg_get_functiondef 全文，
 	// 补结尾分号）；定义变更同样经 CREATE OR REPLACE 重新应用。

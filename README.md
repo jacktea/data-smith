@@ -80,10 +80,10 @@
 
 ## 项目功能
 
-- **数据库结构比对**：表、字段、索引、视图等对象的差异检测，自动识别新增、删除、修改。PostgreSQL 额外覆盖函数、存储过程与序列（含 SERIAL 隐式序列），并在产物中先于表 DDL 生成（列默认值 `nextval`/函数依赖可直接解析）。
+- **数据库结构比对**：表、字段、索引、视图等对象的差异检测，自动识别新增、删除、修改。PostgreSQL 额外覆盖函数、存储过程与序列（含 SERIAL 隐式序列及 `OWNED BY`），并把 table/view/routine/sequence 放入统一依赖 DAG：创建走正拓扑、删除走逆拓扑，重复生成字节一致。
 - **CHECK 约束比对**（MySQL 8 与 PostgreSQL 同源）：内联或显式命名的表级 CHECK 约束参与提取、比对与产物生成（`ADD CONSTRAINT ... CHECK` / `DROP CONSTRAINT`），回滚对称；主键背书索引不作为独立差异对象（生命周期跟随主键约束）。
 - **视图注释比对**（PostgreSQL）：视图定义相等而 `COMMENT ON VIEW` 注释不同时，产物生成 COMMENT 语句而非整组删建；依赖闭包弹跳重建的视图携带原注释。
-- **视图依赖拓扑**：列类型/删除等变更会影响视图时，产物自动按依赖闭包先 DROP 受影响视图，表 DDL 完成后按拓扑序重建；回滚对称。聚合函数与窗口函数暂不支持比对。
+- **跨对象依赖拓扑**：列类型/删除等变更会影响视图时，原有视图依赖闭包接入统一 DAG；同时覆盖函数返回表复合类型、SQL/PLpgSQL 静态表引用、routine→routine、view→routine/table 与序列所有权。依赖环、动态 SQL `EXECUTE`、不支持语言或重载调用歧义会保守拒绝并报告对象链。聚合函数与窗口函数暂不支持比对。
 - **表数据比对**：比对两库间表数据，生成 INSERT、DELETE、UPDATE SQL，支持自定义主键和比对规则。
 - **多数据库支持**：驱动架构，现支持 MySQL、PostgreSQL，易于扩展。
 - **自动 SQL 脚本生成**：根据比对结果生成可执行 SQL。
@@ -330,6 +330,7 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 4. Migration 使用唯一版本、SHA-256 checksum、状态 ledger 和 advisory lock。旧 ledger 的历史成功行可能没有 checksum，无法证明这些旧行的 drift；旧表中若已有重复 version，唯一索引升级会要求先人工清理。
 5. `--chunk-hash` 仍是 opt-in 概率优化：只有精确 count/min/max 一致后才允许跳过范围；并发写入不在共享快照中时仍可能让比较失效。
 6. SQL scanner 是词法扫描器，不是完整客户端协议实现；MySQL `DELIMITER` 和 PostgreSQL `COPY ... FROM STDIN` 等客户端格式不受支持，歧义脚本会被保守拒绝。
-7. SSH 必须配置 `knownHostsPath` 或 SHA-256 `hostFingerprint`；不提供主机身份验证材料的连接会失败。
+7. PostgreSQL 例程依赖提取只承诺 SQL/PLpgSQL 的静态对象引用；动态 SQL、无法判定的重载或其他语言会拒绝生成，不会猜测顺序。trigger、identity/generated column、分区和用户定义类型仍未纳入结构迁移能力。
+8. SSH 必须配置 `knownHostsPath` 或 SHA-256 `hostFingerprint`；不提供主机身份验证材料的连接会失败。
 
 Session 6 性能基准（Apple M4 Pro，`-benchtime=1x -count=3`）显示：100k 行且 100k 差异时，streaming pipeline 从 110.48–122.14 ms / 85.57 MB alloc/op 降至 67.38–67.86 ms / 46.13–46.17 MB，SQL 输出从 12,477,886 降至 5,285,286 bytes/op，峰值缓冲从 100,000 行降至固定 2,000 引用。10k 行仅 100 差异时会承担 spool 创建/同步/删除的固定延迟，因此不是低差异场景的纯速度优化。

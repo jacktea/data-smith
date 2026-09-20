@@ -493,6 +493,14 @@ func (d *postgreDialect) GenerateAlterSequenceSql(old, new *conn.Sequence) []str
 			clauses = append(clauses, "NO CYCLE")
 		}
 	}
+	if old.OwnedBy != new.OwnedBy {
+		ownership := "NONE"
+		if table, column, ok := strings.Cut(new.OwnedBy, "."); ok && table != "" && column != "" {
+			ownership = ident.Qualified(ident.DoubleQuote, postgresSchema(new.Schema), table) + "." +
+				ident.Quote(ident.DoubleQuote, column)
+		}
+		clauses = append(clauses, "OWNED BY "+ownership)
+	}
 	if len(clauses) == 0 {
 		return nil
 	}

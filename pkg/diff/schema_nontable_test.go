@@ -114,8 +114,11 @@ func TestCompareSchemasSequencesAddedDroppedModified(t *testing.T) {
 	src := schemaWith()
 	src.Sequences["seq_old"] = sequence("public", "seq_old", 1)
 	src.Sequences["seq_chg"] = sequence("public", "seq_chg", 1)
+	src.Sequences["seq_owner"] = sequence("public", "seq_owner", 1)
 	tgt := schemaWith()
 	tgt.Sequences["seq_chg"] = sequence("public", "seq_chg", 3)
+	tgt.Sequences["seq_owner"] = sequence("public", "seq_owner", 1)
+	tgt.Sequences["seq_owner"].OwnedBy = "orders.id"
 	tgt.Sequences["seq_new"] = sequence("public", "seq_new", 1)
 
 	diff := CompareSchemas(src, tgt)
@@ -125,17 +128,24 @@ func TestCompareSchemasSequencesAddedDroppedModified(t *testing.T) {
 	if len(diff.SequencesDropped) != 1 || diff.SequencesDropped[0].Name != "seq_old" {
 		t.Fatalf("expected seq_old dropped, got %+v", diff.SequencesDropped)
 	}
-	if len(diff.SequencesModified) != 1 || diff.SequencesModified[0].New.IncrementBy != "3" {
-		t.Fatalf("expected seq_chg modified to increment 3, got %+v", diff.SequencesModified)
+	if len(diff.SequencesModified) != 2 {
+		t.Fatalf("expected parameter and ownership changes, got %+v", diff.SequencesModified)
+	}
+	if diff.SequencesModified[0].New.Name != "seq_chg" || diff.SequencesModified[1].New.OwnedBy != "orders.id" {
+		t.Fatalf("expected deterministic seq_chg then seq_owner changes, got %+v", diff.SequencesModified)
 	}
 }
 
-func TestSequenceEqualIgnoresOwnershipAndName(t *testing.T) {
+func TestSequenceEqualIncludesOwnership(t *testing.T) {
 	a := sequence("public", "seq_a", 1)
 	a.OwnedBy = "t.col"
 	b := sequence("public", "seq_a", 1)
+	if a.Equal(b) {
+		t.Fatal("expected different ownership to make sequences unequal")
+	}
+	b.OwnedBy = "t.col"
 	if !a.Equal(b) {
-		t.Fatal("expected sequences with identical creation params to be equal")
+		t.Fatal("expected identical ownership and creation parameters to be equal")
 	}
 	b.IncrementBy = "2"
 	if a.Equal(b) {

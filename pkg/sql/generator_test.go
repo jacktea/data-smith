@@ -143,12 +143,36 @@ func TestGenerateSchemaSQL_FourStageOrdering(t *testing.T) {
 	if !(posDropCol < posAlterCol && posAlterCol < posAddCol) {
 		t.Errorf("expected drop col < alter col < add col")
 	}
-	// 删除旧对象必须在结构修改和创建新对象之前，确保类型转换可执行。
-	if !(posDropTbl < posAlterCol && posAddCol < posCreateTbl) {
-		t.Errorf("expected drop table < alter column and add column < create table")
+	// 删除旧对象必须在结构修改之前；无依赖的新表可由统一 DAG 的稳定
+	// tie-breaker 排在任一侧，不再依赖固定生成阶段。
+	if !(posDropTbl < posAlterCol) {
+		t.Errorf("expected drop table < alter column")
 	}
-	// 所有表建好后才添加外键，注释最后生成。
-	if !(posCreateTbl < posAddFk && posCreateTbl < posComment) {
-		t.Errorf("expected create table < add fk / comment")
+	// 外键与注释必须晚于所属表的结构修改。
+	if !(posAddCol < posAddFk && posAddCol < posComment) {
+		t.Errorf("expected table changes < add fk / comment")
+	}
+	_ = posCreateTbl
+}
+
+func TestGenerateSchemaSQLDropsForeignKeysBeforeEitherTable(t *testing.T) {
+	parent := &conn.Table{Name: "parent", Schema: "public", Type: conn.TableTypeTable, Columns: map[string]*conn.Column{}}
+	child := &conn.Table{
+		Name: "child", Schema: "public", Type: conn.TableTypeTable, Columns: map[string]*conn.Column{},
+		ForeignKeys: map[string]*conn.ForeignKey{
+			"child_parent_fk": {
+				Name: "child_parent_fk", ReferencedTable: "parent",
+			},
+		},
+	}
+	statements, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{TablesDropped: []*conn.Table{parent, child}}, consts.DBTypePostgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropForeignKey := indexOfContaining(statements, `DROP CONSTRAINT IF EXISTS "child_parent_fk"`)
+	dropParent := indexOfContaining(statements, `DROP TABLE "public"."parent"`)
+	dropChild := indexOfContaining(statements, `DROP TABLE "public"."child"`)
+	if dropForeignKey < 0 || dropParent < 0 || dropChild < 0 || dropForeignKey > dropParent || dropForeignKey > dropChild {
+		t.Fatalf("foreign key must be detached before either table is dropped: %v", statements)
 	}
 }

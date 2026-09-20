@@ -1,11 +1,11 @@
 DROP VIEW "sales""Ops"."Summary" CASCADE;
 DROP VIEW "sales""Ops"."Convert" CASCADE;
 DROP VIEW "sales""Ops"."BaseView" CASCADE;
-ALTER TABLE "sales""Ops"."Alpha" DROP CONSTRAINT IF EXISTS "Alpha_to_Beta";
 ALTER TABLE "sales""Ops"."Beta" DROP CONSTRAINT IF EXISTS "Beta_to_Alpha";
+ALTER TABLE "sales""Ops"."Alpha" DROP CONSTRAINT IF EXISTS "Alpha_to_Beta";
+DROP TABLE "sales""Ops"."Rebuild";
 DROP TABLE "sales""Ops"."Beta";
 DROP TABLE "sales""Ops"."Alpha";
-DROP TABLE "sales""Ops"."Rebuild";
 CREATE TABLE "sales""Ops"."Convert" (
 "ID" int4 NOT NULL,
   CONSTRAINT "Convert_pk" PRIMARY KEY ("ID")

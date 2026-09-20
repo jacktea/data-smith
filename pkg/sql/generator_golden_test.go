@@ -51,7 +51,8 @@ func TestGenerateSchemaSQLSafeRejectsViewDependencyCycle(t *testing.T) {
 	left := issue5View("Left", "SELECT 1", "sales\"Ops.Right")
 	right := issue5View("Right", "SELECT 1", "sales\"Ops.Left")
 	_, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{TablesAdded: []*conn.Table{right, left}}, consts.DBTypePostgres)
-	if err == nil || !strings.Contains(err.Error(), "view dependency cycle") {
+	if err == nil || !strings.Contains(err.Error(), "schema object dependency cycle") ||
+		!strings.Contains(err.Error(), `view:sales"Ops.Left`) || !strings.Contains(err.Error(), `view:sales"Ops.Right`) {
 		t.Fatalf("expected view cycle error, got %v", err)
 	}
 }

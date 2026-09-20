@@ -9,25 +9,27 @@
 - 验收记录：`docs/migration-chain-regression-report.md`
 - 评审轴：Standards（仓库约定、操作安全、正确性、原子性）与 Spec（C1-C13、Web 数据比对模式）
 
-初始评审为只读评审；2026-09-20 已从起始提交 `0742d0e` 依次完成阶段 1（O1、O2、O3、S2）和阶段 2（SP1、SP2、S3、S4）整改，状态见各发现及第 8 节。
+初始评审为只读评审；截至 2026-09-21，已从起始提交 `0742d0e` 依次完成阶段 1（O1、O2、O3、S2）、阶段 2（SP1、SP2、S3、S4）和阶段 3（S1、S5、SP3、SP4）整改，状态见各发现及第 8 节。
 
 ## 2. 结论
 
 本轮增强补充了 PostgreSQL 普通函数、存储过程、序列、CHECK、视图注释、主键背书索引、整库规则展开与 PostgreSQL 影子事务数据比对，方向正确，现有自动化门禁全部通过。
 
-阶段 1/2 已关闭既有安全边界、视图组合变化、单侧表数据语义、行身份筛选和四产物原子发布问题。当前版本仍不适合直接用于无人值守生产迁移，剩余最高风险集中在 PostgreSQL 非表对象闭环：序列 ownership 未参与 diff/DDL，对象依赖仍依靠固定阶段排序。
+阶段 1/2/3 已关闭既有安全边界、diff-full 正确性/原子性以及 PostgreSQL 非表对象闭环问题。序列 ownership 已参与 diff/DDL；table、view、routine、sequence 使用统一依赖 DAG，依赖不可靠或成环时失败关闭。
 
 函数和序列已进入当前功能范围，但属于 PostgreSQL 首版部分支持，而不是完整数据库对象迁移能力。
 
 ## 3. Standards 发现
 
-### S1【P1】例程、序列和表使用固定阶段排序，缺少对象依赖图
+### S1【P1｜已修复 2026-09-21】例程、序列和表使用固定阶段排序，缺少对象依赖图
 
 位置：`pkg/sql/generator.go:257-275`
 
 生成器固定按“删视图/依赖/表 → 删序列/例程 → 建序列/例程 → 改列/建表”输出。返回某张表复合类型的函数会阻止先行 `DROP TABLE`；引用本轮新增表的函数又会在表创建前执行失败；例程之间的调用关系也没有参与排序。
 
 建议建立 schema object dependency DAG；至少覆盖 table、view、routine、sequence 的创建与删除方向，并在不可解环时明确拒绝生成。
+
+整改：新增统一对象依赖 DAG Module，节点携带对象类型、schema、identity 与操作步骤，边统一为 dependent → prerequisite；创建按正拓扑、删除按逆拓扑。原视图依赖闭包接入同一排序，函数复合返回类型、SQL/PLpgSQL 静态表引用、routine 调用、view 调用、列默认值和 sequence ownership 均形成依赖边。排序以稳定键打破并列，依赖环返回实际对象链；动态 SQL、不支持语言和重载调用歧义保守拒绝。
 
 ### S2【P1｜已修复 2026-09-20】影子事务成功路径忽略 rollback 错误
 
@@ -57,11 +59,13 @@ schema 正反向文件在数据阶段开始前已经发布。数据比对失败�
 
 整改：`diff-full` 在最终目录同文件系统的 staging 目录中生成结构/数据四产物，全部存在后统一备份并发布；生成、写盘、目录同步或任一 rename 失败会恢复上一整组。失败注入覆盖数据阶段、写盘和第三个文件发布失败。
 
-### S5【P2】序列 ownership 建模后没有进入相等判断和 SQL
+### S5【P2｜已修复 2026-09-21】序列 ownership 建模后没有进入相等判断和 SQL
 
 位置：`pkg/conn/db.go:208-236`、`pkg/sql/postgres/postgre.go:425-500`
 
 `Sequence.OwnedBy` 已提取，但 `Equal` 忽略该字段，CREATE/ALTER 也不生成 `ALTER SEQUENCE ... OWNED BY ...`。SERIAL 序列重建后会失去所有权，删除表时可能遗留孤儿序列，二次 diff 却错误报告收敛。
+
+整改：`OwnedBy` 纳入 `Sequence.Equal`；新增/修改序列分别在拥有表与列存在后生成 `OWNED BY table.column`，解除时生成 `OWNED BY NONE`。真实 PostgreSQL 用例同时断言新增 SERIAL ownership、ownership 修改、forward 二次收敛和 rollback 恢复 `NONE`。
 
 ### S6【P2】删除脚本后的元数据清理错误被吞掉
 
@@ -100,17 +104,21 @@ schema 正反向文件在数据阶段开始前已经发布。数据比对失败�
 
 整改：direct 模式为 target-only 注入空 source 行集并读取目标完整列，shadow 模式复用事务内新建空表；显式和通配 source-only 均不进入数据阶段。PostgreSQL/MySQL 双库测试覆盖两类规则、执行 forward 和二次 diff 收敛。
 
-### SP3【P1｜C1】序列所有权验收不成立
+### SP3【P1｜C1｜已修复 2026-09-21】序列所有权验收不成立
 
 位置：`pkg/conn/db.go:225-236`、`pkg/sql/postgres/postgre.go:425-500`、`docs/migration-chain-regression-report.md:184-188`
 
 报告宣称 SERIAL 所有权链路已实测，但实现和断言只覆盖序列存在及参数，不覆盖 ownership，属于假收敛。
 
-### SP4【P1｜C1】例程/序列依赖安全排序未完成
+整改：回归报告已改为真实验收口径；集成测试直接读取并断言 `with_serial_id_seq → with_serial.id`、`shared_owner_seq → ownership_table.id`，回滚后断言后者恢复为空，并在两个方向执行结构 diff 为空。
+
+### SP4【P1｜C1｜已修复 2026-09-21】例程/序列依赖安全排序未完成
 
 位置：`pkg/sql/generator.go:257-275`
 
 C1 的“序列/函数先于表”只解决列默认值依赖，不能覆盖函数依赖表类型、SQL 函数查询新表、删表前需先删函数等场景，尚未达到“迁移链可直接执行”。
+
+整改：统一 DAG 回归覆盖函数返回新增表复合类型、SQL/PLpgSQL 静态查询新增表、删表前删除依赖例程、routine→routine、view→routine/table、跨对象环和确定性；真实 PostgreSQL forward/rollback 整组执行通过。
 
 ### SP5【P2｜C8】删除 up 文件的实现口径与原始规格不一致
 
@@ -163,12 +171,11 @@ CLI 在打开连接前校验 source/target 标记；Web 只记录警告，然后
 ### 已支持
 
 - MySQL/PostgreSQL：表、列、主键、索引、外键、CHECK、普通视图、表/列注释和数据 diff。
-- PostgreSQL：普通函数（`prokind=f`）、存储过程（`prokind=p`）、独立序列与 SERIAL 从属序列的提取和基础 SQL 生成。
+- PostgreSQL：普通函数（`prokind=f`）、存储过程（`prokind=p`）、独立序列与 SERIAL 从属序列（含 ownership）的提取、比对、依赖排序和正反向 SQL 生成；SQL/PLpgSQL 静态依赖环失败关闭。
 
 ### 部分支持
 
-- PostgreSQL sequence ownership：能提取，不能正确比较和重建。
-- 函数/过程：能按身份签名 diff 定义，但缺跨对象依赖排序；返回类型等不兼容变更缺少安全规划。
+- 函数/过程：能按身份签名 diff 定义和排序静态依赖；动态 SQL、非 SQL/PLpgSQL 语言及无法消歧的重载调用拒绝生成，返回类型等不兼容变更仍交由 PostgreSQL 显式拒绝。
 - 物化视图：解析为普通 VIEW 类型，没有独立刷新、存储和依赖语义。
 - 唯一约束：主要按唯一索引处理，未完整保留 constraint 语义。
 
@@ -203,7 +210,7 @@ CLI 在打开连接前校验 source/target 标记；Web 只记录警告，然后
 
 完成标准：MySQL direct 与 PostgreSQL shadow 均覆盖单侧表、失败清理和二次 diff 收敛。
 
-### 阶段 C：PostgreSQL 非表对象闭环
+### 阶段 C：PostgreSQL 非表对象闭环（已完成 2026-09-21）
 
 1. `OwnedBy` 参与序列 equality 与 ALTER/CREATE SQL。
 2. 建立对象依赖 DAG。
@@ -220,7 +227,7 @@ CLI 在打开连接前校验 source/target 标记；Web 只记录警告，然后
 
 ## 8. 验证结果
 
-初始评审的门禁在 `0742d0e` 上通过。阶段 1、阶段 2 整改工作树均重新执行以下完整门禁并全部通过：
+初始评审的门禁在 `0742d0e` 上通过。阶段 1、阶段 2、阶段 3 整改工作树均重新执行以下完整门禁并全部通过：
 
 ```bash
 test -z "$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
@@ -238,4 +245,6 @@ pnpm --dir web build
 
 阶段 2 覆盖率结果：overall 74.4%（5768/7754）、db 78.9%、diff 78.6%、sql 74.4%、migrate 75.9%、exec 89.1%。前端 `pnpm --dir web build` 通过且未产生 embed 差异；双库测试新增显式/通配单侧表、forward 执行和二次收敛，单元测试新增同时变化、索引资格和四产物失败注入。
 
-尚未完成的阶段 3/4 仍需补齐跨对象依赖、序列 ownership、元数据错误传播和文档/任务模式一致性；本阶段未扩展 trigger、分区或 generated column 等新对象能力。
+阶段 3 覆盖率结果：overall 74.9%（6074/8108）、db 78.9%（674/854）、diff 78.6%（1773/2257）、sql 76.9%（1268/1648）、migrate 75.9%（480/632）、exec 89.1%（376/422）。gofmt、相关最小测试、单测、race、vet、staticcheck v0.8.1、govulncheck v1.1.4、前端构建、MySQL/PostgreSQL 双库集成测试和覆盖率 gate 全部通过；真实 PostgreSQL 用例验证跨对象正/逆拓扑、forward 收敛、rollback 恢复结构与 ownership。
+
+阶段 3 新增统一对象依赖 DAG、sequence ownership 正反向 SQL和真实 PostgreSQL 往返断言；相关最小测试、完整门禁及覆盖率结果见本节后续记录。尚未完成的阶段 4 仍需处理元数据错误传播、C8 语义、任务 effective mode 与共享行定位策略；本阶段未扩展 trigger、分区、generated column、identity 或用户定义类型。

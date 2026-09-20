@@ -27,7 +27,11 @@ func TestPostgresNonTableObjectsRoundTrip(t *testing.T) {
 	fixture := postgresFixture(t)
 	fixture.setupSource = []string{
 		`CREATE SEQUENCE old_seq START 1`,
+		`CREATE SEQUENCE shared_owner_seq START 1`,
 		`CREATE TABLE "base" ("id" BIGINT NOT NULL PRIMARY KEY DEFAULT nextval('old_seq'), "amount" INTEGER NOT NULL)`,
+		`CREATE TABLE "ownership_table" ("id" BIGINT NOT NULL PRIMARY KEY DEFAULT nextval('shared_owner_seq'))`,
+		`CREATE TABLE "obsolete_dependency" ("id" BIGINT NOT NULL PRIMARY KEY)`,
+		`CREATE OR REPLACE FUNCTION obsolete_reader() RETURNS bigint LANGUAGE sql AS $f$ SELECT count(*) FROM obsolete_dependency $f$`,
 		`INSERT INTO "base" ("id", "amount") VALUES (1, 10)`,
 		`CREATE TABLE "orders" ("id" BIGINT NOT NULL PRIMARY KEY, "ref" TEXT NULL)`,
 		`INSERT INTO "orders" ("id", "ref") VALUES (1, 'source')`,
@@ -37,8 +41,11 @@ func TestPostgresNonTableObjectsRoundTrip(t *testing.T) {
 	}
 	fixture.setupTarget = []string{
 		`CREATE SEQUENCE old_seq START 1`,
+		`CREATE SEQUENCE shared_owner_seq START 1`,
 		`CREATE SEQUENCE air_ws_items_seq START 100`,
 		`CREATE TABLE "base" ("id" BIGINT NOT NULL PRIMARY KEY DEFAULT nextval('old_seq'), "amount" BIGINT NOT NULL)`,
+		`CREATE TABLE "ownership_table" ("id" BIGINT NOT NULL PRIMARY KEY DEFAULT nextval('shared_owner_seq'))`,
+		`ALTER SEQUENCE shared_owner_seq OWNED BY ownership_table.id`,
 		`INSERT INTO "base" ("id", "amount") VALUES (1, 10)`,
 		`CREATE TABLE "orders" ("id" BIGINT NOT NULL PRIMARY KEY, "ref" TEXT NULL)`,
 		`INSERT INTO "orders" ("id", "ref") VALUES (1, 'source'), (2, 'added')`,
@@ -51,6 +58,11 @@ func TestPostgresNonTableObjectsRoundTrip(t *testing.T) {
 		`INSERT INTO "late_table" VALUES (1, 'late')`,
 		`CREATE TABLE "with_serial" ("id" SERIAL PRIMARY KEY, "label" TEXT NOT NULL)`,
 		`INSERT INTO "with_serial" ("label") VALUES ('serial')`,
+		`CREATE TABLE "dependency_base" ("id" BIGINT NOT NULL PRIMARY KEY, "amount" INTEGER NOT NULL)`,
+		`CREATE OR REPLACE FUNCTION dependency_row(bigint) RETURNS dependency_base LANGUAGE sql AS $f$ SELECT * FROM dependency_base WHERE id = $1 $f$`,
+		`CREATE OR REPLACE FUNCTION dependency_amount(bigint) RETURNS integer LANGUAGE plpgsql AS $f$ DECLARE result integer; BEGIN SELECT amount INTO result FROM dependency_base WHERE id = $1; RETURN result; END $f$`,
+		`CREATE OR REPLACE FUNCTION dependency_chain(bigint) RETURNS integer LANGUAGE sql AS $f$ SELECT dependency_amount($1) $f$`,
+		`CREATE VIEW "dependency_view" AS SELECT d."id", dependency_chain(d."id") AS "amount" FROM "dependency_base" d`,
 	}
 	prepareFixture(t, fixture)
 	defer cleanupFixture(t, fixture)
@@ -116,6 +128,12 @@ func TestPostgresNonTableObjectsRoundTrip(t *testing.T) {
 	if remaining := nonEmptyDiffParts(pkgdiff.CompareSchemas(afterForward, tgtSchema)); len(remaining) > 0 {
 		t.Fatalf("forward execution did not converge: %v", remaining)
 	}
+	if sequence := afterForward.Sequences["shared_owner_seq"]; sequence == nil || sequence.OwnedBy != "ownership_table.id" {
+		t.Fatalf("forward must restore target sequence ownership, got %+v", sequence)
+	}
+	if sequence := afterForward.Sequences["with_serial_id_seq"]; sequence == nil || sequence.OwnedBy != "with_serial.id" {
+		t.Fatalf("forward must preserve SERIAL ownership, got %+v", sequence)
+	}
 
 	// 回滚对称：按初始快照生成回滚（tgt→src），执行后回到原状。
 	rollbackStatements, err := pkgsql.GenerateSchemaSQLSafe(pkgdiff.CompareSchemas(tgtSchema, originalSchema), consts.DBTypePostgres)
@@ -135,6 +153,9 @@ func TestPostgresNonTableObjectsRoundTrip(t *testing.T) {
 	}
 	if remaining := nonEmptyDiffParts(pkgdiff.CompareSchemas(afterRollback, originalSchema)); len(remaining) > 0 {
 		t.Fatalf("rollback did not restore original state: %v", remaining)
+	}
+	if sequence := afterRollback.Sequences["shared_owner_seq"]; sequence == nil || sequence.OwnedBy != "" {
+		t.Fatalf("rollback must restore OWNED BY NONE, got %+v", sequence)
 	}
 }
 
@@ -186,14 +207,20 @@ func TestPostgresDataDiffSkipsMissingTables(t *testing.T) {
 
 func assertDiffContains(t *testing.T, d *pkgdiff.SchemaDiff) {
 	t.Helper()
-	if len(d.RoutinesAdded) != 2 {
-		t.Fatalf("expected has_revision + audit_proc added, got %v", routineNames(d.RoutinesAdded))
+	if len(d.RoutinesAdded) != 5 {
+		t.Fatalf("expected non-table dependency routines added, got %v", routineNames(d.RoutinesAdded))
+	}
+	if len(d.RoutinesDropped) != 1 || d.RoutinesDropped[0].Name != "obsolete_reader" {
+		t.Fatalf("expected obsolete_reader dropped before its table, got %v", routineNames(d.RoutinesDropped))
 	}
 	if len(d.RoutinesModified) != 1 || d.RoutinesModified[0].Old.Name != "lookup_key" {
 		t.Fatalf("expected lookup_key modified, got %v", d.RoutinesModified)
 	}
 	if len(d.SequencesAdded) != 2 {
 		t.Fatalf("expected air_ws_items_seq + with_serial_id_seq added, got %v", sequenceNames(d.SequencesAdded))
+	}
+	if len(d.SequencesModified) != 1 || d.SequencesModified[0].New.OwnedBy != "ownership_table.id" {
+		t.Fatalf("expected shared_owner_seq ownership change, got %+v", d.SequencesModified)
 	}
 	var baseChanged bool
 	for _, tblDiff := range d.TablesModified {

@@ -184,8 +184,14 @@ catalog 级复核发现的真实残留差异（引擎不建模、因此产物为
 - **序列**（`pg_sequences` + owned_by 判定）：链上共 3 条独立序列——
   `air_ws_items_index_seq_snowflake_id`、`air_ws_items_index_seq_snowflake_local_id`、
   `air_ws_items_index_seq_merge_seq`；终态存活 1 条独立序列
-  （另含账本从属序列 `schema_migrations_id_seq`，已按 C6 随表排除）。
-  SERIAL 隐式序列所有权链路在第 2 批已实测。
+  （另含账本从属序列 `schema_migrations_id_seq`，已按 C6 随表排除）。阶段 3 已补齐
+  ownership equality 与 `OWNED BY table.column/NONE` 正反向 SQL；真实 PostgreSQL
+  用例覆盖新增 SERIAL 从属序列、独立序列改为从属、回滚恢复 `OWNED BY NONE`，并以
+  forward/rollback 后结构 diff 为空验证所有权收敛，不再仅以序列存在和参数代替验收。
+- **统一对象依赖 DAG**（阶段 3）：table/view/routine/sequence 共享同一排序模块，覆盖
+  函数返回新增表复合类型、SQL/PLpgSQL 静态引用新增表、删除表前删除依赖例程、
+  routine→routine 与 view→routine/table；创建正拓扑、删除逆拓扑。依赖环与不可可靠
+  提取的动态 SQL/语言/重载调用输出对象链并拒绝生成，重复运行保持字节一致。
 - **视图依赖闭包**（C2）：27 轮含视图重编排，链上 CREATE VIEW 共 213 处
   （受影响视图先逆拓扑 DROP CASCADE、表 DDL 后拓扑重建）；热点轮
   3.0.0（33 建/18 删）、3.3.0（24）、3.2.0（20）。2.4.0 列变更轮

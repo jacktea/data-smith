@@ -44,6 +44,10 @@ _Avoid_: 排除字段
 旧规则字段。历史上身兼两职(匹配键+限定比对列),正在被"匹配键/比对列"二分取代。
 _Avoid_: 把它当作匹配键使用
 
+**对象依赖图 (Schema Object Dependency DAG)**:
+结构产物中 table、view、routine、sequence 的统一有向无环图;边写作 dependent → prerequisite。创建按正拓扑执行,删除按逆拓扑执行;序列 ownership 作为独立附着操作在序列与拥有列均存在后执行。无法可靠提取依赖或发现环时拒绝生成并报告对象链。
+_Avoid_: 固定对象阶段、视图专用排序
+
 ### 差异产物
 
 **正向 SQL (Forward SQL)**:

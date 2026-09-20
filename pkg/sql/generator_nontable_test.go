@@ -50,11 +50,11 @@ func TestGenerateSchemaSQLRoutineLifecycle(t *testing.T) {
 	if statements[0] != "DROP FUNCTION IF EXISTS \"public\".\"obsolete\"(integer, text) CASCADE;" {
 		t.Fatalf("unexpected drop: %q", statements[0])
 	}
-	if statements[1] != procedure+";" {
-		t.Fatalf("added procedure must be applied with trailing semicolon, got %q", statements[1])
+	if !containsExactStatement(statements, procedure+";") {
+		t.Fatalf("added procedure must be applied with trailing semicolon, got %v", statements)
 	}
-	if statements[2] != newDef+";" {
-		t.Fatalf("modified routine must be re-applied with trailing semicolon, got %q", statements[2])
+	if !containsExactStatement(statements, newDef+";") {
+		t.Fatalf("modified routine must be re-applied with trailing semicolon, got %v", statements)
 	}
 }
 
@@ -82,10 +82,225 @@ func TestGenerateSchemaSQLSequenceLifecycle(t *testing.T) {
 	if len(statements) != len(want) {
 		t.Fatalf("expected %d statements, got %v", len(want), statements)
 	}
-	for i := range want {
-		if statements[i] != want[i] {
-			t.Fatalf("statement %d:\n got %q\nwant %q", i, statements[i], want[i])
+	for _, expected := range want {
+		if !containsExactStatement(statements, expected) {
+			t.Fatalf("missing %q in %v", expected, statements)
 		}
+	}
+}
+
+func TestGenerateSchemaSQLSequenceOwnershipForwardAndRollback(t *testing.T) {
+	owned := &conn.Sequence{Name: "orders_id_seq", Schema: "public", OwnedBy: "orders.id"}
+	standalone := &conn.Sequence{Name: "orders_id_seq", Schema: "public"}
+
+	forward, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{
+		SequencesModified: []*diff.SequenceDiff{{Old: owned, New: standalone}},
+	}, consts.DBTypePostgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantForward := `ALTER SEQUENCE "public"."orders_id_seq" OWNED BY NONE;`
+	if len(forward) != 1 || forward[0] != wantForward {
+		t.Fatalf("ownership removal:\n got %v\nwant [%s]", forward, wantForward)
+	}
+
+	rollback, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{
+		SequencesModified: []*diff.SequenceDiff{{Old: standalone, New: owned}},
+	}, consts.DBTypePostgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRollback := `ALTER SEQUENCE "public"."orders_id_seq" OWNED BY "public"."orders"."id";`
+	if len(rollback) != 1 || rollback[0] != wantRollback {
+		t.Fatalf("ownership restoration:\n got %v\nwant [%s]", rollback, wantRollback)
+	}
+}
+
+func TestGenerateSchemaSQLCreatesOwnedSequenceAroundOwningTable(t *testing.T) {
+	table := nontableTable("public", "orders")
+	table.Columns["id"].Default = strPtr("nextval('public.orders_id_seq'::regclass)")
+	sequence := &conn.Sequence{
+		Name: "orders_id_seq", Schema: "public", DataType: "bigint",
+		StartValue: "1", IncrementBy: "1", MinValue: "1",
+		MaxValue: "9223372036854775807", CacheSize: "1", OwnedBy: "orders.id",
+	}
+
+	statements, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{
+		TablesAdded:    []*conn.Table{table},
+		SequencesAdded: []*conn.Sequence{sequence},
+	}, consts.DBTypePostgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createSequence := indexOfContaining(statements, `CREATE SEQUENCE "public"."orders_id_seq"`)
+	createTable := indexOfContaining(statements, `CREATE TABLE "public"."orders"`)
+	attachOwnership := indexOfContaining(statements, `ALTER SEQUENCE "public"."orders_id_seq" OWNED BY "public"."orders"."id";`)
+	if createSequence < 0 || createTable < 0 || attachOwnership < 0 {
+		t.Fatalf("missing owned-sequence lifecycle statements: %v", statements)
+	}
+	if !(createSequence < createTable && createTable < attachOwnership) {
+		t.Fatalf("owned sequence must be created before its table and attached afterwards: %v", statements)
+	}
+}
+
+func TestGenerateSchemaSQLCreatesTableBeforeRoutineReturningItsCompositeType(t *testing.T) {
+	table := nontableTable("public", "customer")
+	routine := &conn.Routine{
+		Name: "find_customer", Schema: "public", Kind: conn.RoutineKindFunction,
+		IdentityArgs: "bigint",
+		Definition:   "CREATE OR REPLACE FUNCTION public.find_customer(bigint) RETURNS public.customer LANGUAGE sql AS $f$SELECT * FROM public.customer WHERE id = $1$f$",
+	}
+
+	statements, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{
+		TablesAdded:   []*conn.Table{table},
+		RoutinesAdded: []*conn.Routine{routine},
+	}, consts.DBTypePostgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tableIndex := indexOfContaining(statements, `CREATE TABLE "public"."customer"`)
+	routineIndex := indexOfContaining(statements, "CREATE OR REPLACE FUNCTION public.find_customer")
+	if tableIndex < 0 || routineIndex < 0 || tableIndex > routineIndex {
+		t.Fatalf("table composite type must exist before the routine: %v", statements)
+	}
+}
+
+func TestGenerateSchemaSQLOrdersRoutineDependencies(t *testing.T) {
+	callee := &conn.Routine{
+		Name: "z_callee", Schema: "public", Kind: conn.RoutineKindFunction,
+		Definition: "CREATE OR REPLACE FUNCTION public.z_callee() RETURNS integer LANGUAGE sql AS $f$SELECT 1$f$",
+	}
+	caller := &conn.Routine{
+		Name: "a_caller", Schema: "public", Kind: conn.RoutineKindFunction,
+		Definition: "CREATE OR REPLACE FUNCTION public.a_caller() RETURNS integer LANGUAGE plpgsql AS $f$BEGIN RETURN public.z_callee(); END$f$",
+	}
+
+	statements, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{
+		RoutinesAdded: []*conn.Routine{caller, callee},
+	}, consts.DBTypePostgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calleeIndex := indexOfContaining(statements, "CREATE OR REPLACE FUNCTION public.z_callee")
+	callerIndex := indexOfContaining(statements, "CREATE OR REPLACE FUNCTION public.a_caller")
+	if calleeIndex < 0 || callerIndex < 0 || calleeIndex > callerIndex {
+		t.Fatalf("callee must be created before caller: %v", statements)
+	}
+}
+
+func TestGenerateSchemaSQLDoesNotTreatOverloadedDeclarationsAsCalls(t *testing.T) {
+	routines := []*conn.Routine{
+		{
+			Name: "normalize", Schema: "public", Kind: conn.RoutineKindFunction, IdentityArgs: "integer",
+			Definition: "CREATE OR REPLACE FUNCTION public.normalize(integer) RETURNS integer LANGUAGE sql AS $f$SELECT $1$f$",
+		},
+		{
+			Name: "normalize", Schema: "public", Kind: conn.RoutineKindFunction, IdentityArgs: "text",
+			Definition: "CREATE OR REPLACE FUNCTION public.normalize(text) RETURNS text LANGUAGE sql AS $f$SELECT $1$f$",
+		},
+	}
+	statements, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{RoutinesAdded: routines}, consts.DBTypePostgres)
+	if err != nil {
+		t.Fatalf("overloaded declarations without cross-calls must be orderable: %v", err)
+	}
+	if len(statements) != 2 {
+		t.Fatalf("expected both overloads, got %v", statements)
+	}
+}
+
+func TestGenerateSchemaSQLRejectsRoutineDependencyCycleWithObjectChain(t *testing.T) {
+	alpha := &conn.Routine{
+		Name: "alpha", Schema: "public", Kind: conn.RoutineKindFunction,
+		Definition: "CREATE OR REPLACE FUNCTION public.alpha() RETURNS integer LANGUAGE sql AS $f$SELECT public.beta()$f$",
+	}
+	beta := &conn.Routine{
+		Name: "beta", Schema: "public", Kind: conn.RoutineKindFunction,
+		Definition: "CREATE OR REPLACE FUNCTION public.beta() RETURNS integer LANGUAGE sql AS $f$SELECT public.alpha()$f$",
+	}
+
+	_, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{RoutinesAdded: []*conn.Routine{alpha, beta}}, consts.DBTypePostgres)
+	if err == nil {
+		t.Fatal("expected routine dependency cycle to be rejected")
+	}
+	message := err.Error()
+	for _, want := range []string{"schema object dependency cycle", "routine:public.alpha()", "routine:public.beta()", " -> "} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("cycle error must contain an actionable object chain, got %q", message)
+		}
+	}
+}
+
+func TestGenerateSchemaSQLRejectsUnresolvedDynamicRoutineDependency(t *testing.T) {
+	table := nontableTable("public", "audit_log")
+	routine := &conn.Routine{
+		Name: "write_audit", Schema: "public", Kind: conn.RoutineKindProcedure,
+		Definition: "CREATE OR REPLACE PROCEDURE public.write_audit() LANGUAGE plpgsql AS $f$BEGIN EXECUTE 'INSERT INTO public.audit_log DEFAULT VALUES'; END$f$",
+	}
+
+	_, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{
+		TablesAdded:   []*conn.Table{table},
+		RoutinesAdded: []*conn.Routine{routine},
+	}, consts.DBTypePostgres)
+	if err == nil {
+		t.Fatal("expected dynamic SQL dependency extraction to be rejected")
+	}
+	if message := err.Error(); !strings.Contains(message, "routine:public.write_audit() -> unresolved dynamic SQL EXECUTE") {
+		t.Fatalf("unexpected error: %q", message)
+	}
+}
+
+func TestGenerateSchemaSQLRejectsRoutineLanguageWithoutReliableDependencyExtraction(t *testing.T) {
+	routine := &conn.Routine{
+		Name: "native_lookup", Schema: "public", Kind: conn.RoutineKindFunction,
+		Definition: "CREATE OR REPLACE FUNCTION public.native_lookup() RETURNS integer LANGUAGE c AS 'native_lookup'",
+	}
+	_, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{
+		TablesAdded:   []*conn.Table{nontableTable("public", "lookup_data")},
+		RoutinesAdded: []*conn.Routine{routine},
+	}, consts.DBTypePostgres)
+	if err == nil {
+		t.Fatal("expected unsupported routine language to be rejected")
+	}
+	if message := err.Error(); !strings.Contains(message, "routine:public.native_lookup() -> unsupported dependency extraction language c") {
+		t.Fatalf("unexpected error: %q", message)
+	}
+}
+
+func TestGenerateSchemaSQLOrdersViewRoutineAndTableInBothDirections(t *testing.T) {
+	table := nontableTable("public", "ledger")
+	routine := &conn.Routine{
+		Name: "ledger_count", Schema: "public", Kind: conn.RoutineKindFunction,
+		Definition: "CREATE OR REPLACE FUNCTION public.ledger_count() RETURNS bigint LANGUAGE plpgsql AS $f$DECLARE result bigint; BEGIN SELECT count(*) INTO result FROM public.ledger; RETURN result; END$f$",
+	}
+	view := tableViewDef("public", "ledger_summary",
+		"SELECT public.ledger_count() AS total FROM public.ledger", "public.ledger")
+
+	create, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{
+		TablesAdded:   []*conn.Table{view, table},
+		RoutinesAdded: []*conn.Routine{routine},
+	}, consts.DBTypePostgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createTable := indexOfContaining(create, `CREATE TABLE "public"."ledger"`)
+	createRoutine := indexOfContaining(create, "CREATE OR REPLACE FUNCTION public.ledger_count")
+	createView := indexOfContaining(create, `CREATE VIEW "public"."ledger_summary"`)
+	if !(createTable >= 0 && createTable < createRoutine && createRoutine < createView) {
+		t.Fatalf("create order must be table -> routine -> view: %v", create)
+	}
+
+	drop, err := GenerateSchemaSQLSafe(&diff.SchemaDiff{
+		TablesDropped:   []*conn.Table{table, view},
+		RoutinesDropped: []*conn.Routine{routine},
+	}, consts.DBTypePostgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropView := indexOfContaining(drop, `DROP VIEW "public"."ledger_summary"`)
+	dropRoutine := indexOfContaining(drop, `DROP FUNCTION IF EXISTS "public"."ledger_count"`)
+	dropTable := indexOfContaining(drop, `DROP TABLE "public"."ledger"`)
+	if !(dropView >= 0 && dropView < dropRoutine && dropRoutine < dropTable) {
+		t.Fatalf("drop order must be view -> routine -> table: %v", drop)
 	}
 }
 
@@ -229,4 +444,13 @@ func indexOfContaining(statements []string, needle string) int {
 
 func containsStatement(statements []string, needle string) bool {
 	return indexOfContaining(statements, needle) >= 0
+}
+
+func containsExactStatement(statements []string, expected string) bool {
+	for _, statement := range statements {
+		if statement == expected {
+			return true
+		}
+	}
+	return false
 }

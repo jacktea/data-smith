@@ -47,6 +47,26 @@ type DatabaseSchema struct {
 	Sequences map[string]*Sequence
 }
 
+// SchemaObjectKind identifies an object category that participates in schema
+// dependency ordering. It intentionally covers only object kinds DataSmith can
+// currently extract and reproduce.
+type SchemaObjectKind string
+
+const (
+	SchemaObjectTable    SchemaObjectKind = "table"
+	SchemaObjectView     SchemaObjectKind = "view"
+	SchemaObjectRoutine  SchemaObjectKind = "routine"
+	SchemaObjectSequence SchemaObjectKind = "sequence"
+)
+
+// SchemaObjectRef names one prerequisite of a schema object. Routine Name is
+// its identity signature (name(identity_args)); all other names are bare names.
+type SchemaObjectRef struct {
+	Kind   SchemaObjectKind
+	Schema string
+	Name   string
+}
+
 func (s *DatabaseSchema) GetTable(name string) *Table {
 	return s.Tables[name]
 }
@@ -62,6 +82,7 @@ type Table struct {
 	ForeignKeys    map[string]*ForeignKey
 	Checks         map[string]*CheckConstraint
 	ViewDefinition *ViewDefinition `json:"view_definition,omitempty"`
+	Dependencies   []SchemaObjectRef
 }
 
 func (t *Table) GetColumn(name string) *Column {
@@ -195,6 +216,7 @@ type Routine struct {
 	Kind         RoutineKind
 	IdentityArgs string
 	Definition   string
+	Dependencies []SchemaObjectRef
 }
 
 // Identity 返回 name(identity_args) 形式的身份签名。
@@ -233,7 +255,8 @@ func (s *Sequence) Equal(other *Sequence) bool {
 		s.MinValue == other.MinValue &&
 		s.MaxValue == other.MaxValue &&
 		s.Cycle == other.Cycle &&
-		s.CacheSize == other.CacheSize
+		s.CacheSize == other.CacheSize &&
+		s.OwnedBy == other.OwnedBy
 }
 
 type DBAdapter interface {

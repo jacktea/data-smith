@@ -81,6 +81,12 @@
   `ALTER SEQUENCE`（参数漂移以 ALTER 对齐，不 DROP 重建）/`DROP ... IF EXISTS ...
   CASCADE` 及回滚；序列/例程先于表 DDL。**聚合函数（prokind='a'）与窗口函数
   （prokind='w'）首版明确不支持**（pg_get_functiondef 无法还原），提取阶段排除。
+- **阶段 3 闭环（2026-09-21）**：`Sequence.OwnedBy` 进入 equality，并以
+  `ALTER SEQUENCE ... OWNED BY table.column/NONE` 对称生成；table、view、routine、
+  sequence 统一进入对象依赖 DAG（dependent → prerequisite），创建使用正拓扑、删除
+  使用逆拓扑，原视图依赖闭包不再单独排序。SQL/PLpgSQL 静态表引用、复合返回类型、
+  routine 调用和 view 调用参与排序；动态 SQL、不支持语言、重载歧义与依赖环保守拒绝并
+  输出对象链。真实 PostgreSQL 往返验证 forward 收敛、rollback 恢复结构及 ownership。
 
 ### C2【P0·阻断】视图依赖的列变更无拓扑排序
 

@@ -10,10 +10,12 @@
 
 - 阶段 1（O1、O2、O3、S2）已于 2026-09-20 完成，起始提交为 `0742d0efdd671251047feb0d50dcf9c1ce755705`。
 - 阶段 2（SP1、SP2、S3、S4）已于 2026-09-20 完成，实际起始提交为 `6e09e2a33556f0b2419de1926c7275b7a9b73165`，起始工作树干净。
+- 阶段 3（S1、S5、SP3、SP4）已于 2026-09-21 从 `accf91b` 开始完成，起始工作树干净。
 - 完整门禁已通过：gofmt、单测、race、vet、staticcheck v0.8.1、govulncheck v1.1.4、前端/Go 构建、MySQL/PostgreSQL 双库集成测试和覆盖率 gate。
 - 阶段 2 覆盖率：overall 74.4%（5768/7754）、db 78.9%、diff 78.6%、sql 74.4%、migrate 75.9%、exec 89.1%。
+- 阶段 3 覆盖率：overall 74.9%（6074/8108）、db 78.9%（674/854）、diff 78.6%（1773/2257）、sql 76.9%（1268/1648）、migrate 75.9%（480/632）、exec 89.1%（376/422）。
 - Web 远程认证/授权/Origin/CSRF 仍是需要产品决策的独立设计项；当前默认仅监听 loopback，显式非 loopback 会清晰告警。
-- 下一阶段：阶段 3（S1、S5、SP3、SP4），先用 `codebase-design` 确定对象依赖 DAG 接口。
+- 下一阶段：阶段 4（S6、SP5、SP6、SP7、S7）；阶段 3 未提前处理这些事项。
 
 ## 开始前
 
@@ -81,7 +83,7 @@
 - `diff-full` 先在同目录 staging 中生成四产物，再作为一组发布；数据阶段、写盘和发布失败注入均验证上一组产物不变且无暂存泄漏。
 - 双库集成测试执行 forward 后二次完全对比为空；同时修复 MySQL 不接受的 `--- diff` 分节标记，统一为合法 `-- diff` SQL 注释。
 
-## 阶段 3：PostgreSQL 非表对象闭环
+## 阶段 3：PostgreSQL 非表对象闭环（已完成 2026-09-21）
 
 范围：报告中的 S1、S5、SP3、SP4。
 
@@ -103,6 +105,15 @@
 - routine→routine、view→routine/table 的拓扑和环检测。
 
 阶段完成标准：forward 后结构 diff 为空；rollback 后结构与 ownership 恢复；排序结果确定且重复运行字节一致。
+
+完成记录：
+
+- `Sequence.OwnedBy` 进入 equality；新增/修改/解除分别生成依赖安全的 `OWNED BY table.column` / `OWNED BY NONE`，新增从属序列按“建序列 → 建表 → 附着 ownership”执行。
+- 统一对象依赖 DAG 的节点为类型 + schema + identity + 操作步骤，边统一为 dependent → prerequisite；创建正拓扑、删除逆拓扑，稳定键保证重复生成字节一致。原 view 依赖闭包已接入该 Module，不再使用 view 专用排序阶段。
+- SQL/PLpgSQL 静态依赖发现覆盖复合返回表类型、表引用和 routine 调用；table 默认值、view→routine/table、sequence ownership 与外键附着/解除均进入图。动态 SQL `EXECUTE`、非 SQL/PLpgSQL 语言、重载歧义和依赖环失败关闭并输出对象链。
+- 单元测试覆盖 ownership 正反向、函数返回新增表、routine→routine、view→routine/table、删除逆序、外键解除、环与不可可靠提取；真实 PostgreSQL 测试执行 forward 后结构 diff 为空，rollback 后恢复结构、SERIAL ownership 与 `OWNED BY NONE`。
+- 未扩展 trigger、分区、generated column、identity 或用户定义类型；阶段 4 保持未开始。
+- 完整门禁通过：gofmt、相关最小测试、`go test ./...`、race、vet、staticcheck v0.8.1、govulncheck v1.1.4、`pnpm --dir web build`、MySQL/PostgreSQL 双库集成测试和覆盖率 gate。覆盖率为 overall 74.9%（6074/8108）、db 78.9%（674/854）、diff 78.6%（1773/2257）、sql 76.9%（1268/1648）、migrate 75.9%（480/632）、exec 89.1%（376/422）。
 
 ## 阶段 4：元数据与文档一致性
 
