@@ -135,3 +135,120 @@ pre.ds-danger {
   margin: 0;
   color: #cf1322;
 }
+
+/* SQL 控制台专属 Tabs：仅对激活面板采用 flex 内部固定布局，未激活面板严格隐藏 */
+.ds-tab-page-card .ds-fill-tabs.ds-sql-console-tabs .ant-tabs-tabpane-active {
+  overflow: hidden !important;
+  padding-right: 0 !important;
+  display: flex !important;
+  flex-direction: column;
+}
+
+.ds-tab-page-card .ds-fill-tabs.ds-sql-console-tabs .ant-tabs-tabpane-hidden,
+.ds-tab-page-card .ds-fill-tabs.ds-sql-console-tabs .ant-tabs-tabpane:not(.ant-tabs-tabpane-active) {
+  display: none !important;
+}
+
+/* SQL 语法高亮编辑器（CodeMirror 6）容器风格，与 AntD 设计系统契合 */
+.ds-sql-editor {
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #ffffff;
+  transition: all 0.2s cubic-bezier(0.645, 0.045, 0.355, 1);
+  display: flex;
+  flex-direction: column;
+}
+
+.ds-sql-editor:hover {
+  border-color: #4096ff;
+}
+
+.ds-sql-editor:focus-within {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 2px rgba(5, 145, 255, 0.1);
+  outline: 0;
+}
+
+.ds-sql-editor .cm-editor {
+  height: 100%;
+  outline: none !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ds-sql-editor .cm-scroller {
+  font-family: inherit;
+  overflow: auto;
+}
+
+.ds-sql-editor .cm-gutters {
+  background-color: #fafafa;
+  color: #8c8c8c;
+  border-right: 1px solid #f0f0f0;
+}
+
+.ds-sql-editor .cm-activeLineGutter {
+  background-color: #e6f4ff;
+  color: #1677ff;
+}
+
+.ds-sql-editor .cm-activeLine {
+  background-color: #f6faff;
+}
+
+/* SQL 执行结果自适应表格容器，固定表头并在内部区域独立滚动 */
+.ds-sql-result-table {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ds-sql-result-table .ant-spin-nested-loading,
+.ds-sql-result-table .ant-spin-container,
+.ds-sql-result-table .ant-table {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.ds-sql-result-table .ant-table-container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ds-sql-result-table .ant-table-header {
+  flex-shrink: 0;
+}
+
+.ds-sql-result-table .ant-table-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto !important;
+  overflow-x: auto !important;
+}
+
+.ds-sql-result-table .ant-pagination {
+  flex-shrink: 0;
+  margin: 10px 0 0 !important;
+}
+
+.ds-sql-empty-result {
+  flex: 1;
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fafafa;
+  border: 1px dashed #d9d9d9;
+  border-radius: 6px;
+  color: #8c8c8c;
+  font-size: 13px;
+}
+
