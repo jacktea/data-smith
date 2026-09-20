@@ -20,6 +20,7 @@ type JobType string
 const (
 	JobDiffSchema JobType = "diff-schema"
 	JobDiffData   JobType = "diff-data"
+	JobDiffFull   JobType = "diff-full"
 	JobExecSQL    JobType = "exec-sql"
 	JobReset      JobType = "reset"
 	JobMigrate    JobType = "migrate"

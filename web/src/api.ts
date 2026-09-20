@@ -148,7 +148,7 @@ export interface Scheme {
 
 // ---------------- 任务 ----------------
 
-export type JobType = "diff-schema" | "diff-data" | "exec-sql" | "reset" | "migrate" | "rollback";
+export type JobType = "diff-schema" | "diff-data" | "diff-full" | "exec-sql" | "reset" | "migrate" | "rollback";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export interface JobProgress {
@@ -197,6 +197,17 @@ export interface SummaryDiffData {
   tables: TableDiffSummary[];
   files: string[];
 }
+export interface SummaryDiffFull {
+  schema: SchemaDiffSummary;
+  complete: boolean;
+  tables: TableDiffSummary[];
+  skippedTables: string[];
+  files: string[];
+  /** 一步登记成功时才有 */
+  registeredVersion?: string;
+  upFile?: string;
+  downFile?: string;
+}
 export interface SummaryExecSql {
   mode: string;
   ok: boolean;
@@ -210,13 +221,18 @@ export interface SummaryMigrate {
   targetVersion: string;
 }
 export interface SummaryRollback {
-  version: string;
+  /** 旧字段:单步回退(回退最新)时保留 */
+  version?: string;
+  /** 依次回退的版本,最新在前 */
+  versions?: string[];
+  targetVersion?: string;
   rolled: boolean;
 }
 
 export type JobSummary =
   | SummaryDiffSchema
   | SummaryDiffData
+  | SummaryDiffFull
   | SummaryExecSql
   | SummaryReset
   | SummaryMigrate
@@ -265,6 +281,30 @@ export interface DiffDataJobInput {
   dmlBatchSize?: number;
   chunkHash?: boolean;
   bestEffort?: boolean;
+}
+
+export interface DiffFullRegisterInput {
+  libraryId: string;
+  /** 留空 = 自动取脚本库下一个版本 */
+  version?: string;
+  title: string;
+  expectedConnectionId?: string;
+}
+
+export interface DiffFullJobInput {
+  sourceId: string;
+  targetId: string;
+  includeTables?: string[];
+  excludeTables?: string[];
+  schemeId?: string;
+  tables: DiffDataTableRule[];
+  batchSize?: number;
+  chunkSize?: number;
+  dmlBatchSize?: number;
+  chunkHash?: boolean;
+  bestEffort?: boolean;
+  /** 可选:比对成功后一步登记为脚本库迁移版本 */
+  register?: DiffFullRegisterInput;
 }
 
 export type ExecSqlMode = "dryrun" | "tx" | "direct";
@@ -390,14 +430,21 @@ export const api = {
     request<{ job: Job }>("/jobs/diff-schema", { method: "POST", body: JSON.stringify(body) }),
   createJobDiffData: (body: DiffDataJobInput) =>
     request<{ job: Job }>("/jobs/diff-data", { method: "POST", body: JSON.stringify(body) }),
+  createJobDiffFull: (body: DiffFullJobInput) =>
+    request<{ job: Job }>("/jobs/diff-full", { method: "POST", body: JSON.stringify(body) }),
   createJobExecSql: (body: ExecSqlJobInput) =>
     request<{ job: Job }>("/jobs/exec-sql", { method: "POST", body: JSON.stringify(body) }),
   createJobReset: (body: { connectionId: string; confirmed: true }) =>
     request<{ job: Job }>("/jobs/reset", { method: "POST", body: JSON.stringify(body) }),
   createJobMigrate: (body: MigrateJobInput) =>
     request<{ job: Job }>("/jobs/migrate", { method: "POST", body: JSON.stringify(body) }),
-  createJobRollback: (body: { libraryId: string; connectionId: string; confirmed: true }) =>
-    request<{ job: Job }>("/jobs/rollback", { method: "POST", body: JSON.stringify(body) }),
+  createJobRollback: (body: {
+    libraryId: string;
+    connectionId: string;
+    /** 留空 = 回退最新一个版本;指定 = 从最新依次回退直到该版本 */
+    targetVersion?: string;
+    confirmed: true;
+  }) => request<{ job: Job }>("/jobs/rollback", { method: "POST", body: JSON.stringify(body) }),
   listJobs: (limit = 50) => request<Job[]>(`/jobs${qs({ limit: String(limit) })}`),
   getJob: (id: string) => request<Job>(`/jobs/${enc(id)}`),
   cancelJob: (id: string) =>

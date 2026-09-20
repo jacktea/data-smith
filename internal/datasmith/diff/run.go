@@ -93,19 +93,19 @@ type DataDiffResult struct {
 	Tables   []TableDiffSummary `json:"tables"`
 }
 
-const schemaDiffForwardFile = "schema_diff.sql"
-const schemaDiffRollbackFile = "schema_diff_rollback.sql"
-const dataDiffForwardFile = "data_diff.sql"
-const dataDiffRollbackFile = "data_diff_rollback.sql"
+const SchemaDiffForwardFile = "schema_diff.sql"
+const SchemaDiffRollbackFile = "schema_diff_rollback.sql"
+const DataDiffForwardFile = "data_diff.sql"
+const DataDiffRollbackFile = "data_diff_rollback.sql"
 
 // SchemaDiffFileNames lists the artifact names produced by RunSchemaDiff.
 func SchemaDiffFileNames() []string {
-	return []string{schemaDiffForwardFile, schemaDiffRollbackFile}
+	return []string{SchemaDiffForwardFile, SchemaDiffRollbackFile}
 }
 
 // DataDiffFileNames lists the artifact names produced by RunDataDiff.
 func DataDiffFileNames() []string {
-	return []string{dataDiffForwardFile, dataDiffRollbackFile}
+	return []string{DataDiffForwardFile, DataDiffRollbackFile}
 }
 
 // RunSchemaDiff reads both schemas, compares them, and atomically writes the
@@ -167,8 +167,8 @@ func RunSchemaDiff(ctx context.Context, params SchemaDiffParams, dir string, pro
 		return SchemaDiffSummary{}, fmt.Errorf("generate rollback schema SQL: %w", err)
 	}
 
-	forwardPath := filepath.Join(dir, schemaDiffForwardFile)
-	rollbackPath := filepath.Join(dir, schemaDiffRollbackFile)
+	forwardPath := filepath.Join(dir, SchemaDiffForwardFile)
+	rollbackPath := filepath.Join(dir, SchemaDiffRollbackFile)
 	err = writeAtomicPair(forwardPath, rollbackPath, func(forward, rollback io.Writer) error {
 		if _, err := fmt.Fprintln(forward, executeOnSourceHeader); err != nil {
 			return fmt.Errorf("write forward execution target: %w", err)
@@ -453,11 +453,11 @@ func RunDataDiff(ctx context.Context, params DataDiffParams, dir string, progres
 
 	forwardPath := params.ForwardPath
 	if forwardPath == "" {
-		forwardPath = filepath.Join(dir, dataDiffForwardFile)
+		forwardPath = filepath.Join(dir, DataDiffForwardFile)
 	}
 	rollbackPath := params.RollbackPath
 	if rollbackPath == "" {
-		rollbackPath = filepath.Join(dir, dataDiffRollbackFile)
+		rollbackPath = filepath.Join(dir, DataDiffRollbackFile)
 	}
 
 	var failures []tableDiffFailure

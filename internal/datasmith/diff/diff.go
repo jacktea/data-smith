@@ -7,4 +7,6 @@ func Install(root *cobra.Command) {
 	root.AddCommand(diffSchemaCmd)
 	// 对比数据库数据
 	root.AddCommand(diffDataCmd)
+	// 一次完成结构+数据比对
+	root.AddCommand(diffFullCmd)
 }

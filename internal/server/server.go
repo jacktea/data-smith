@@ -84,6 +84,7 @@ func (s *Server) routes() {
 
 	m.HandleFunc("POST /api/jobs/diff-schema", s.handleDiffSchemaSubmit)
 	m.HandleFunc("POST /api/jobs/diff-data", s.handleDiffDataSubmit)
+	m.HandleFunc("POST /api/jobs/diff-full", s.handleDiffFullSubmit)
 	m.HandleFunc("POST /api/jobs/exec-sql", s.handleExecSQLSubmit)
 	m.HandleFunc("POST /api/reset/preview", s.handleResetPreview)
 	m.HandleFunc("POST /api/jobs/reset", s.handleResetSubmit)

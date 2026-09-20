@@ -45,8 +45,8 @@ func runDiffSchema(cmd *cobra.Command, args []string) error {
 	}
 
 	printDiffSummary(summary)
-	log.Printf("Forward diff SQL generated: %s (to be executed on SOURCE)\n", filepath.Join(diffDir, schemaDiffForwardFile))
-	log.Printf("Rollback SQL generated: %s (to restore SOURCE back to original state)\n", filepath.Join(diffDir, schemaDiffRollbackFile))
+	log.Printf("Forward diff SQL generated: %s (to be executed on SOURCE)\n", filepath.Join(diffDir, SchemaDiffForwardFile))
+	log.Printf("Rollback SQL generated: %s (to restore SOURCE back to original state)\n", filepath.Join(diffDir, SchemaDiffRollbackFile))
 	return nil
 }
 

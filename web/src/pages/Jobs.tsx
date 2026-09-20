@@ -38,6 +38,7 @@ import { RegisterVersionModal } from "../components/RegisterVersionModal";
 const TYPE_LABEL: Record<JobType, string> = {
   "diff-schema": "结构比对",
   "diff-data": "数据比对",
+  "diff-full": "完全比对",
   "exec-sql": "SQL 脚本",
   reset: "数据重置",
   migrate: "迁移",
@@ -135,11 +136,52 @@ function SummaryView({ job }: { job: Job }) {
       </Space>
     );
   }
-  if (job.type === "diff-data") {
-    const d = s as SummaryDiffData;
+  if (job.type === "diff-data" || job.type === "diff-full") {
+    const d = s as SummaryDiffData & {
+      schema?: SummaryDiffSchema["schema"];
+      skippedTables?: string[];
+      registeredVersion?: string;
+      upFile?: string;
+      downFile?: string;
+    };
+    const sc = d.schema;
     return (
       <Space direction="vertical" style={{ width: "100%" }} size="middle">
+        {d.registeredVersion && (
+          <Alert
+            type="success"
+            showIcon
+            message={`已登记为迁移版本 ${d.registeredVersion}`}
+            description={`up=${d.upFile ?? ""},down=${d.downFile ?? ""}(仅生成脚本,执行需在「迁移管理」显式操作)`}
+          />
+        )}
+        {sc?.destructive && (
+          <Alert
+            type="error"
+            showIcon
+            message="结构差异包含破坏性变更(删表/删列等),执行前请务必人工审阅 SQL!"
+          />
+        )}
+        {sc && (
+          <Descriptions
+            bordered
+            size="small"
+            column={3}
+            items={[
+              { key: "add", label: "结构新增表", children: sc.tablesAdded?.length ? sc.tablesAdded.join(", ") : "无" },
+              { key: "drop", label: "结构删除表", children: sc.tablesDropped?.length ? sc.tablesDropped.join(", ") : "无" },
+              { key: "mod", label: "结构变更表数", children: String(sc.tablesModified?.length ?? 0) },
+            ]}
+          />
+        )}
         {!d.complete && <Alert type="warning" showIcon message="部分表比对失败,结果不完整,详见下表与日志。" />}
+        {(d.skippedTables?.length ?? 0) > 0 && (
+          <Alert
+            type="info"
+            showIcon
+            message={`已跳过 ${d.skippedTables?.length} 张单侧表的数据比对(由结构比对覆盖):${d.skippedTables?.join(", ")}`}
+          />
+        )}
         <Table
           rowKey="table"
           size="small"
@@ -225,20 +267,35 @@ function SummaryView({ job }: { job: Job }) {
       />
     );
   }
-  const d = s as { version: string; rolled: boolean };
+  const d = s as { version?: string; versions?: string[]; targetVersion?: string; rolled: boolean };
+  const versions = d.versions ?? (d.version ? [d.version] : []);
   return (
     <Descriptions
       bordered
       size="small"
       column={1}
       items={[
+        ...(d.targetVersion
+          ? [{ key: "target", label: "目标版本", children: <Tag color="geekblue">{d.targetVersion}</Tag> }]
+          : []),
         {
           key: "rb",
           label: "回退结果",
           children: (
             <>
-              版本 <Tag color="orange">{d.version}</Tag>
-              {d.rolled ? <Tag color="success">已回退</Tag> : <Tag color="error">未回退</Tag>}
+              {versions.length > 0 ? (
+                <Space wrap size={4}>
+                  <span>依次回退:</span>
+                  {versions.map((v) => (
+                    <Tag key={v} color="orange">
+                      {v}
+                    </Tag>
+                  ))}
+                </Space>
+              ) : (
+                <span>已在目标版本,未回退任何脚本</span>
+              )}
+              {d.rolled && versions.length > 0 && <Tag color="success" style={{ marginLeft: 8 }}>已回退</Tag>}
             </>
           ),
         },
@@ -408,7 +465,8 @@ export default function JobsPage() {
                 取消任务
               </Button>
             </Popconfirm>
-          ) : detail?.status === "succeeded" && (detail.type === "diff-schema" || detail.type === "diff-data") ? (
+          ) : detail?.status === "succeeded" &&
+            (detail.type === "diff-schema" || detail.type === "diff-data" || detail.type === "diff-full") ? (
             <Button type="primary" size="small" onClick={() => setRegisterJob(detail)}>
               登记为迁移版本
             </Button>

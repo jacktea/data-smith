@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	difflogic "github.com/jacktea/data-smith/internal/datasmith/diff"
 	local "github.com/jacktea/data-smith/internal/datasmith/migrate/local"
 	"github.com/jacktea/data-smith/pkg/conn"
 	"github.com/jacktea/data-smith/pkg/consts"
@@ -351,18 +352,21 @@ func (s *Server) handleRegisterVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "来源任务不存在")
 		return
 	}
-	if job.Type() != JobDiffSchema && job.Type() != JobDiffData {
-		writeError(w, http.StatusBadRequest, "来源任务类型必须为 diff-schema 或 diff-data")
+	if job.Type() != JobDiffSchema && job.Type() != JobDiffData && job.Type() != JobDiffFull {
+		writeError(w, http.StatusBadRequest, "来源任务类型必须为 diff-schema、diff-data 或 diff-full")
 		return
 	}
 	if job.Status() != jobStatusSucceeded {
 		writeError(w, http.StatusBadRequest, "来源任务尚未成功完成")
 		return
 	}
-	// 一次迭代一个版本:主任务之外允许挂一个互补类型的配套任务,
-	// 把结构变更与数据变更并入同一 up/down 对。
+	// 完全对比任务在单一目录内同时产出结构与数据产物,不允许再挂配套任务。
 	var companion *Job
 	if req.CompanionJobID != "" {
+		if job.Type() == JobDiffFull {
+			writeError(w, http.StatusBadRequest, "完全对比任务已包含结构与数据产物,无需配套任务")
+			return
+		}
 		companion = s.jobs.Get(req.CompanionJobID)
 		if companion == nil {
 			writeError(w, http.StatusBadRequest, "配套任务不存在")
@@ -382,9 +386,13 @@ func (s *Server) handleRegisterVersion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var schemaJob, dataJob *Job
-	if job.Type() == JobDiffSchema {
+	switch job.Type() {
+	case JobDiffSchema:
 		schemaJob = job
-	} else {
+	case JobDiffData:
+		dataJob = job
+	default: // JobDiffFull: 结构与数据产物在同一任务目录
+		schemaJob = job
 		dataJob = job
 	}
 	if companion != nil {
@@ -420,31 +428,25 @@ func (s *Server) handleRegisterVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.IncludeSchema {
 		var err error
-		if schemaForward, err = readFrom(schemaJob, diffSchemaForwardName()); err != nil {
+		if schemaForward, err = readFrom(schemaJob, difflogic.SchemaDiffForwardFile); err != nil {
 			writeError(w, http.StatusBadRequest, "%s", err.Error())
 			return
 		}
-		schemaRollback, _ = readFrom(schemaJob, diffSchemaRollbackName())
+		schemaRollback, _ = readFrom(schemaJob, difflogic.SchemaDiffRollbackFile)
 	}
 	if req.IncludeData {
 		var err error
-		if dataForward, err = readFrom(dataJob, diffDataForwardName()); err != nil {
+		if dataForward, err = readFrom(dataJob, difflogic.DataDiffForwardFile); err != nil {
 			writeError(w, http.StatusBadRequest, "%s", err.Error())
 			return
 		}
-		dataRollback, _ = readFrom(dataJob, diffDataRollbackName())
+		dataRollback, _ = readFrom(dataJob, difflogic.DataDiffRollbackFile)
 	}
 
-	segments := versionSegments{
-		includeSchema:  req.IncludeSchema,
-		includeData:    req.IncludeData,
-		schemaForward:  schemaForward,
-		dataForward:    dataForward,
-		dataRollback:   dataRollback,
-		schemaRollback: schemaRollback,
-	}
-	upContent := concatSQLSegments(segments.up())
-	downContent := concatSQLSegments(segments.down())
+	upContent, downContent := difflogic.AssembleVersionScripts(
+		req.IncludeSchema, req.IncludeData,
+		schemaForward, schemaRollback, dataForward, dataRollback,
+	)
 
 	upFile := fmt.Sprintf("V%s__%s.up.sql", version, req.Title)
 	downFile := fmt.Sprintf("V%s__%s.down.sql", version, req.Title)
@@ -491,84 +493,6 @@ func normalizeRegistrationVersion(version string) (string, error) {
 
 func normalizedVersion(version string) string {
 	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(version)), "v")
-}
-
-func diffSchemaForwardName() string  { return "schema_diff.sql" }
-func diffSchemaRollbackName() string { return "schema_diff_rollback.sql" }
-func diffDataForwardName() string    { return "data_diff.sql" }
-func diffDataRollbackName() string   { return "data_diff_rollback.sql" }
-
-// versionSegments carries the four diff artifact contents for assembly.
-type versionSegments struct {
-	includeSchema  bool
-	includeData    bool
-	schemaForward  string
-	dataForward    string
-	dataRollback   string
-	schemaRollback string
-}
-
-func (v versionSegments) up() [][2]string {
-	var out [][2]string
-	if v.includeSchema {
-		out = append(out, [2]string{"schema forward", v.schemaForward})
-	}
-	if v.includeData {
-		out = append(out, [2]string{"data forward", v.dataForward})
-	}
-	return out
-}
-
-func (v versionSegments) down() [][2]string {
-	var out [][2]string
-	if v.includeData {
-		out = append(out, [2]string{"data rollback", v.dataRollback})
-	}
-	if v.includeSchema {
-		out = append(out, [2]string{"schema rollback", v.schemaRollback})
-	}
-	return out
-}
-
-// concatSQLSegments joins diff artifacts into one version script: a single
-// leading EXECUTE-ON header (the first one found), then labeled sections with
-// duplicate headers stripped and blank sections dropped.
-func concatSQLSegments(segments [][2]string) string {
-	header := ""
-	for _, seg := range segments {
-		if line := firstExecuteOnHeader(seg[1]); line != "" {
-			header = line
-			break
-		}
-	}
-	var body strings.Builder
-	for _, seg := range segments {
-		content := stripExecuteOnHeaders(seg[1])
-		if strings.TrimSpace(content) == "" {
-			continue
-		}
-		body.WriteString("-- ==== " + seg[0] + " ====\n")
-		body.WriteString(strings.TrimRight(content, "\n") + "\n\n")
-	}
-	if header == "" {
-		return body.String()
-	}
-	return header + "\n" + body.String()
-}
-
-// executeOnHeaderRe matches a full-line DATASMITH EXECUTE-ON comment.
-var executeOnHeaderRe = regexp.MustCompile(`(?im)^--\s*DATASMITH EXECUTE-ON:.*$`)
-
-func firstExecuteOnHeader(content string) string {
-	loc := executeOnHeaderRe.FindStringIndex(content)
-	if loc == nil {
-		return ""
-	}
-	return strings.TrimSpace(content[loc[0]:loc[1]])
-}
-
-func stripExecuteOnHeaders(content string) string {
-	return executeOnHeaderRe.ReplaceAllString(content, "")
 }
 
 // --- migrate plan -----------------------------------------------------------

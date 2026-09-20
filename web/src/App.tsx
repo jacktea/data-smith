@@ -1,6 +1,7 @@
 import {
   CodeOutlined,
   DatabaseOutlined,
+  DiffOutlined,
   PartitionOutlined,
   RocketOutlined,
   TableOutlined,
@@ -11,6 +12,7 @@ import { Layout, Menu, Typography } from "antd";
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import ConnectionsPage from "./pages/Connections";
 import DiffDataPage from "./pages/DiffData";
+import DiffFullPage from "./pages/DiffFull";
 import DiffSchemaPage from "./pages/DiffSchema";
 import JobsPage from "./pages/Jobs";
 import MigrationsPage from "./pages/Migrations";
@@ -23,6 +25,7 @@ const MENU_ITEMS = [
   { key: "/connections", icon: <DatabaseOutlined />, label: "连接管理" },
   { key: "/diff-schema", icon: <PartitionOutlined />, label: "结构比对" },
   { key: "/diff-data", icon: <TableOutlined />, label: "数据比对" },
+  { key: "/diff-full", icon: <DiffOutlined />, label: "完全比对" },
   { key: "/sql", icon: <CodeOutlined />, label: "SQL 控制台" },
   { key: "/reset", icon: <WarningOutlined />, label: "数据重置" },
   { key: "/migrations", icon: <RocketOutlined />, label: "迁移管理" },
@@ -87,6 +90,7 @@ export default function App() {
         <Route path="/connections" element={<ConnectionsPage />} />
         <Route path="/diff-schema" element={<DiffSchemaPage />} />
         <Route path="/diff-data" element={<DiffDataPage />} />
+        <Route path="/diff-full" element={<DiffFullPage />} />
         <Route path="/sql" element={<SqlConsolePage />} />
         <Route path="/reset" element={<ResetPage />} />
         <Route path="/migrations" element={<MigrationsPage />} />

@@ -20,9 +20,11 @@ export function RegisterVersionModal({
   const [expectedConnId, setExpectedConnId] = useState<string>();
   const [companionJobs, setCompanionJobs] = useState<Job[]>([]);
   const [companionJobId, setCompanionJobId] = useState<string>();
+  // 完全对比任务单一目录内同时含结构与数据产物,无需配套任务
+  const isFull = job.type === "diff-full";
   const companionType = job.type === "diff-schema" ? "diff-data" : "diff-schema";
-  const [includeSchema, setIncludeSchema] = useState(job.type === "diff-schema");
-  const [includeData, setIncludeData] = useState(job.type === "diff-data");
+  const [includeSchema, setIncludeSchema] = useState(job.type !== "diff-data");
+  const [includeData, setIncludeData] = useState(job.type !== "diff-schema");
   const [version, setVersion] = useState("");
   const [title, setTitle] = useState("");
   const [nextVersion, setNextVersion] = useState("");
@@ -33,21 +35,26 @@ export function RegisterVersionModal({
     setExpectedConnId(
       typeof job.params.sourceId === "string" && job.params.sourceId ? job.params.sourceId : undefined,
     );
-    setIncludeSchema(job.type === "diff-schema");
-    setIncludeData(job.type === "diff-data");
+    setIncludeSchema(job.type !== "diff-data");
+    setIncludeData(job.type !== "diff-schema");
     setVersion("");
     setNextVersion("");
     api
       .listLibraries()
       .then(setLibs)
       .catch((e) => message.error(errMsg(e)));
+    if (isFull) {
+      setCompanionJobs([]);
+      setCompanionJobId(undefined);
+      return;
+    }
     api
       .listJobs(100)
       .then((jobs) =>
         setCompanionJobs(jobs.filter((j) => j.type === companionType && j.status === "succeeded")),
       )
       .catch(() => setCompanionJobs([]));
-  }, [open, job, message, companionType]);
+  }, [open, job, message, companionType, isFull]);
 
   // 选择配套任务后自动纳入其变更段
   useEffect(() => {
@@ -167,35 +174,37 @@ export function RegisterVersionModal({
         <Space size="large">
           <Checkbox
             checked={includeSchema}
-            disabled={job.type !== "diff-schema" && !companionJobId}
+            disabled={isFull || (job.type !== "diff-schema" && !companionJobId)}
             onChange={(e) => setIncludeSchema(e.target.checked)}
           >
             包含结构变更(schema)
           </Checkbox>
           <Checkbox
             checked={includeData}
-            disabled={job.type !== "diff-data" && !companionJobId}
+            disabled={isFull || (job.type !== "diff-data" && !companionJobId)}
             onChange={(e) => setIncludeData(e.target.checked)}
           >
             包含数据变更(data)
           </Checkbox>
         </Space>
-        <div>
-          <Typography.Text strong>
-            关联{companionType === "diff-data" ? "数据" : "结构"}比对任务(可选,并入同一版本)
-          </Typography.Text>
-          <Select
-            style={{ width: "100%", marginTop: 4 }}
-            allowClear
-            placeholder={`选择已成功的 ${companionType === "diff-data" ? "数据" : "结构"}比对任务,合并登记为一个版本`}
-            value={companionJobId}
-            onChange={(v) => setCompanionJobId(v || undefined)}
-            options={companionJobs.map((j) => ({
-              value: j.id,
-              label: `${j.id} · ${j.createdAt ?? ""}`,
-            }))}
-          />
-        </div>
+        {!isFull && (
+          <div>
+            <Typography.Text strong>
+              关联{companionType === "diff-data" ? "数据" : "结构"}比对任务(可选,并入同一版本)
+            </Typography.Text>
+            <Select
+              style={{ width: "100%", marginTop: 4 }}
+              allowClear
+              placeholder={`选择已成功的 ${companionType === "diff-data" ? "数据" : "结构"}比对任务,合并登记为一个版本`}
+              value={companionJobId}
+              onChange={(v) => setCompanionJobId(v || undefined)}
+              options={companionJobs.map((j) => ({
+                value: j.id,
+                label: `${j.id} · ${j.createdAt ?? ""}`,
+              }))}
+            />
+          </div>
+        )}
         <Space size="middle" style={{ width: "100%" }}>
           <div style={{ flex: 1 }}>
             <Typography.Text strong>版本号</Typography.Text>

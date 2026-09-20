@@ -71,10 +71,10 @@ func runDiffData(cmd *cobra.Command, args []string) error {
 	diffFile, _ := cmd.Flags().GetString("output")
 	rollbackFile, _ := cmd.Flags().GetString("rollback-output")
 	if diffFile == "" {
-		diffFile = filepath.Join(diffDir, dataDiffForwardFile)
+		diffFile = filepath.Join(diffDir, DataDiffForwardFile)
 	}
 	if rollbackFile == "" {
-		rollbackFile = filepath.Join(diffDir, dataDiffRollbackFile)
+		rollbackFile = filepath.Join(diffDir, DataDiffRollbackFile)
 	}
 	log.Printf("Forward Diff file: %s\n", diffFile)
 	log.Printf("Rollback Diff file: %s\n", rollbackFile)

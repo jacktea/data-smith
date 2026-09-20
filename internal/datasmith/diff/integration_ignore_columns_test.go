@@ -78,11 +78,11 @@ func TestRunDataDiffInsertCarriesNotNullIgnoredColumn(t *testing.T) {
 			if !result.Complete || len(result.Tables) != 1 || result.Tables[0].Status != "ok" {
 				t.Fatalf("unexpected diff result: %#v", result)
 			}
-			forwardBytes, err := os.ReadFile(filepath.Join(dir, dataDiffForwardFile))
+			forwardBytes, err := os.ReadFile(filepath.Join(dir, DataDiffForwardFile))
 			if err != nil {
 				t.Fatal(err)
 			}
-			rollbackBytes, err := os.ReadFile(filepath.Join(dir, dataDiffRollbackFile))
+			rollbackBytes, err := os.ReadFile(filepath.Join(dir, DataDiffRollbackFile))
 			if err != nil {
 				t.Fatal(err)
 			}
