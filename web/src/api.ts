@@ -291,6 +291,9 @@ export interface DiffFullRegisterInput {
   expectedConnectionId?: string;
 }
 
+/** diff-full 数据比对模式:auto=引擎自动判定影子事务;shadow=强制影子(仅 PG source);direct=直接比对 */
+export type DataDiffMode = "auto" | "shadow" | "direct";
+
 export interface DiffFullJobInput {
   sourceId: string;
   targetId: string;
@@ -303,6 +306,8 @@ export interface DiffFullJobInput {
   dmlBatchSize?: number;
   chunkHash?: boolean;
   bestEffort?: boolean;
+  /** 数据比对模式,缺省 auto(引擎默认:PG source 且有结构差异时影子两阶段) */
+  dataDiffMode?: DataDiffMode;
   /** 可选:比对成功后一步登记为脚本库迁移版本 */
   register?: DiffFullRegisterInput;
 }

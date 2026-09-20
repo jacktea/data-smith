@@ -43,6 +43,20 @@ func ValidateDataDiffMode(mode string) error {
 	}
 }
 
+// IsValidDataDiffMode 报告 mode 是否为合法的数据比对模式（含空串=默认）。
+func IsValidDataDiffMode(mode string) bool {
+	return ValidateDataDiffMode(mode) == nil
+}
+
+// NormalizeDataDiffMode 把空串归一为引擎默认 auto，供调用方持久化与展示
+// 生效模式；其余值原样返回。
+func NormalizeDataDiffMode(mode string) string {
+	if mode == "" {
+		return DataDiffModeAuto
+	}
+	return mode
+}
+
 // decideShadowDataDiff 计算实际是否启用影子事务：显式模式优先；auto 仅在
 // source 为 PostgreSQL 且结构 forward 非空时启用。影子事务依赖事务性 DDL，
 // 强制 shadow 而 source 非 PostgreSQL 属配置错误——MySQL 的 DDL 会隐式提交，

@@ -285,6 +285,7 @@ type diffFullRequest struct {
 	DMLBatchSize  int                      `json:"dmlBatchSize"`
 	ChunkHash     bool                     `json:"chunkHash"`
 	BestEffort    bool                     `json:"bestEffort"`
+	DataDiffMode  string                   `json:"dataDiffMode"`
 	Register      *diffFullRegisterRequest `json:"register"`
 }
 
@@ -345,6 +346,13 @@ func (s *Server) handleDiffFullSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "dmlBatchSize 不能超过 %d", maxDMLBatchSize)
 		return
 	}
+	// 数据比对模式经引擎既有校验与语义执行（auto/shadow/direct），Web 不重写
+	// 任何影子机制逻辑；空串按引擎默认归一为 auto，任务记录与日志可见。
+	if !difflogic.IsValidDataDiffMode(req.DataDiffMode) {
+		writeError(w, http.StatusBadRequest, "dataDiffMode 取值必须为 auto、shadow 或 direct")
+		return
+	}
+	dataDiffMode := difflogic.NormalizeDataDiffMode(req.DataDiffMode)
 
 	params := map[string]any{
 		"sourceId":      source.ID,
@@ -358,6 +366,7 @@ func (s *Server) handleDiffFullSubmit(w http.ResponseWriter, r *http.Request) {
 		"dmlBatchSize":  dmlBatchSize,
 		"chunkHash":     req.ChunkHash,
 		"bestEffort":    req.BestEffort,
+		"dataDiffMode":  dataDiffMode,
 	}
 	if req.Register != nil {
 		params["register"] = map[string]any{
@@ -369,13 +378,13 @@ func (s *Server) handleDiffFullSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	job := s.jobs.Submit(JobDiffFull, params, func(ctx context.Context, job *Job) error {
 		return s.runDiffFull(ctx, job, source.ID, target.ID, req.IncludeTables, req.ExcludeTables,
-			tables, batchSize, chunkSize, dmlBatchSize, req.ChunkHash, req.BestEffort, req.Register)
+			tables, batchSize, chunkSize, dmlBatchSize, req.ChunkHash, req.BestEffort, dataDiffMode, req.Register)
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"job": job.View()})
 }
 
 func (s *Server) runDiffFull(ctx context.Context, job *Job, sourceID, targetID string, includeTables, excludeTables []string,
-	tables []SchemeTable, batchSize, chunkSize, dmlBatchSize int, chunkHash, bestEffort bool, register *diffFullRegisterRequest) error {
+	tables []SchemeTable, batchSize, chunkSize, dmlBatchSize int, chunkHash, bestEffort bool, dataDiffMode string, register *diffFullRegisterRequest) error {
 	source, ok := s.store.GetConnection(sourceID)
 	if !ok {
 		return errBad("source 连接已被删除")
@@ -397,8 +406,8 @@ func (s *Server) runDiffFull(ctx context.Context, job *Job, sourceID, targetID s
 		return errBad("请选择数据表或比对方案")
 	}
 	job.SetProgressTotal(len(rules))
-	job.Logf("开始完全比对: source=%s(%s) target=%s(%s), 结构范围 %d 张表, 数据 %d 张表",
-		source.Name, source.ID, target.Name, target.ID, len(includeTables)+len(excludeTables), len(rules))
+	job.Logf("开始完全比对: source=%s(%s) target=%s(%s), 结构范围 %d 张表, 数据 %d 张表, 数据比对模式 %s",
+		source.Name, source.ID, target.Name, target.ID, len(includeTables)+len(excludeTables), len(rules), dataDiffMode)
 
 	result, err := difflogic.RunFullDiff(ctx, difflogic.FullDiffParams{
 		Source:        source.ConnConfig(),
@@ -406,6 +415,7 @@ func (s *Server) runDiffFull(ctx context.Context, job *Job, sourceID, targetID s
 		IncludeTables: includeTables,
 		ExcludeTables: excludeTables,
 		Rules:         rules,
+		DataDiffMode:  dataDiffMode,
 		BatchSize:     batchSize,
 		ChunkSize:     chunkSize,
 		DMLBatchSize:  dmlBatchSize,

@@ -22,6 +22,7 @@ import { useNavigate } from "react-router-dom";
 import {
   api,
   errMsg,
+  type DataDiffMode,
   type Library,
   type Scheme,
   type SchemeTable,
@@ -35,6 +36,24 @@ interface TableConfig {
 }
 
 type Scope = "all" | "include" | "exclude";
+
+const DATA_DIFF_MODE_OPTIONS: { value: DataDiffMode; label: string; hint: string }[] = [
+  {
+    value: "auto",
+    label: "自动(推荐)",
+    hint: "引擎默认:source 为 PostgreSQL 且存在结构差异时,先在事务内对齐结构再做数据比对(影子两阶段,不落库),否则直接比对",
+  },
+  {
+    value: "shadow",
+    label: "强制影子事务",
+    hint: "数据比对一律跑在事务内对齐后的结构上;仅支持 PostgreSQL source,MySQL 的 DDL 会隐式提交、将被拒绝",
+  },
+  {
+    value: "direct",
+    label: "直接比对",
+    hint: "禁用影子事务,数据比对跑在当前结构上,仅对公共列/主键列集做漂移容错",
+  },
+];
 
 function TableConfigPanel({
   info,
@@ -113,6 +132,7 @@ export default function DiffFullPage() {
   const [dmlBatchSize, setDmlBatchSize] = useState<number | undefined>();
   const [chunkHash, setChunkHash] = useState(false);
   const [bestEffort, setBestEffort] = useState(false);
+  const [dataDiffMode, setDataDiffMode] = useState<DataDiffMode>("auto");
   const [register, setRegister] = useState(false);
   const [libs, setLibs] = useState<Library[]>([]);
   const [libId, setLibId] = useState<string | undefined>();
@@ -235,6 +255,7 @@ export default function DiffFullPage() {
         ...(dmlBatchSize ? { dmlBatchSize } : {}),
         chunkHash,
         bestEffort,
+        dataDiffMode,
         ...(register && libId
           ? {
               register: {
@@ -390,7 +411,23 @@ export default function DiffFullPage() {
               key: "adv",
               label: "高级参数(可选,留空使用引擎默认)",
               children: (
-                <Row gutter={16}>
+                <Space direction="vertical" style={{ width: "100%" }} size="middle">
+                  <div>
+                    <Typography.Text type="secondary">数据比对模式 dataDiffMode</Typography.Text>
+                    <div style={{ marginTop: 4 }}>
+                      <Radio.Group
+                        value={dataDiffMode}
+                        onChange={(e) => setDataDiffMode(e.target.value as DataDiffMode)}
+                        optionType="button"
+                        buttonStyle="solid"
+                        options={DATA_DIFF_MODE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+                      />
+                    </div>
+                    <Typography.Text type="secondary" style={{ display: "block", marginTop: 4 }}>
+                      {DATA_DIFF_MODE_OPTIONS.find((o) => o.value === dataDiffMode)?.hint}
+                    </Typography.Text>
+                  </div>
+                  <Row gutter={16}>
                   <Col span={5}>
                     <Typography.Text type="secondary">批量行数 batchSize</Typography.Text>
                     <InputNumber
@@ -434,6 +471,7 @@ export default function DiffFullPage() {
                     </div>
                   </Col>
                 </Row>
+                </Space>
               ),
             },
             {
