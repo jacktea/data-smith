@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/jacktea/data-smith/internal/config"
 	"github.com/jacktea/data-smith/pkg/conn"
@@ -51,21 +52,23 @@ func runDiffSchema(cmd *cobra.Command, args []string) error {
 }
 
 func filterTables(tables map[string]*conn.Table, includes, excludes []string) map[string]*conn.Table {
-	incSet := make(map[string]bool)
+	incSet := make(map[string]bool, len(includes)*2)
 	for _, t := range includes {
 		incSet[t] = true
+		incSet[strings.ToLower(t)] = true
 	}
-	excSet := make(map[string]bool)
+	excSet := make(map[string]bool, len(excludes)*2)
 	for _, t := range excludes {
 		excSet[t] = true
+		excSet[strings.ToLower(t)] = true
 	}
 
 	result := make(map[string]*conn.Table)
 	for name, tbl := range tables {
-		if len(incSet) > 0 && !incSet[name] {
+		if len(incSet) > 0 && !incSet[name] && !incSet[strings.ToLower(name)] {
 			continue
 		}
-		if excSet[name] {
+		if excSet[name] || excSet[strings.ToLower(name)] {
 			continue
 		}
 		result[name] = tbl

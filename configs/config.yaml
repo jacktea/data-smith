@@ -41,3 +41,10 @@ targetDb:
   password: obvious-placeholder
   dbname: airedge3.7db
   tableSchema: public
+
+# 全局排除表: 迁移工具表等非业务表无需进行结构对比 (系统默认已包含 flyway_schema_history, schema_migrations)
+# 如需额外排除其他表，可在此处配置追加
+excludeTables:
+  - flyway_schema_history
+  - schema_migrations
+

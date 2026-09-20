@@ -83,3 +83,48 @@ func TestConnConfigCloneDoesNotShareMutableValues(t *testing.T) {
 		t.Fatalf("caller config mutated: got %#v want %#v", original, before)
 	}
 }
+
+func TestEffectiveExcludeTables(t *testing.T) {
+	t.Run("nil or empty excludes returns default tables", func(t *testing.T) {
+		got := EffectiveExcludeTables(nil)
+		want := []string{"flyway_schema_history", "schema_migrations"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+
+		gotEmpty := EffectiveExcludeTables([]string{})
+		if !reflect.DeepEqual(gotEmpty, want) {
+			t.Fatalf("got %v, want %v", gotEmpty, want)
+		}
+	})
+
+	t.Run("merges user tables and deduplicates case-insensitively", func(t *testing.T) {
+		userExcludes := []string{
+			"custom_table",
+			"FLYWAY_SCHEMA_HISTORY", // 应该去重
+			"schema_migrations",     // 应该去重
+			"another_table",
+		}
+		got := EffectiveExcludeTables(userExcludes)
+		want := []string{"flyway_schema_history", "schema_migrations", "custom_table", "another_table"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+}
+
+func TestConfigGetEffectiveExcludeTables(t *testing.T) {
+	var nilCfg *Config
+	if got := nilCfg.GetEffectiveExcludeTables(); len(got) != 2 {
+		t.Fatalf("nil config should return default excludes, got %v", got)
+	}
+
+	cfg := &Config{
+		ExcludeTables: []string{"audit_log"},
+	}
+	got := cfg.GetEffectiveExcludeTables()
+	want := []string{"flyway_schema_history", "schema_migrations", "audit_log"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}

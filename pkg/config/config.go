@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/jacktea/data-smith/pkg/consts"
@@ -216,12 +217,48 @@ func (c *ConnConfig) RemoveExtra(key string) {
 	delete(c.Extra, key)
 }
 
+// DefaultExcludeTables 定义了结构比对中全局默认排除的工具表（非业务表，如迁移工具历史与状态表，无需比对）。
+var DefaultExcludeTables = []string{
+	"flyway_schema_history",
+	"schema_migrations",
+}
+
 // Config defines the main application configuration.
 type Config struct {
 	SourceDB      ConnConfig `yaml:"sourceDb"`
 	TargetDB      ConnConfig `yaml:"targetDb"`
 	IncludeTables []string   `yaml:"includeTables"`
 	ExcludeTables []string   `yaml:"excludeTables"`
+}
+
+// EffectiveExcludeTables 合并用户指定的排除表与全局默认排除表列表，
+// 忽略大小写去重，并保留原有顺序（DefaultExcludeTables 在前，自定义排除在后）。
+func EffectiveExcludeTables(excludes []string) []string {
+	result := make([]string, 0, len(DefaultExcludeTables)+len(excludes))
+	seen := make(map[string]bool, len(DefaultExcludeTables)+len(excludes))
+	for _, t := range DefaultExcludeTables {
+		lower := strings.ToLower(t)
+		if !seen[lower] {
+			seen[lower] = true
+			result = append(result, t)
+		}
+	}
+	for _, t := range excludes {
+		lower := strings.ToLower(t)
+		if !seen[lower] {
+			seen[lower] = true
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// GetEffectiveExcludeTables 返回包含全局默认排除表与配置中排除表的有效排除表列表。
+func (c *Config) GetEffectiveExcludeTables() []string {
+	if c == nil {
+		return EffectiveExcludeTables(nil)
+	}
+	return EffectiveExcludeTables(c.ExcludeTables)
 }
 
 // Rule defines a single comparison rule.

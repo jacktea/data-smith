@@ -147,9 +147,10 @@ func RunSchemaDiff(ctx context.Context, params SchemaDiffParams, dir string, pro
 		return SchemaDiffSummary{}, fmt.Errorf("read target schema: %w", err)
 	}
 
-	if len(params.IncludeTables) > 0 || len(params.ExcludeTables) > 0 {
-		srcSchema.Tables = filterTables(srcSchema.Tables, params.IncludeTables, params.ExcludeTables)
-		tgtSchema.Tables = filterTables(tgtSchema.Tables, params.IncludeTables, params.ExcludeTables)
+	effectiveExcludes := pkgconfig.EffectiveExcludeTables(params.ExcludeTables)
+	if len(params.IncludeTables) > 0 || len(effectiveExcludes) > 0 {
+		srcSchema.Tables = filterTables(srcSchema.Tables, params.IncludeTables, effectiveExcludes)
+		tgtSchema.Tables = filterTables(tgtSchema.Tables, params.IncludeTables, effectiveExcludes)
 	}
 
 	report("比对结构差异")
