@@ -71,3 +71,23 @@ func TestMySQLDialect_BoundedBatchDataSQL(t *testing.T) {
 		t.Fatalf("delete batch\ngot:  %s\nwant: %s", got, want)
 	}
 }
+
+func TestMySQLDialect_NoPrimaryKeyDataSQL(t *testing.T) {
+	dialect := NewMySQLDialect()
+	table := &conn.Table{
+		Name:   "items",
+		Schema: "custom",
+		Columns: map[string]*conn.Column{
+			"id":   {Name: "id", DataType: "bigint", Position: 1},
+			"name": {Name: "name", DataType: "varchar", Position: 2},
+		},
+	}
+	rows := []conn.Record{{"id": 1, "name": "one"}, {"id": 2, "name": "two"}}
+	if got, want := dialect.GenerateDeleteBatchSql(table, rows),
+		"DELETE FROM `custom`.`items` WHERE (`id` = 1 AND `name` = 'one') OR (`id` = 2 AND `name` = 'two');"; got != want {
+		t.Fatalf("delete batch without primary key\ngot:  %s\nwant: %s", got, want)
+	}
+	if got := dialect.GenerateUpdateSql(table, rows[0], []string{"name"}); got != "" {
+		t.Fatalf("update without primary key should be a no-op, got: %s", got)
+	}
+}
