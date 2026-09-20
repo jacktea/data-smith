@@ -8,8 +8,9 @@
 >
 > 实测窗口：2026-09-20。环境：本机 Docker PG 14.22，一次性库
 > `airedge_mig_src`（落后一版）/ `airedge_mig_tgt`（领先一版）。
-> **状态：能力补齐（第 1–3 批）与回归批均已完成，airedge 88 版本全链
-> 纯 datasmith 命令跑通；遗留 C11/C12/C13 与 Java 缺口见「八」。**
+> **状态：能力补齐（第 1–3 批）、回归批与 C11/C12/C13 收尾批均已完成，
+> airedge 88 版本全链纯 datasmith 命令跑通，src/tgt 终态闭环「新增 0 /
+> 删除 0 / 修改 0」；遗留 Java 缺口见「八」「七」。**
 
 ## 一、实测结论总览
 
@@ -255,6 +256,26 @@
   ChecksAdded/Dropped，生成 `ADD CONSTRAINT ... CHECK` / `DROP CONSTRAINT`，
   回滚对称；MySQL 8 同源支持。不阻断链收敛，列为独立子项。
 - **验收**：含内联 CHECK 的表在 diff 产物中出现约束语句，删建闭环为空。
+- **完成情况（收尾批）**：pkg/conn 建模 `CheckConstraint`（Name + 方言原生
+  Definition：PG 为 `pg_get_constraintdef` 全文，可带 `NOT VALID`；MySQL 为
+  `information_schema.check_constraints.check_clause` 裸表达式，生成层补 CHECK
+  包裹），Table 新增 `Checks` 映射。PG/MySQL 提取均按表级查询（contype='c' /
+  constraint_type='CHECK'）；排除口径与既有索引/约束提取一致——约束从属于表，
+  扩展对象与账本经表级 include/exclude 过滤生效，无独立从属对象需要额外建模。
+  pkg/diff compareTable 新增 ChecksAdded/Dropped/Modified（同名不同义计修改），
+  定义比较只做空白规范化（对齐 equalViewDefinition 的 clean 口径），不做表达式
+  语义改写。pkg/sql 新增 `ICheckConstraintDialect` 附加能力接口（沿
+  IDataBatchDialect 源兼容模式，两方言均实现）：删除（含 modified 旧约束）进
+  dropDependencies 阶段先于列删除执行，新增在 buildKeys 阶段列 DDL 之后添加；
+  新建表的 CREATE TABLE 内联携带 CHECK。** airedge 实测：除报告所列 2 条外，
+  `air_inst_testset` 还有第 3 条 `delete_flag` CHECK（原报告目录抽查未列），
+  一并被捕获对齐。**
+- **验收结果**：✅。单测 `TestCompareSchemasCheckConstraint*`、
+  `TestGenerateSchemaSQLCheckConstraint*`、
+  `TestGenerateSchemaSQLAddedTableCarriesInlineChecks`（不依赖 Docker）；
+  集成 `TestCheckConstraintsAndViewCommentsRoundTrip`（PG）与
+  `TestMySQLCheckConstraintsRoundTrip`（MySQL 8.4），均验证「检出→正向执行→
+  闭环为空→回滚复原」；airedge 双库实测见「九」。
 
 ### C12【P3】视图注释（COMMENT ON VIEW）不参与比对（回归批发现）
 
@@ -263,6 +284,21 @@
 - **方案**：视图比对在定义相等后追加 Comment 比较；`generateView` 补
   `COMMENT ON VIEW`；表注释已有（`equalTableComment`），对齐即可。
 - **验收**：仅注释差异的视图在产物中生成 COMMENT 语句而非整组删建。
+- **完成情况（收尾批）**：视图注释以 `Table.Comment` 为统一载体（PG
+  ExtractView 经 obj_description 读取 COMMENT ON VIEW 注释；**MySQL 不支持视图
+  注释，information_schema.tables 的 TABLE_COMMENT 恒为常量 'VIEW'，提取层不再
+  读取**，避免伪差异）。compareTable 视图分支在定义相等后按既有
+  `equalTableComment` 口径追加比较，仅注释差异返回只含 `CommentChange` 的
+  TableDiff（不设 ViewDefinitionChange）。生成层新增 `IViewCommentDialect` 附加
+  能力接口，仅 PG 实现 `COMMENT ON VIEW ... IS '...'`（空注释恢复为 `IS ''`，
+  提取层把 NULL 与空串同等归一）；MySQL 跳过并顺带移除不可达的
+  `ALTER VIEW ... COMMENT` 输出（MySQL 无此语法）。`GenerateViewDDL` 在
+  ViewDefinition.Comment 为空时回退读 Table.Comment——依赖闭包弹跳重建的视图
+  不丢注释。
+- **验收结果**：✅。单测 `TestCompareSchemasViewCommentOnlyChange`、
+  `TestGenerateSchemaSQLViewCommentChangeEmitsCommentOnly`（断言产物恰为 1 条
+  COMMENT、无 DROP/CREATE VIEW）、`TestGenerateViewDDLKeepsTableCommentOnRebuild`；
+  集成含于 `TestCheckConstraintsAndViewCommentsRoundTrip`；airedge 实测见「九」。
 
 ### C13【P3·DX】TablesModified 计数含「零语句差异」表（回归批发现）
 
@@ -273,6 +309,21 @@
 - **方案**：生成后回收「该表实际产语句数」再汇总；或 `equalIndex` 对 `Primary`
   索引忽略名称（与 `equalPrimaryKey`「仅比对列及顺序」口径对齐）。
 - **验收**：闭环场景 diff-full 汇总行为「新增 0 / 删除 0 / 修改 0」。
+- **完成情况（收尾批，采用方案二并按实测形态扩展落地）**：主键背书索引在
+  `compareTable` 的索引三路（Added/Dropped/Modified）全部不建模为索引差异。
+  **选择理由**： airedge 实测形态是两侧背书索引**名不同**——该差异落入
+  Added/Dropped 而非 Modified，仅在 `equalIndex` 忽略名称覆盖不到；三路排除才
+  与生成层 F1 语义（DROP/CREATE/重建三条路径全部跳过 Primary 索引）形成完全
+  对齐的最小闭包。主键列集差异仍由 `PrimaryKeyChange` 检出（`equalPrimaryKey`
+  口径不变），非背书索引的名称判异不受影响（`equalIndex` 本体未改动）。
+  方案一（生成后按产语句数回收汇总）不采用：它只修正报表数字，不修正差异
+  建模本身，且需让汇总依赖生成结果、耦合两层。
+- **验收结果**：✅。airedge 终态双库 diff-full 闭环实测「新增 0 / 删除 0 /
+  修改 0」且产物为空（见「九」）；单测
+  `TestCompareSchemasIgnoresPrimaryKeyBackingIndexName`（含非背书索引名称判异
+  不放松的反向断言）、`TestGenerateSchemaSQLPrimaryKeyBackingIndexRenameYieldsNoStatements`
+  （手工构造该形态 TableDiff 时生成层仍产出 0 条语句，F1 兜底不回归）；
+  `TestGenerateSchemaSQLSkipsPrimaryKeyBackingIndexDrop`（F1 既有单测）不回归。
 
 ## 四、实施顺序
 
@@ -282,6 +333,7 @@
 | 第 2 批 | C5；C6 | ✅ 完成（2026-09-20）。两阶段预对齐编排与外部 rules 生成脚本全部废弃：**88 轮以 `exec-sql 回放 → diff-full 单命令（整库通配 + auto 影子两阶段 + --migrate-dir）→ migrate-script 推进 source` 重跑全链成功**，39 轮触发影子对齐，账本 88/88 success，末轮结构 0 语句 / 数据 0 DML |
 | 第 3 批 | C4a；C7；C8；C9 | ✅ 完成（2026-09-20）。无键表按 comparisonKey 业务键可比（物理身份基线不变）；迁移文件名跳过清单 CLI/Web 告警；Web 删除脚本同步清理版本登记 + 启动 store 自检；exec-sql 事务模式逐条执行并定位失败语句（整文件原子语义不变） |
 | 回归 | C10 + 全链重跑（88 轮） | ✅ 完成（2026-09-20）。闭环 diff 产物为空；verify 从零 migrate-script 全链应用成功；回退冒烟通过；88 对产物登记脚本库。详见 `docs/migration-chain-regression-report.md` |
+| 收尾 | C11；C12；C13 | ✅ 完成（2026-09-20）。CHECK 约束/视图注释进入比对与产物（双库 fixture 集成用例验证闭环与回滚对称）；主键背书索引不再计入表修改，airedge 终态闭环「新增 0 / 删除 0 / 修改 0」。见「九」 |
 
 ## 五、回归计划（能力补齐后的重跑）
 
@@ -371,3 +423,34 @@
   CLI 暴露；Java 缺口未闭合。
 - **下一批建议**：C11 → C12 → C13（各带单测 + 集成用例），随后可选重跑一次
   闭环验证「修改 0 张表」；如需闭合 Java 缺口，按报告「七」顺序 PL/pgSQL 重写。
+
+## 九、当前状态（C11/C12/C13 收尾批完成后，2026-09-20）
+
+**收尾批验收通过。** C11/C12/C13 完成情况与选择理由已回填各条目；全部 CI gate
+（gofmt、单测、race、vet、staticcheck v0.8.1、govulncheck v1.1.4、双库 E2E +
+覆盖率 gate：overall 72.8%，各组 ≥ 70%）通过。
+
+- **双库 fixture 集成**（`test/integration/check_view_test.go`，MySQL 8.4.3 +
+  PostgreSQL 17.2）：PG 用例覆盖 C11+C12——CHECK 检出、`ADD CONSTRAINT ... CHECK`
+  与 `COMMENT ON VIEW` 产物、注释差异不触发视图删建、正向执行闭环为空、回滚
+  复原；MySQL 用例覆盖 C11 同源闭环与回滚对称。
+- **airedge 终态双库实测**（`airedge_mig_src` → `airedge_mig_tgt`，全程
+  datasmith 命令，工作区 `/tmp/ds-acceptance-batch3/`）：
+  1. 第 1 轮 diff-full：**修改 7 张表**——3 条 `delete_flag` CHECK
+     （`air_inst_bug`/`air_inst_testconfig`/`air_inst_testset`，第 3 条为原报告
+     目录抽查未列的新捕获）+ 4 个视图注释；产物 7 条语句全部经
+     `exec-sql --tx` 一次执行通过；数据比对 0 DML；
+     `air_inst_checklist_item`（背书索引名差异）不再出现（C13）。
+  2. 第 2 轮 diff-full：**新增 0 / 删除 0 / 修改 0**，结构产物仅剩
+     EXECUTE-ON 头（32 字节）——C11/C12 删建闭环为空 + C13 口径自洽同时达成。
+  3. 回退往返：down 应用后残差完整重现，且重新生成的 up/down 与第 1 轮产物
+     **逐字节一致**（回滚对称 + 生成确定性）；再次推进后复归 0/0/0。
+- **环境状态**：`airedge_mig_src` 已收敛为与 `airedge_mig_tgt` 一致（3 CHECK +
+  4 视图注释补齐），原残差不再存在；`airedge_mig_verify` 未动。
+- **未竟事项（如实）**：8 个 Java 迁移缺口仍缓置（其中 V3_2_0_99 涉及配置数据
+  与 DDL、V3_0_1 含 2 条列默认值 ALTER，链产物与真实 Flyway 升级库在这几处
+  不一致，见「八」「七」）；`--data-diff-mode` 与影子机制仍仅 CLI 暴露，Web 无
+  独立开关。
+- **下一批建议**：如闭合 Java 缺口，按报告「七」顺序（V3_0_1 → V3_2_0_99 →
+  0_1/0_2/0_4 → 0_5 → V3_1_0_1）以 PL/pgSQL 等效重写后经 `exec-sql` 补链并
+  重跑闭环；否则迁移链能力线已收口。
