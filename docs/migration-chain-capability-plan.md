@@ -454,3 +454,30 @@
 - **下一批建议**：如闭合 Java 缺口，按报告「七」顺序（V3_0_1 → V3_2_0_99 →
   0_1/0_2/0_4 → 0_5 → V3_1_0_1）以 PL/pgSQL 等效重写后经 `exec-sql` 补链并
   重跑闭环；否则迁移链能力线已收口。
+
+## 十、当前状态（Web 数据比对模式开关完成后，2026-09-20）
+
+**「--data-diff-mode 与影子机制仅 CLI 暴露」的遗留项已闭合**，Web 控制台
+完全比对具备独立开关，引擎语义零重写：
+
+- **Server**（`internal/server/diffjobs.go`）：diff-full 任务请求新增
+  `dataDiffMode` 字段，经引擎 `IsValidDataDiffMode` 提交期校验（非法值 400）、
+  `NormalizeDataDiffMode` 归一（空串 → auto），透传 `FullDiffParams`；生效
+  模式记入任务参数并写进任务日志（「开始完全比对: … 数据比对模式 X」）。
+  diff-data 任务不涉及影子机制，不设开关（与 CLI 一致）。
+- **前端**（`web/src/pages/DiffFull.tsx`）：高级参数区新增「数据比对模式」
+  单选（自动(推荐) / 强制影子事务 / 直接比对），每个选项带行为说明（含
+  MySQL 强制影子将被拒绝的提示），默认自动；`api.ts` 增补
+  `DataDiffMode` 类型。
+- **引擎**（`internal/datasmith/diff/shadow.go`）：新增附加 helper
+  `IsValidDataDiffMode` / `NormalizeDataDiffMode`，校验与决策逻辑不变。
+- **验收**：①单测 `TestDiffFullSubmitValidatesDataDiffMode`（非法值 400；
+  shadow/direct/缺省三形态的参数归一与日志可见）；②API 驱动的 Web E2E
+  `TestWebFullDiffDataDiffMode`（真实双库 fixture + 内嵌 server）：PG
+  auto/shadow 走影子两阶段、PG direct 走直接比对并告警、MySQL auto 回退
+  直接比对、MySQL 强制 shadow 执行期被引擎拒绝——五形态全部通过。另实测
+  确认 direct 模式对「target 侧新增列」会硬失败（源行读取缺列），属文档化
+  的公共列容错边界，选择影子/auto 即可规避。
+- 全部 CI gate 通过；覆盖率 overall 73.7%（各组 ≥ 70%）。
+- **未竟事项（如实）**：仅剩 8 个 Java 迁移缺口（用户缓置，闭合方案见
+  报告「七」）。
