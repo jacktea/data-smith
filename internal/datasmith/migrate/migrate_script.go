@@ -3,6 +3,7 @@ package migrate
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jacktea/data-smith/internal/config"
 	"github.com/jacktea/data-smith/internal/datasmith/migrate/local"
@@ -137,4 +138,51 @@ func RollbackLatest(ctx context.Context, db conn.DBAdapter, dir string, progress
 	}
 	report(fmt.Sprintf("版本 %s 回退完成", rolled))
 	return rolled, nil
+}
+
+// RollbackTo rolls back applied versions one by one, newest first, until
+// targetVersion is the latest applied version. An empty targetVersion rolls
+// back exactly the latest version. It returns the rolled-back versions in
+// execution order.
+func RollbackTo(ctx context.Context, db conn.DBAdapter, dir string, targetVersion string, progress func(string)) ([]string, error) {
+	report := progressLogger(progress)
+	if targetVersion == "" {
+		report(fmt.Sprintf("开始回退最新版本, 脚本目录: %s", dir))
+	} else {
+		report(fmt.Sprintf("开始回退到版本 %s, 脚本目录: %s", targetVersion, dir))
+	}
+	files, err := local.ScanMigrations(dir)
+	if err != nil {
+		return nil, err
+	}
+	local.SortMigrations(files)
+	rolled, err := migrate.RollbackToMigration(db, files, targetVersion)
+	if err != nil {
+		return nil, err
+	}
+	if len(rolled) == 0 {
+		report(fmt.Sprintf("当前已处于版本 %s, 无需回退", targetVersion))
+		return rolled, nil
+	}
+	report(fmt.Sprintf("回退完成, 共回退 %d 个版本: %s", len(rolled), strings.Join(rolled, " -> ")))
+	return rolled, nil
+}
+
+// PlanRollback computes which versions would be rolled back to reach
+// targetVersion (the latest single step when empty) without touching the
+// database. It returns the planned versions, newest first.
+func PlanRollback(ctx context.Context, db conn.DBAdapter, dir string, targetVersion string, progress func(string)) ([]string, error) {
+	report := progressLogger(progress)
+	report(fmt.Sprintf("生成回退计划, 脚本目录: %s", dir))
+	files, err := local.ScanMigrations(dir)
+	if err != nil {
+		return nil, err
+	}
+	local.SortMigrations(files)
+	planned, err := migrate.PlanRollbackTo(db, files, targetVersion)
+	if err != nil {
+		return nil, err
+	}
+	report(fmt.Sprintf("将依次回退 %d 个版本: %s", len(planned), strings.Join(planned, " -> ")))
+	return planned, nil
 }

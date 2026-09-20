@@ -27,7 +27,7 @@ import {
   Upload,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   api,
@@ -591,6 +591,9 @@ function RollbackTab() {
   const [libs, setLibs] = useState<Library[]>([]);
   const [libId, setLibId] = useState<string>();
   const [connId, setConnId] = useState<string>();
+  const [plan, setPlan] = useState<MigratePlan | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
+  const [targetVersion, setTargetVersion] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -606,11 +609,61 @@ function RollbackTab() {
   }));
   const selectedLib = libs.find((l) => l.id === libId);
 
+  const loadPlan = useCallback(async () => {
+    if (!libId || !connId) {
+      setPlan(null);
+      return;
+    }
+    setPlanLoading(true);
+    try {
+      setPlan(await api.migratePlan(libId, connId));
+    } catch (e) {
+      setPlan(null);
+      message.error(errMsg(e));
+    } finally {
+      setPlanLoading(false);
+    }
+  }, [libId, connId, message]);
+
+  // 选定脚本库+连接后自动拉取账本,供目标版本下拉与回退预览使用
+  useEffect(() => {
+    void loadPlan();
+  }, [loadPlan]);
+
+  // 回退栈:按应用顺序(账本 id)取成功版本,最新在前
+  const successStack = useMemo(
+    () =>
+      (plan?.applied ?? [])
+        .filter((r) => r.status === "success")
+        .map((r) => r.version)
+        .reverse(),
+    [plan],
+  );
+  const norm = (v: string) => v.trim().toLowerCase().replace(/^v/, "");
+  // 将被回退的版本:目标版本之上的全部成功版本;未选目标 = 仅最新一个
+  const plannedVersions = useMemo(() => {
+    if (!targetVersion) return successStack.slice(0, 1);
+    const idx = successStack.findIndex((v) => norm(v) === norm(targetVersion));
+    return idx < 0 ? [] : successStack.slice(0, idx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [successStack, targetVersion]);
+
+  const targetOptions = successStack.map((v) => {
+    const row = plan?.applied.find((r) => r.version === v);
+    return { value: v, label: `${v}${row?.title ? ` ${row.title}` : ""}` };
+  });
+  const targetMissing = !!targetVersion && plannedVersions.length === 0 && norm(plannedVersions[0] ?? "") !== norm(targetVersion);
+
   const doRollback = async () => {
     if (!libId || !connId) return;
     setSubmitting(true);
     try {
-      await api.createJobRollback({ libraryId: libId, connectionId: connId, confirmed: true });
+      await api.createJobRollback({
+        libraryId: libId,
+        connectionId: connId,
+        ...(targetVersion ? { targetVersion } : {}),
+        confirmed: true,
+      });
       message.success("回退任务已提交,正在跳转任务列表");
       navigate("/jobs");
     } catch (e) {
@@ -626,18 +679,28 @@ function RollbackTab() {
       message.warning("请先选择脚本库与连接");
       return;
     }
+    if (targetMissing) {
+      message.error(`目标版本 ${targetVersion} 不在已成功应用的版本栈中`);
+      return;
+    }
+    const plannedText =
+      plannedVersions.length > 0 ? plannedVersions.join(" → ") : `已处于目标版本,无需回退`;
     modal.confirm({
       title: "回退确认(1/2)",
       icon: <RollbackOutlined />,
-      content: `将撤销「${selectedLib?.name ?? "脚本库"}」在所选连接上最新一个已成功应用的版本:执行其 down 脚本并把账本标记为 rolled_back。`,
-      okText: "下一步",
+      content: `将把「${selectedLib?.name ?? "脚本库"}」在所选连接上依次回退 ${
+        plannedVersions.length > 0 ? `${plannedVersions.length} 个版本` : ""
+      }${targetVersion ? `,直到版本 ${targetVersion}` : "(最新一个版本)"}:
+${plannedText}。每个版本执行其 down 脚本并把账本标记为 rolled_back。`,
+      okText: plannedVersions.length > 0 ? "下一步" : "知道了",
       cancelText: "取消",
       onOk: () => {
+        if (plannedVersions.length === 0) return;
         modal.confirm({
           title: "回退确认(2/2):该操作将变更数据库",
           icon: <RollbackOutlined />,
           content:
-            "down 脚本可能删除/改写结构或数据;PG 在单事务中执行,MySQL 直接执行。若最新版本没有 down 脚本,任务将失败。确认继续?",
+            "down 脚本可能删除/改写结构或数据;PG 每步在单事务中执行,MySQL 直接执行。若栈中任一版本缺少 down 脚本,服务端将在执行前拒绝。确认继续?",
           okText: "确认回退",
           okButtonProps: { danger: true },
           cancelText: "取消",
@@ -652,15 +715,18 @@ function RollbackTab() {
       <Alert
         type="warning"
         showIcon
-        message="回退仅支持最新一个已成功应用的版本(栈式,单步)"
-        description="执行其 down 脚本并将账本置为 rolled_back;PG 在单事务中执行(失败整体回滚),MySQL 直接执行。库内最新版本若无 down 脚本,服务端将报错拒绝。"
+        message="回退最新一个版本,或回退到指定版本(从最新依次回退,栈式)"
+        description="每个被回退版本执行其 down 脚本并将账本置为 rolled_back;PG 每步单事务执行(失败整体回滚),MySQL 直接执行。栈中任一版本缺少 down 脚本时,服务端在动库前拒绝。"
       />
       <Space wrap>
         <Select
           style={{ width: 240 }}
           placeholder="选择脚本库"
           value={libId}
-          onChange={(v) => setLibId(v)}
+          onChange={(v) => {
+            setLibId(v);
+            setTargetVersion(undefined);
+          }}
           options={libs.map((l) => ({ value: l.id, label: l.name }))}
         />
         <Select
@@ -670,16 +736,46 @@ function RollbackTab() {
           placeholder="选择目标连接(source)"
           loading={connsLoading}
           value={connId}
-          onChange={(v) => setConnId(v)}
+          onChange={(v) => {
+            setConnId(v);
+            setTargetVersion(undefined);
+          }}
           options={connOptions}
+        />
+        <Select
+          style={{ width: 280 }}
+          showSearch
+          optionFilterProp="label"
+          allowClear
+          placeholder="回退目标(留空 = 仅最新一个)"
+          loading={planLoading}
+          value={targetVersion}
+          onChange={(v) => setTargetVersion(v || undefined)}
+          options={targetOptions}
         />
         <Button size="small" onClick={() => void reload()} loading={connsLoading}>
           刷新连接
         </Button>
-        <Button type="primary" danger icon={<RollbackOutlined />} loading={submitting} onClick={confirmRollback}>
-          回退最新版本
+        <Button
+          type="primary"
+          danger={plannedVersions.length > 0}
+          icon={<RollbackOutlined />}
+          loading={submitting}
+          disabled={!!connId && targetMissing}
+          onClick={confirmRollback}
+        >
+          {targetVersion ? "回退到该版本" : "回退最新版本"}
         </Button>
       </Space>
+      {connId && plan && (
+        <Typography.Text type="secondary">
+          {plannedVersions.length > 0
+            ? `将依次回退 ${plannedVersions.length} 个版本:${plannedVersions.join(" → ")}`
+            : targetVersion
+              ? `已处于版本 ${targetVersion},无需回退`
+              : "尚无已成功应用的版本"}
+        </Typography.Text>
+      )}
     </Space>
   );
 }
