@@ -253,6 +253,19 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 		if src.ViewDefinition == nil || tgt.ViewDefinition == nil {
 			return nil
 		}
+		// 视图注释（C12）：定义相等后追加比较，仅注释差异生成 COMMENT 语句
+		// 而非整组删建。MySQL 视图无注释（提取为空），比较自然不触发。
+		if !equalTableComment(src.Comment, tgt.Comment) {
+			return &TableDiff{
+				SourceTable: src,
+				TargetTable: tgt,
+				Table:       tgt,
+				CommentChange: &CommentDiff{
+					Old: src.Comment,
+					New: tgt.Comment,
+				},
+			}
+		}
 		if !equalViewDefinition(src.ViewDefinition, tgt.ViewDefinition) {
 			return &TableDiff{
 				SourceTable: src,
@@ -296,12 +309,18 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 			d.ColumnsModified = append(d.ColumnsModified, &ColumnDiff{Old: srcCol, New: tgtCol})
 		}
 	}
-	// 索引
+	// 索引（C13）：主键背书索引不建模为索引差异——其生命周期唯一跟随主键
+	// 约束，生成层对增/删/改三条路径均跳过 Primary 索引（F1 语义），diff 层
+	// 同步排除，消除「汇总计入修改、产物零语句」的口径不自洽；主键列集差异
+	// 仍由下方 PrimaryKeyChange 检出，非背书索引的名称判异不受影响。
 	srcIdx := src.Indexes
 	tgtIdx := tgt.Indexes
 	// 新增索引（Target 存在，Source 不存在）
 	for _, name := range sortedKeys(tgtIdx) {
 		idx := tgtIdx[name]
+		if idx.Primary {
+			continue
+		}
 		if _, ok := srcIdx[name]; !ok {
 			d.IndexesAdded = append(d.IndexesAdded, idx)
 		}
@@ -309,6 +328,9 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 	// 删除索引（Source 存在，Target 不存在）
 	for _, name := range sortedKeys(srcIdx) {
 		idx := srcIdx[name]
+		if idx.Primary {
+			continue
+		}
 		if _, ok := tgtIdx[name]; !ok {
 			d.IndexesDropped = append(d.IndexesDropped, idx)
 		}
@@ -316,6 +338,9 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 	// 修改索引
 	for _, name := range sortedKeys(srcIdx) {
 		srcI := srcIdx[name]
+		if srcI.Primary {
+			continue
+		}
 		tgtI, ok := tgtIdx[name]
 		if ok && !equalIndex(srcI, tgtI) {
 			d.IndexesModified = append(d.IndexesModified, &IndexDiff{Old: srcI, New: tgtI})
@@ -350,6 +375,31 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 			d.ForeignKeysModified = append(d.ForeignKeysModified, &ForeignKeyDiff{Old: srcF, New: tgtF})
 		}
 	}
+	// CHECK 约束（C11）
+	srcChecks := src.Checks
+	tgtChecks := tgt.Checks
+	// 新增约束（Target 存在，Source 不存在）
+	for _, name := range sortedKeys(tgtChecks) {
+		chk := tgtChecks[name]
+		if _, ok := srcChecks[name]; !ok {
+			d.ChecksAdded = append(d.ChecksAdded, chk)
+		}
+	}
+	// 删除约束（Source 存在，Target 不存在）
+	for _, name := range sortedKeys(srcChecks) {
+		chk := srcChecks[name]
+		if _, ok := tgtChecks[name]; !ok {
+			d.ChecksDropped = append(d.ChecksDropped, chk)
+		}
+	}
+	// 修改约束（同名不同义）
+	for _, name := range sortedKeys(srcChecks) {
+		srcChk := srcChecks[name]
+		tgtChk, ok := tgtChecks[name]
+		if ok && !equalCheckConstraint(srcChk, tgtChk) {
+			d.ChecksModified = append(d.ChecksModified, &CheckConstraintDiff{Old: srcChk, New: tgtChk})
+		}
+	}
 	// 表注释
 	if !equalTableComment(src.Comment, tgt.Comment) {
 		d.CommentChange = &CommentDiff{Old: src.Comment, New: tgt.Comment}
@@ -357,7 +407,8 @@ func compareTable(src, tgt *conn.Table) *TableDiff {
 
 	if len(d.ColumnsAdded)+len(d.ColumnsDropped)+len(d.ColumnsModified)+
 		len(d.IndexesAdded)+len(d.IndexesDropped)+len(d.IndexesModified)+
-		len(d.ForeignKeysAdded)+len(d.ForeignKeysDropped)+len(d.ForeignKeysModified) > 0 ||
+		len(d.ForeignKeysAdded)+len(d.ForeignKeysDropped)+len(d.ForeignKeysModified)+
+		len(d.ChecksAdded)+len(d.ChecksDropped)+len(d.ChecksModified) > 0 ||
 		d.PrimaryKeyChange != nil || d.CommentChange != nil {
 		return d
 	}
@@ -542,6 +593,29 @@ func equalPrimaryKey(a, b *conn.PrimaryKey) bool {
 		}
 	}
 	return true
+}
+
+// equalCheckConstraint 比较同名 CHECK 约束的定义。规范化仅做空白压缩与
+// 行尾清理（对齐 equalViewDefinition 的 clean 口径），不做表达式语义改写：
+// 同一方言内 pg_get_constraintdef / check_clause 对同一约束的输出是确定的。
+func equalCheckConstraint(a, b *conn.CheckConstraint) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return normalizeWhitespace(a.Definition) == normalizeWhitespace(b.Definition)
+}
+
+// normalizeWhitespace 压缩空白为单空格并去掉首尾空白与结尾分号。
+func normalizeWhitespace(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, ";")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	return strings.TrimSpace(s)
 }
 
 func equalForeignKey(a, b *conn.ForeignKey) bool {

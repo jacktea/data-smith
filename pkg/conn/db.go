@@ -60,6 +60,7 @@ type Table struct {
 	Indexes        map[string]*Index
 	PrimaryKey     *PrimaryKey
 	ForeignKeys    map[string]*ForeignKey
+	Checks         map[string]*CheckConstraint
 	ViewDefinition *ViewDefinition `json:"view_definition,omitempty"`
 }
 
@@ -137,6 +138,16 @@ type ForeignKey struct {
 	ReferencedColumns []string
 	OnDelete          string // CASCADE, RESTRICT, SET NULL等
 	OnUpdate          string
+}
+
+// CheckConstraint 是表级 CHECK 约束。Definition 保存方言原生的完整定义文本，
+// 比对只做空白规范化、不做表达式语义改写：PostgreSQL 为 pg_get_constraintdef
+// 输出（形如 "CHECK ((expr))"，未验证约束带 NOT VALID 后缀）；MySQL 为
+// information_schema.check_constraints.check_clause 裸表达式（各驱动的生成器
+// 按各自口径拼接）。约束从属于表，随表增删与 include/exclude 表过滤一起生效。
+type CheckConstraint struct {
+	Name       string
+	Definition string
 }
 
 type ViewDefinition struct {

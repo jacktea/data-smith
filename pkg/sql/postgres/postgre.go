@@ -296,6 +296,23 @@ func (d *postgreDialect) GenerateTableDDL(t *conn.Table) string {
 		columnDefs = append(columnDefs, constraintDef)
 	}
 
+	// 添加 CHECK 约束。Schema generator 会为新表传入无外键副本（CHECK 只引用
+	// 本表列，随建表内联创建）。
+	checkNames := make([]string, 0, len(t.Checks))
+	for name := range t.Checks {
+		checkNames = append(checkNames, name)
+	}
+	sort.Strings(checkNames)
+	for _, name := range checkNames {
+		chk := t.Checks[name]
+		definition := strings.TrimSpace(chk.Definition)
+		if definition == "" {
+			continue
+		}
+		columnDefs = append(columnDefs, fmt.Sprintf("  CONSTRAINT %s %s",
+			ident.Quote(ident.DoubleQuote, chk.Name), definition))
+	}
+
 	ddl.WriteString(strings.Join(columnDefs, ",\n"))
 	ddl.WriteString("\n);")
 
@@ -349,10 +366,16 @@ func (d *postgreDialect) GenerateViewDDL(t *conn.Table) string {
 
 	ddl.WriteString(";")
 
-	// 添加注释
-	if t.ViewDefinition.Comment != "" {
+	// 添加注释：ViewDefinition.Comment 未被提取器填充时回退到表级 Comment
+	// （ExtractView 经 obj_description 读取，视图与表共用该字段）——依赖闭包
+	// 弹跳重建的视图不丢注释（C12）。
+	comment := t.ViewDefinition.Comment
+	if comment == "" {
+		comment = t.Comment
+	}
+	if comment != "" {
 		ddl.WriteString(fmt.Sprintf("\n\nCOMMENT ON VIEW %s IS '%s';",
-			postgresTableName(t), strings.ReplaceAll(t.ViewDefinition.Comment, "'", "''")))
+			postgresTableName(t), strings.ReplaceAll(comment, "'", "''")))
 	}
 
 	return ddl.String()
@@ -577,6 +600,35 @@ func (d *postgreDialect) GenerateAddForeignKeySql(t *conn.Table, fk *conn.Foreig
 
 func (d *postgreDialect) GenerateDropForeignKeySql(t *conn.Table, fk *conn.ForeignKey) string {
 	return fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT IF EXISTS %s;", postgresTableName(t), ident.Quote(ident.DoubleQuote, fk.Name))
+}
+
+// GenerateAddCheckConstraintSql 直接拼接 pg_get_constraintdef 输出的
+// "CHECK (expr)" 全文（未验证约束含 NOT VALID）；空定义放弃生成，避免语法损坏。
+func (d *postgreDialect) GenerateAddCheckConstraintSql(t *conn.Table, c *conn.CheckConstraint) string {
+	if c == nil || c.Name == "" {
+		return ""
+	}
+	definition := strings.TrimSpace(c.Definition)
+	if definition == "" {
+		return ""
+	}
+	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s;",
+		postgresTableName(t), ident.Quote(ident.DoubleQuote, c.Name), definition)
+}
+
+func (d *postgreDialect) GenerateDropCheckConstraintSql(t *conn.Table, c *conn.CheckConstraint) string {
+	if c == nil || c.Name == "" {
+		return ""
+	}
+	return fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT IF EXISTS %s;",
+		postgresTableName(t), ident.Quote(ident.DoubleQuote, c.Name))
+}
+
+// GenerateAlterViewCommentSql 生成视图注释语句（C12）。空注释同样输出
+// IS ”，与表注释路径口径一致：提取层把 NULL 与空串同等归一为 ""。
+func (d *postgreDialect) GenerateAlterViewCommentSql(t *conn.Table, comment string) string {
+	escaped := strings.ReplaceAll(comment, "'", "''")
+	return fmt.Sprintf("COMMENT ON VIEW %s IS '%s';", postgresTableName(t), escaped)
 }
 
 func (d *postgreDialect) GenerateAlterTableCommentSql(t *conn.Table, comment string) string {

@@ -182,6 +182,12 @@ func (a *MySQLAdapter) ExtractTable(tableName string) (*conn.Table, error) {
 		return nil, err
 	}
 
+	// 解析 CHECK 约束
+	err = a.extractChecks(table)
+	if err != nil {
+		return nil, err
+	}
+
 	table.Comment = a.getTableComment(a.Cfg.TableSchema, tableName)
 	return table, nil
 }
@@ -204,7 +210,8 @@ func (a *MySQLAdapter) ExtractView(viewName string) (*conn.Table, error) {
 		return nil, err
 	}
 
-	view.Comment = a.getTableComment(a.Cfg.TableSchema, viewName)
+	// MySQL 不支持视图注释：information_schema.tables 的 TABLE_COMMENT 对视图
+	// 恒为常量 'VIEW'，不提取，避免进入注释比对产生伪差异（C12）。
 	return view, nil
 }
 
@@ -443,6 +450,43 @@ func (a *MySQLAdapter) extractForeignKeys(table *conn.Table) error {
 		table.ForeignKeys[fk.Name] = &fk
 	}
 	return fkRows.Err()
+}
+
+// extractChecks 提取表级 CHECK 约束（MySQL 8.0.16+ 落地执行，更早版本仅解析）。
+// check_constraints.check_clause 是裸表达式（无 CHECK 包裹），生成层负责补
+// "CHECK (...)"；约束从属于所在表，随表过滤一致生效。
+func (a *MySQLAdapter) extractChecks(table *conn.Table) error {
+	query := `
+		SELECT
+			tc.constraint_name,
+			cc.check_clause
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.check_constraints cc
+		  ON tc.constraint_schema = cc.constraint_schema
+		 AND tc.constraint_name = cc.constraint_name
+		WHERE tc.table_schema = ?
+		  AND tc.table_name = ?
+		  AND tc.constraint_type = 'CHECK'
+		ORDER BY tc.constraint_name
+	`
+	rows, err := a.QueryContext(context.Background(), query, table.Schema, table.Name)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	checks := make(map[string]*conn.CheckConstraint)
+	for rows.Next() {
+		var chk conn.CheckConstraint
+		if err := rows.Scan(&chk.Name, &chk.Definition); err != nil {
+			return err
+		}
+		checks[chk.Name] = &chk
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	table.Checks = checks
+	return nil
 }
 
 func (a *MySQLAdapter) extractViewDefinition(table *conn.Table) error {

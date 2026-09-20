@@ -278,6 +278,23 @@ func (d *mysqlDialect) GenerateTableDDL(t *conn.Table) string {
 		columnDefs = append(columnDefs, constraintDef)
 	}
 
+	// 添加 CHECK 约束。Schema generator 会为新表传入无外键副本（CHECK 只引用
+	// 本表列，随建表内联创建）。
+	checkNames := make([]string, 0, len(t.Checks))
+	for name := range t.Checks {
+		checkNames = append(checkNames, name)
+	}
+	sort.Strings(checkNames)
+	for _, name := range checkNames {
+		chk := t.Checks[name]
+		clause := strings.TrimSpace(chk.Definition)
+		if clause == "" {
+			continue
+		}
+		columnDefs = append(columnDefs, fmt.Sprintf("  CONSTRAINT %s CHECK (%s)",
+			ident.Quote(ident.Backtick, chk.Name), clause))
+	}
+
 	ddl.WriteString(strings.Join(columnDefs, ",\n"))
 	ddl.WriteString("\n)")
 
@@ -322,11 +339,8 @@ func (d *mysqlDialect) GenerateViewDDL(t *conn.Table) string {
 
 	ddl.WriteString(";")
 
-	// 添加注释
-	if t.ViewDefinition.Comment != "" {
-		ddl.WriteString(fmt.Sprintf("\n\nALTER VIEW %s COMMENT = '%s';",
-			mysqlTableName(t), strings.ReplaceAll(t.ViewDefinition.Comment, "'", "''")))
-	}
+	// MySQL 不支持视图注释（也无 COMMENT ON VIEW 语法），不生成注释语句；
+	// 视图注释比对仅 PostgreSQL 参与（C12）。
 
 	return ddl.String()
 }
@@ -392,6 +406,28 @@ func (d *mysqlDialect) GenerateAddForeignKeySql(t *conn.Table, fk *conn.ForeignK
 
 func (d *mysqlDialect) GenerateDropForeignKeySql(t *conn.Table, fk *conn.ForeignKey) string {
 	return fmt.Sprintf("ALTER TABLE %s DROP FOREIGN KEY %s;", mysqlTableName(t), ident.Quote(ident.Backtick, fk.Name))
+}
+
+// GenerateAddCheckConstraintSql 拼接提取侧的 check_clause 裸表达式，此处补
+// CHECK 包裹（MySQL 8.0.16+ 执行 CHECK 约束；命名约束可 DROP CONSTRAINT）。
+func (d *mysqlDialect) GenerateAddCheckConstraintSql(t *conn.Table, c *conn.CheckConstraint) string {
+	if c == nil || c.Name == "" {
+		return ""
+	}
+	clause := strings.TrimSpace(c.Definition)
+	if clause == "" {
+		return ""
+	}
+	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s);",
+		mysqlTableName(t), ident.Quote(ident.Backtick, c.Name), clause)
+}
+
+func (d *mysqlDialect) GenerateDropCheckConstraintSql(t *conn.Table, c *conn.CheckConstraint) string {
+	if c == nil || c.Name == "" {
+		return ""
+	}
+	return fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;",
+		mysqlTableName(t), ident.Quote(ident.Backtick, c.Name))
 }
 
 func (d *mysqlDialect) GenerateAlterTableCommentSql(t *conn.Table, comment string) string {

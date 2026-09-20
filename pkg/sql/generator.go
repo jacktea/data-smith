@@ -130,6 +130,18 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 				add(&dropDependencies, dbDialect.GenerateDropIndexSql(table, change.Old))
 			}
 		}
+		// CHECK 约束删除（C11）：先于列删除执行——被删列上的 CHECK 若不先删
+		// 会令 DROP COLUMN 被拒绝； modified 的旧约束同样在此删除。
+		if checkDialect, ok := dbDialect.(ICheckConstraintDialect); ok {
+			for _, check := range sortedChecks(tableDiff.ChecksDropped) {
+				add(&dropDependencies, checkDialect.GenerateDropCheckConstraintSql(table, check))
+			}
+			for _, change := range sortedCheckDiffs(tableDiff.ChecksModified) {
+				if change.Old != nil {
+					add(&dropDependencies, checkDialect.GenerateDropCheckConstraintSql(table, change.Old))
+				}
+			}
+		}
 		if tableDiff.PrimaryKeyChange != nil && tableDiff.PrimaryKeyChange.Old != nil {
 			add(&dropDependencies, dbDialect.GenerateDropPrimaryKeySql(table, tableDiff.PrimaryKeyChange.Old))
 		}
@@ -177,6 +189,18 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 		for _, index := range sortedIndexes(tableDiff.IndexesAdded) {
 			add(&buildKeys, dbDialect.GenerateCreateIndexSql(table, index))
 		}
+		// CHECK 约束新增/变更（C11）：在列 DDL 之后添加，引用新增列的约束
+		// 可直接执行；与既有索引/主键同属建表后的键与约束阶段。
+		if checkDialect, ok := dbDialect.(ICheckConstraintDialect); ok {
+			for _, check := range sortedChecks(tableDiff.ChecksAdded) {
+				add(&buildKeys, checkDialect.GenerateAddCheckConstraintSql(table, check))
+			}
+			for _, change := range sortedCheckDiffs(tableDiff.ChecksModified) {
+				if change.New != nil {
+					add(&buildKeys, checkDialect.GenerateAddCheckConstraintSql(table, change.New))
+				}
+			}
+		}
 	}
 
 	for _, operation := range orderForeignKeyOperations(collectForeignKeyOperations(added, modified)) {
@@ -211,7 +235,21 @@ func GenerateSchemaSQLSafe(schemaDiff *diff.SchemaDiff, dialect consts.DBType) (
 
 	for _, tableDiff := range modified {
 		table := targetTable(tableDiff)
-		if table != nil && table.Type == conn.TableTypeTable && tableDiff.CommentChange != nil {
+		if table == nil {
+			continue
+		}
+		if tableDiff.CommentChange == nil {
+			continue
+		}
+		// 视图注释（C12）：经 IViewCommentDialect 生成 COMMENT ON VIEW；
+		// 不支持视图注释的方言（MySQL）跳过，不产生删建。
+		if table.Type == conn.TableTypeView {
+			if viewCommentDialect, ok := dbDialect.(IViewCommentDialect); ok {
+				add(&comments, viewCommentDialect.GenerateAlterViewCommentSql(table, tableDiff.CommentChange.New))
+			}
+			continue
+		}
+		if table.Type == conn.TableTypeTable {
 			add(&comments, dbDialect.GenerateAlterTableCommentSql(table, tableDiff.CommentChange.New))
 		}
 	}
@@ -575,6 +613,27 @@ func sortedForeignKeyMap(foreignKeys map[string]*conn.ForeignKey) []*conn.Foreig
 		result = append(result, foreignKey)
 	}
 	return sortedForeignKeys(result)
+}
+
+func sortedChecks(checks []*conn.CheckConstraint) []*conn.CheckConstraint {
+	result := append([]*conn.CheckConstraint(nil), checks...)
+	sort.SliceStable(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result
+}
+
+func sortedCheckDiffs(changes []*diff.CheckConstraintDiff) []*diff.CheckConstraintDiff {
+	result := append([]*diff.CheckConstraintDiff(nil), changes...)
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := result[i].New, result[j].New
+		if left == nil {
+			left = result[i].Old
+		}
+		if right == nil {
+			right = result[j].Old
+		}
+		return left.Name < right.Name
+	})
+	return result
 }
 
 func sortedForeignKeyDiffs(changes []*diff.ForeignKeyDiff) []*diff.ForeignKeyDiff {

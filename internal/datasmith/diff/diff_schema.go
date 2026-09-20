@@ -117,6 +117,12 @@ func printDiffSummary(s SchemaDiffSummary) {
 		for _, fk := range t.ForeignKeysDropped {
 			fmt.Printf("      - Foreign Key Dropped: %s\n", fk)
 		}
+		for _, chk := range t.ChecksAdded {
+			fmt.Printf("      + Check Added       : %s\n", chk)
+		}
+		for _, chk := range t.ChecksDropped {
+			fmt.Printf("      - Check Dropped     : %s\n", chk)
+		}
 		if t.CommentChanged {
 			fmt.Printf("      ~ Table Comment Modified\n")
 		}

@@ -40,6 +40,9 @@ type TableDiff struct {
 	ForeignKeysAdded     []*conn.ForeignKey
 	ForeignKeysDropped   []*conn.ForeignKey
 	ForeignKeysModified  []*ForeignKeyDiff
+	ChecksAdded          []*conn.CheckConstraint
+	ChecksDropped        []*conn.CheckConstraint
+	ChecksModified       []*CheckConstraintDiff
 	ViewDefinitionChange *ViewDefinitionDiff
 	CommentChange        *CommentDiff
 }
@@ -62,6 +65,11 @@ type PrimaryKeyDiff struct {
 type ForeignKeyDiff struct {
 	Old *conn.ForeignKey
 	New *conn.ForeignKey
+}
+
+type CheckConstraintDiff struct {
+	Old *conn.CheckConstraint
+	New *conn.CheckConstraint
 }
 
 type ViewDefinitionDiff struct {

@@ -154,6 +154,25 @@ type INonTableObjectDialect interface {
 	GenerateDropSequenceSql(s *conn.Sequence) string
 }
 
+// ICheckConstraintDialect is an additive capability for dialects that model
+// table-level CHECK constraints (C11). Both PostgreSQL and MySQL implement it;
+// other IDialect implementations keep working via type assertion in the
+// schema generator.
+type ICheckConstraintDialect interface {
+	// GenerateAddCheckConstraintSql 生成 ADD CONSTRAINT ... CHECK 语句，
+	// 约束体沿用提取侧的原生定义文本。
+	GenerateAddCheckConstraintSql(t *conn.Table, c *conn.CheckConstraint) string
+	// GenerateDropCheckConstraintSql 生成删除 CHECK 约束语句。
+	GenerateDropCheckConstraintSql(t *conn.Table, c *conn.CheckConstraint) string
+}
+
+// IViewCommentDialect is an additive capability for dialects whose views carry
+// comments (C12). Only PostgreSQL implements it — MySQL has no view comments.
+type IViewCommentDialect interface {
+	// GenerateAlterViewCommentSql 生成视图注释语句（COMMENT ON VIEW）。
+	GenerateAlterViewCommentSql(t *conn.Table, comment string) string
+}
+
 func NewDialect(dbType consts.DBType) IDialect {
 	switch dbType {
 	case consts.DBTypePostgres:

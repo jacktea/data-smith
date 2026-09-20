@@ -34,6 +34,8 @@ type TableModSummary struct {
 	IndexesDropped     []string           `json:"indexesDropped"`
 	ForeignKeysAdded   []string           `json:"foreignKeysAdded"`
 	ForeignKeysDropped []string           `json:"foreignKeysDropped"`
+	ChecksAdded        []string           `json:"checksAdded"`
+	ChecksDropped      []string           `json:"checksDropped"`
 	PrimaryKeyChanged  bool               `json:"primaryKeyChanged"`
 	CommentChanged     bool               `json:"commentChanged"`
 }
@@ -260,6 +262,8 @@ func projectSchemaDiff(d *pkgdiff.SchemaDiff) SchemaDiffSummary {
 			IndexesDropped:     []string{},
 			ForeignKeysAdded:   []string{},
 			ForeignKeysDropped: []string{},
+			ChecksAdded:        []string{},
+			ChecksDropped:      []string{},
 			PrimaryKeyChanged:  t.PrimaryKeyChange != nil,
 			CommentChanged:     t.CommentChange != nil,
 		}
@@ -288,6 +292,12 @@ func projectSchemaDiff(d *pkgdiff.SchemaDiff) SchemaDiffSummary {
 		for _, fk := range t.ForeignKeysDropped {
 			mod.ForeignKeysDropped = append(mod.ForeignKeysDropped, fk.Name)
 		}
+		for _, chk := range t.ChecksAdded {
+			mod.ChecksAdded = append(mod.ChecksAdded, chk.Name)
+		}
+		for _, chk := range t.ChecksDropped {
+			mod.ChecksDropped = append(mod.ChecksDropped, chk.Name)
+		}
 		sort.Strings(mod.ColumnsAdded)
 		sort.Strings(mod.ColumnsDropped)
 		sort.Slice(mod.ColumnsModified, func(i, j int) bool {
@@ -297,6 +307,8 @@ func projectSchemaDiff(d *pkgdiff.SchemaDiff) SchemaDiffSummary {
 		sort.Strings(mod.IndexesDropped)
 		sort.Strings(mod.ForeignKeysAdded)
 		sort.Strings(mod.ForeignKeysDropped)
+		sort.Strings(mod.ChecksAdded)
+		sort.Strings(mod.ChecksDropped)
 		summary.TablesModified = append(summary.TablesModified, mod)
 	}
 	sort.Slice(summary.TablesModified, func(i, j int) bool {

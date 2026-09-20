@@ -325,6 +325,12 @@ func (a *PostgresAdapter) ExtractTable(tableName string) (*conn.Table, error) {
 		return nil, err
 	}
 
+	// 解析 CHECK 约束
+	err = a.extractChecks(table)
+	if err != nil {
+		return nil, err
+	}
+
 	table.Comment = a.getTableComment(a.Cfg.TableSchema, tableName)
 	return table, nil
 }
@@ -629,6 +635,43 @@ func (a *PostgresAdapter) extractForeignKeys(table *conn.Table) error {
 		table.ForeignKeys[fk.Name] = &fk
 	}
 	return fkRows.Err()
+}
+
+// extractChecks 提取表级 CHECK 约束（contype='c'）。主键/唯一/外键/非空由
+// 各自通道建模，这里只取 CHECK；pg_get_constraintdef 输出规范化后的
+// "CHECK (expr)" 全文（未验证约束含 NOT VALID），直接作为约束体参与比对与
+// DDL 生成。约束从属于所在表，扩展对象与账本的排除经表级过滤一致生效。
+func (a *PostgresAdapter) extractChecks(table *conn.Table) error {
+	query := `
+		SELECT
+			c.conname,
+			pg_get_constraintdef(c.oid)
+		FROM pg_constraint c
+		JOIN pg_class t ON t.oid = c.conrelid
+		JOIN pg_namespace n ON n.oid = c.connamespace
+		WHERE n.nspname = $1
+		  AND t.relname = $2
+		  AND c.contype = 'c'
+		ORDER BY c.conname
+	`
+	rows, err := a.QueryContext(context.Background(), query, table.Schema, table.Name)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	checks := make(map[string]*conn.CheckConstraint)
+	for rows.Next() {
+		var chk conn.CheckConstraint
+		if err := rows.Scan(&chk.Name, &chk.Definition); err != nil {
+			return err
+		}
+		checks[chk.Name] = &chk
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	table.Checks = checks
+	return nil
 }
 
 func (p *PostgresAdapter) extractViewDefinition(table *conn.Table) error {
