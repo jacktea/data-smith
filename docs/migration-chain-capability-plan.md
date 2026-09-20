@@ -114,6 +114,18 @@
   b. 全列身份模式：无键表按全列定位（生成层已由 F0 打通），比对层同步支持；
   c. 至少在错误信息与文档中写明约束与替代方案。
 - **建议**：a（含非空校验）+ c。
+- **完成情况（第 3 批，方案 a+c）**：`pkg/diff.AllFieldsEqualRule` 新增
+  `BusinessKey`（经 `CreateCompareRuleColumns` 记录显式
+  `rules.comparisonKey`，比对列与业务键并列配置时行身份仍跟随业务键）。
+  行身份解析收敛为 `rowIdentityColumns`：物理身份（主键 → 非空唯一索引，
+  `RowIdentityColumns` 判定基线不变）优先，两者皆缺时回退业务键——业务键
+  列必须存在且全部 NOT NULL（NULL 无法稳定定位行），否则报错说明原因；
+  无任何身份时错误信息写明 comparisonKey 替代方案。整库通配展开无法携带
+  业务键，仍只展开有物理行身份的表。生成层无键表回退全列定位（F0）配合
+  业务键模式天然成立（行记录只含业务键+比对列）。单测：业务键身份/物理
+  优先级/非空与存在性校验/端到端 ADD-MODIFY-DROP
+  （`pkg/diff/business_key_test.go`）；集成：
+  `TestRunDataDiffComparesKeylessTableByBusinessKeyOnPostgres`。
 
 ### C5【P1·核心】两侧结构漂移时数据比对的列集处理
 
@@ -174,18 +186,48 @@
 - `internal/datasmith/migrate/local/parser.go` 对不匹配文件名**静默跳过**
   （如单下划线 `V1.0.1_update.up.sql`），迁移缺版本无任何提示。
 - **方案**：ScanMigrations 返回 skipped 清单，CLI 与 Web 输出 warning。
+- **完成情况（第 3 批）**：`ScanMigrations` 签名改为返回
+  `(files, skipped, error)`——文件名不符合规范的文件按相对路径收集进
+  skipped（排序保证确定性），JSON/重复版本仍硬报错。CLI 侧
+  `RunMigrations/RollbackLatest/RollbackTo/PlanRollback` 经
+  `warnSkippedMigrations` 输出 `logger.Warn` + 进度回调；Web 侧迁移计划
+  API 新增 `warnings` 字段、迁移任务日志透出 WARNING。不中断合法迁移链。
+  单测：`TestScanMigrationsReportsNonCompliantFileNames`、
+  `TestRunMigrationsWarnsOnSkippedFileNames`。
 
 ### C8【P2·bug】Web 删除脚本留下孤儿版本登记
 
-- `internal/server/libraries.go` `handleDeleteScript` 删文件不清理 `LibraryMeta.Versions`
-  （现网 store.json 已有 3.7.1 孤儿条目）。
+- `internal/server/libraries.go` `handleDeleteScript` 删文件不清理
+  `LibraryMeta.Versions`（现网 store.json 已有 3.7.1 孤儿条目）。
 - **方案**：删除 up 文件时同步清理版本元数据；提供 store 一致性自检命令。
+- **完成情况（第 3 批）**：①`handleDeleteScript` 删除脚本后经
+  `removeVersionMetaIfOrphan` 检查：该版本已无任何脚本文件（up/down 均无）
+  时同步删除版本登记（`Store.DeleteVersionMeta`，幂等清理语义，不重写
+  任何安全逻辑）；②`SweepOrphanVersionMeta` 一致性自检：扫描各脚本库
+  目录，清理「已无对应脚本文件」的孤儿版本登记并返回清单，
+  `server.New` 启动时自动执行一次并以 `logger.Warn` 告警——现网
+  store.json 的 3.7.1 孤儿条目在下次启动 Web 控制台时即被修复。
+  单测：`TestDeleteScriptCleansOrphanVersionMeta`、
+  `TestSweepOrphanVersionMetaRemovesEntriesWithoutScripts`、
+  `TestServerNewRunsOrphanVersionSweep`。
 
 ### C9【P3·可选】exec-sql 失败定位增强
 
 - 驱动不提供错误位置时报「语句范围 1-44」粗粒度信息。
-- **方案**：错误信息附失败语句文本前 N 字符预览；文档写明 multi-statement 单事务语义
-  （--tx 为整文件原子，实测正确）。
+- **方案**：错误信息附失败语句文本前 N 字符预览；文档写明 multi-statement
+  单事务语义（--tx 为整文件原子，实测正确）。
+- **完成情况（第 3 批）**：①语句预览实现收敛到公共包
+  `pkg/utils.StatementPreview`（压缩空白单行化、120 字符截断），
+  影子事务（shadow.go 委托）与 exec-sql 共用同一格式；②`--tx` 与
+  `--dry-run` 改为在事务内**逐条执行**扫描出的语句：任一失败即报
+  「第 i/N 条语句，起始于脚本第 r 行第 c 列: <语句预览>」，不再依赖驱动
+  位置信息；整文件原子性不变（单事务，全部成功才提交，失败整体回滚；
+  扫描失败的脚本仍走整文件执行路径）。③非事务模式保持整文件发送，
+  PostgreSQL 位置分支与单语句分支的错误信息同样附带语句预览。
+  README 写明 multi-statement 单事务语义。单测：
+  `TestExecuteSQLTransactionAttributesFailingStatement`（sqlmock 中途
+  失败脚本定位）、`TestExecutionErrorIncludesStatementPreviewOnPostgresPosition`、
+  `TestStatementPreviewCollapsesWhitespaceAndTruncates`。
 
 ### C10【验收项】exec-sql 对外部脚本的兼容性
 
@@ -203,7 +245,7 @@
 |---|---|---|
 | 第 1 批 | F0 提交；C1；C2；C3 | ✅ 完成（2026-09-20）。实测超出出口标准：**88 个版本全链 2.1.0→3.7.0.35 纯 datasmith 命令跑通**，末轮结构比对 0 语句、数据比对 0 DML，双闭环为空 |
 | 第 2 批 | C5；C6 | ✅ 完成（2026-09-20）。两阶段预对齐编排与外部 rules 生成脚本全部废弃：**88 轮以 `exec-sql 回放 → diff-full 单命令（整库通配 + auto 影子两阶段 + --migrate-dir）→ migrate-script 推进 source` 重跑全链成功**，39 轮触发影子对齐，账本 88/88 success，末轮结构 0 语句 / 数据 0 DML |
-| 第 3 批 | C4a；C7；C8；C9 | 无键表按配置可比；DX 项完成 |
+| 第 3 批 | C4a；C7；C8；C9 | ✅ 完成（2026-09-20）。无键表按 comparisonKey 业务键可比（物理身份基线不变）；迁移文件名跳过清单 CLI/Web 告警；Web 删除脚本同步清理版本登记 + 启动 store 自检；exec-sql 事务模式逐条执行并定位失败语句（整文件原子语义不变） |
 | 回归 | C10 + 全链重跑（88 轮） | 闭环 diff 为空；全新回放库经 migrate-script 全链应用成功；回退冒烟通过；登记脚本库 |
 
 ## 五、回归计划（能力补齐后的重跑）
@@ -244,3 +286,24 @@
   告警）+ C8（Web 删除脚本孤儿版本清理）+ C9（exec-sql 失败定位增强）；
   随后回归批：全链重跑 + verify 库 migrate-script 全链应用 + 回退冒烟 +
   脚本库登记 + Java 迁移缺口报告。
+
+## 七、当前状态（第 3 批完成后，2026-09-20）
+
+- **C4a/C7/C8/C9 已全部补齐**（各条目「完成情况」含实现与单测清单）。
+  实测：本机 PG 14.22 冒烟——中途失败脚本经 `exec-sql --tx` 报
+  「第 4/5 条语句，起始于脚本第 4 行第 1 列: INSERT INTO no_such_table …」
+  且事务零残留；`migrate-script` 对混入的单下划线文件名在推进前输出
+  `[WARN] 跳过不合规迁移文件名` 且不中断合法链；C4a 经双库 fixture
+  集成用例（`integration_keyless_test.go`）验证无键关联表按业务键
+  检出 ADD/MODIFY/DROP 并生成以业务键定位的 DML。
+  注意一项执行语义变化：`exec-sql` 的 `--tx`/`--dry-run` 现按扫描出的
+  语句**逐条执行**（单事务内，整文件原子不变），失败直接定位到语句与
+  文本预览——回归批的 88 轮 `exec-sql --tx` 回放将首次走该路径，等于
+  对 scanner 语句边界做一次全链验证（39 轮影子对齐已按同粒度逐条应用过
+  生成的 forward）。
+- 未竟事项不变：8 个 Java 迁移效果缺口报告留回归批；88 对 up/down 迁移
+  脚本库登记留回归批；`--data-diff-mode` 与影子机制仍仅 CLI 暴露。
+- **下一批（回归批）**：全链重跑（88 轮 exec-sql 回放 → diff-full 单命令
+  → migrate-script 推进）+ verify 库从零全链应用 + 最近版本回退冒烟 +
+  产物登记 `datasmith-web-data/libraries/lib_8989e9f44806929e/` 并同步
+  store.json + Java 迁移效果缺口报告。

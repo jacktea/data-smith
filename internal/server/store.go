@@ -415,3 +415,17 @@ func (s *Store) SetVersionMeta(libID, version string, meta VersionMeta) error {
 		return fmt.Errorf("脚本库不存在: %s", libID)
 	})
 }
+
+// DeleteVersionMeta removes the registration metadata of one version. 清理
+// 语义：脚本库或版本条目不存在时同样视为成功，方便幂等调用。
+func (s *Store) DeleteVersionMeta(libID, version string) error {
+	return s.mutate(func(data *storeData) error {
+		for _, lib := range data.Libraries {
+			if lib.ID == libID {
+				delete(lib.Versions, version)
+				return nil
+			}
+		}
+		return nil
+	})
+}

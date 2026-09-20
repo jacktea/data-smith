@@ -60,16 +60,30 @@ func progressLogger(progress func(string)) func(string) {
 	}
 }
 
+// warnSkippedMigrations 把扫描跳过的不合规迁移文件名输出为 warning：CLI 侧
+// 走 logger.Warn，Web 侧经 progress 回调透出到任务日志。这些文件不参与
+// 迁移链——若是命名笔误（如 V1.0.1_update.up.sql 单下划线），缺失的版本
+// 会直接表现为迁移缺轮，必须在推进前可见。
+func warnSkippedMigrations(progress func(string), skipped []string) {
+	for _, name := range skipped {
+		logger.Warnf("跳过不合规迁移文件名(不参与迁移链): %s", name)
+		if progress != nil {
+			progress(fmt.Sprintf("WARNING: 跳过不合规迁移文件名(不参与迁移链): %s", name))
+		}
+	}
+}
+
 // RunMigrations applies forward migrations from dir up to targetVersion (the
 // latest version when empty). Down scripts in dir are validated but never
 // applied here; they only run through RollbackLatest.
 func RunMigrations(ctx context.Context, db conn.DBAdapter, dir string, dryRun bool, targetVersion string, progress func(string)) error {
 	report := progressLogger(progress)
 	report(fmt.Sprintf("开始执行迁移, 脚本目录: %s", dir))
-	files, err := local.ScanMigrations(dir)
+	files, skipped, err := local.ScanMigrations(dir)
 	if err != nil {
 		return err
 	}
+	warnSkippedMigrations(progress, skipped)
 	local.SortMigrations(files)
 	// Read and validate every selected migration before creating or changing the
 	// ledger. This guarantees JSON/unreadable/duplicate inputs fail pre-mutation.
@@ -127,10 +141,11 @@ func RunMigrations(ctx context.Context, db conn.DBAdapter, dir string, dryRun bo
 func RollbackLatest(ctx context.Context, db conn.DBAdapter, dir string, progress func(string)) (string, error) {
 	report := progressLogger(progress)
 	report(fmt.Sprintf("开始回退最新版本, 脚本目录: %s", dir))
-	files, err := local.ScanMigrations(dir)
+	files, skipped, err := local.ScanMigrations(dir)
 	if err != nil {
 		return "", err
 	}
+	warnSkippedMigrations(progress, skipped)
 	local.SortMigrations(files)
 	rolled, err := migrate.RollbackLatestMigration(db, files)
 	if err != nil {
@@ -151,10 +166,11 @@ func RollbackTo(ctx context.Context, db conn.DBAdapter, dir string, targetVersio
 	} else {
 		report(fmt.Sprintf("开始回退到版本 %s, 脚本目录: %s", targetVersion, dir))
 	}
-	files, err := local.ScanMigrations(dir)
+	files, skipped, err := local.ScanMigrations(dir)
 	if err != nil {
 		return nil, err
 	}
+	warnSkippedMigrations(progress, skipped)
 	local.SortMigrations(files)
 	rolled, err := migrate.RollbackToMigration(db, files, targetVersion)
 	if err != nil {
@@ -174,10 +190,11 @@ func RollbackTo(ctx context.Context, db conn.DBAdapter, dir string, targetVersio
 func PlanRollback(ctx context.Context, db conn.DBAdapter, dir string, targetVersion string, progress func(string)) ([]string, error) {
 	report := progressLogger(progress)
 	report(fmt.Sprintf("生成回退计划, 脚本目录: %s", dir))
-	files, err := local.ScanMigrations(dir)
+	files, skipped, err := local.ScanMigrations(dir)
 	if err != nil {
 		return nil, err
 	}
+	warnSkippedMigrations(progress, skipped)
 	local.SortMigrations(files)
 	planned, err := migrate.PlanRollbackTo(db, files, targetVersion)
 	if err != nil {

@@ -55,14 +55,16 @@ func newExecMockAdapter(t *testing.T, dbType consts.DBType) (*execMockAdapter, s
 	return &execMockAdapter{db: database, cfg: &config.ConnConfig{Type: dbType}}, mock
 }
 
+// 事务/dry-run 模式按扫描出的语句逐条执行（同一事务，整文件原子）；
+// 前导注释不参与执行文本。
 func TestExecuteSQLPostgresDryRunExecutesOriginalSQLAndRollsBack(t *testing.T) {
 	adapter, mock := newExecMockAdapter(t, consts.DBTypePostgres)
-	sqlText := "  -- keep leading text\nINSERT INTO t VALUES ('BEGIN;');\n"
+	statement := "INSERT INTO t VALUES ('BEGIN;');"
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta(sqlText)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(statement)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectRollback()
 
-	if err := ExecuteSQL(adapter, sqlText, true, false); err != nil {
+	if err := ExecuteSQL(adapter, "  -- keep leading text\n"+statement+"\n", true, false); err != nil {
 		t.Fatalf("ExecuteSQL() error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -72,12 +74,12 @@ func TestExecuteSQLPostgresDryRunExecutesOriginalSQLAndRollsBack(t *testing.T) {
 
 func TestExecuteSQLTransactionExecutesOriginalSQLAndCommits(t *testing.T) {
 	adapter, mock := newExecMockAdapter(t, consts.DBTypePostgres)
-	sqlText := "\nUPDATE t SET note = 'COMMIT;'; -- preserve me\n"
+	statement := "UPDATE t SET note = 'COMMIT;';"
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta(sqlText)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(statement)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	if err := ExecuteSQL(adapter, sqlText, false, true); err != nil {
+	if err := ExecuteSQL(adapter, "\n"+statement+" -- preserve me\n", false, true); err != nil {
 		t.Fatalf("ExecuteSQL() error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -132,16 +134,62 @@ func TestExecuteSQLMySQLDryRunRejectsModeDependentQuoteBeforeBegin(t *testing.T)
 
 func TestExecuteSQLMySQLDryRunAllowsTransactionalDML(t *testing.T) {
 	adapter, mock := newExecMockAdapter(t, consts.DBTypeMySQL)
-	sqlText := "INSERT INTO t VALUES (1); UPDATE t SET n = 2;"
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta(sqlText)).WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO t VALUES (1);")).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE t SET n = 2;")).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectRollback()
 
-	if err := ExecuteSQL(adapter, sqlText, true, false); err != nil {
+	if err := ExecuteSQL(adapter, "INSERT INTO t VALUES (1); UPDATE t SET n = 2;", true, false); err != nil {
 		t.Fatalf("ExecuteSQL() error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// C9：事务模式逐条执行，中途失败的脚本直接定位到失败语句（含文本预览），
+// 不依赖驱动位置信息；失败后回滚整个事务。
+func TestExecuteSQLTransactionAttributesFailingStatement(t *testing.T) {
+	adapter, mock := newExecMockAdapter(t, consts.DBTypePostgres)
+	driverErr := errors.New("relation \"missing\" does not exist")
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO t VALUES (1);")).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE missing SET n = 2;")).WillReturnError(driverErr)
+	mock.ExpectRollback()
+
+	sqlText := "INSERT INTO t VALUES (1);\nUPDATE missing SET n = 2;"
+	err := ExecuteSQL(adapter, sqlText, false, true)
+	if !errors.Is(err, driverErr) {
+		t.Fatalf("ExecuteSQL() error = %v, want wrapped driver error", err)
+	}
+	if !strings.Contains(err.Error(), "第 2/2 条语句") {
+		t.Fatalf("error = %v, want failing statement index", err)
+	}
+	if !strings.Contains(err.Error(), "起始于脚本第 2 行第 1 列: UPDATE missing SET n = 2;") {
+		t.Fatalf("error = %v, want failing statement preview", err)
+	}
+	if !strings.Contains(err.Error(), "已回滚") {
+		t.Fatalf("error = %v, want rollback notice", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("SQL was not rolled back exactly once: %v", err)
+	}
+}
+
+// C9：驱动给出 PostgreSQL 位置时，错误附带所在语句的文本预览。
+func TestExecutionErrorIncludesStatementPreviewOnPostgresPosition(t *testing.T) {
+	sqlText := "SELECT '你';\nUPDATE accounts SET balance = 0 WHERE id = 7;"
+	position := utf8.RuneCountInString(sqlText[:strings.Index(sqlText, "UPDATE")]) + 1
+	scan, err := scanSQL(sqlText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driverErr := &pq.Error{Message: "syntax error", Position: strconv.Itoa(position)}
+	got := executionError("执行 SQL 失败", driverErr, sqlText, scan)
+	for _, want := range []string{"第 2 条语句，脚本第 2 行第 1 列: UPDATE accounts SET balance = 0 WHERE id = 7;"} {
+		if !strings.Contains(got.Error(), want) {
+			t.Fatalf("error = %v, want %q", got, want)
+		}
 	}
 }
 

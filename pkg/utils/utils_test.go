@@ -2,6 +2,7 @@ package utils
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -238,5 +239,20 @@ func TestParseMigrationFile(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStatementPreviewCollapsesWhitespaceAndTruncates(t *testing.T) {
+	preview := StatementPreview("ALTER TABLE\n  air_sys_list_item\n  ADD COLUMN parent_id bigint;")
+	if preview != "ALTER TABLE air_sys_list_item ADD COLUMN parent_id bigint;" {
+		t.Fatalf("preview = %q", preview)
+	}
+	long := strings.Repeat("x", 300)
+	got := StatementPreview(long)
+	if len(got) != 123 || !strings.HasSuffix(got, "...") {
+		t.Fatalf("long preview length = %d, want 120+ellipsis", len(got))
+	}
+	if StatementPreview("  \n\t ") != "" {
+		t.Fatal("whitespace-only statement should preview as empty")
 	}
 }

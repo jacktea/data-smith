@@ -42,10 +42,14 @@ func ParseMigrationFile(path string) (*migrate.MigrationFile, error) {
 	}, nil
 }
 
-// ScanMigrations 扫描指定目录下的所有迁移文件
-func ScanMigrations(dir string) ([]*migrate.MigrationFile, error) {
+// ScanMigrations 扫描指定目录下的所有迁移文件。除合法文件清单外，还返回
+// 被跳过的文件相对路径清单——文件名不符合迁移命名规范的文件（如单下划线的
+// V1.0.1_update.up.sql）静默跳过会掩盖「迁移缺版本」问题，调用方必须把
+// skipped 清单作为 warning 输出。
+func ScanMigrations(dir string) ([]*migrate.MigrationFile, []string, error) {
 	fmt.Println("扫描迁移文件目录: ", dir)
 	var files []*migrate.MigrationFile
+	var skipped []string
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -57,6 +61,11 @@ func ScanMigrations(dir string) ([]*migrate.MigrationFile, error) {
 
 		file, parseErr := ParseMigrationFile(path)
 		if parseErr != nil {
+			if rel, relErr := filepath.Rel(dir, path); relErr == nil {
+				skipped = append(skipped, rel)
+			} else {
+				skipped = append(skipped, path)
+			}
 			return nil
 		}
 		if file.Ext == "json" {
@@ -69,7 +78,7 @@ func ScanMigrations(dir string) ([]*migrate.MigrationFile, error) {
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	type scriptKey struct {
@@ -80,12 +89,13 @@ func ScanMigrations(dir string) ([]*migrate.MigrationFile, error) {
 	for _, file := range files {
 		key := scriptKey{normalizeVersion(file.Version), file.Direction}
 		if previous, ok := seen[key]; ok {
-			return nil, fmt.Errorf("duplicate migration script %q (%s) in %s and %s", file.Version, file.Direction, previous, file.Path)
+			return nil, nil, fmt.Errorf("duplicate migration script %q (%s) in %s and %s", file.Version, file.Direction, previous, file.Path)
 		}
 		seen[key] = file.Path
 	}
 
-	return files, nil
+	sort.Strings(skipped)
+	return files, skipped, nil
 }
 
 // FindDownMigration returns the down script for version, or nil when absent.

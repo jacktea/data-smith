@@ -19,6 +19,10 @@ type AllFieldsEqualRule struct {
 	Table      string
 	Columns    []string
 	ColumnsDef map[string]*conn.Column
+	// BusinessKey 记录显式配置的业务键(rules.comparisonKey)。表缺少主键
+	// 与非空唯一索引时,它作为数据比对的行身份(见 data.go 的
+	// rowIdentityColumns);有物理行身份的表仍以物理身份定位行。
+	BusinessKey []string
 	// IgnoredColumns 记录被剔除出比对集的忽略字段:它们不参与比对,
 	// 但行读取仍会取值,生成的 INSERT 需要携带完整行数据。
 	IgnoredColumns []string
@@ -63,12 +67,23 @@ func (r *AllFieldsEqualRule) GetIgnoredColumns() []string {
 	return r.IgnoredColumns
 }
 
+// GetComparisonKey exposes the explicitly configured business key so row
+// identity resolution can fall back to it for keyless tables.
+func (r *AllFieldsEqualRule) GetComparisonKey() []string {
+	return r.BusinessKey
+}
+
 // CreateCompareRuleColumns builds the compare rule with explicit precedence:
 // compare columns > comparisonKey (legacy) > all columns. Ignore columns are
-// removed from the resulting compare set in every branch.
+// removed from the resulting compare set in every branch. comparisonKey is
+// additionally recorded as the business key (BusinessKey) so keyless tables
+// can fall back to it for row identity.
 func CreateCompareRuleColumns(table *conn.Table, columns, comparisonKey, ignoreColumns []string) ICompareRule {
 	if len(columns) > 0 {
-		return CreateCompareRule(table, columns, ignoreColumns)
+		rule := CreateCompareRule(table, columns, ignoreColumns).(*AllFieldsEqualRule)
+		// 比对列与业务键并列配置时，行身份仍跟随显式业务键而非比对列。
+		rule.BusinessKey = comparisonKey
+		return rule
 	}
 	return CreateCompareRule(table, comparisonKey, ignoreColumns)
 }
@@ -114,6 +129,7 @@ func CreateCompareRule(table *conn.Table, comparisonKey []string, ignoreColumns 
 		Table:          tableName,
 		Columns:        cols,
 		ColumnsDef:     colsDef,
+		BusinessKey:    comparisonKey,
 		IgnoredColumns: ignored,
 	}
 }

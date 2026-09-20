@@ -31,7 +31,7 @@ func ignoredColumnTestTable(name string, withTargetOnly bool) *conn.Table {
 func TestDataDiffKeepColumnsCarriesBothSidedIgnoredColumns(t *testing.T) {
 	tgt := ignoredColumnTestTable("orders", true)
 	src := ignoredColumnTestTable("orders", false)
-	keep := dataDiffKeepColumns(tgt, src, []string{"amount"}, []string{"lock_version", "tgt_only", "ghost"})
+	keep := dataDiffKeepColumns(tgt, src, []string{"amount"}, nil, []string{"lock_version", "tgt_only", "ghost"})
 	if !keep["id"] || !keep["amount"] || !keep["lock_version"] {
 		t.Fatalf("keep must contain compare columns, PK and both-sided ignored columns: %v", keep)
 	}
@@ -42,10 +42,10 @@ func TestDataDiffKeepColumnsCarriesBothSidedIgnoredColumns(t *testing.T) {
 
 func TestDataDiffKeepColumnsNilTableSafety(t *testing.T) {
 	tbl := ignoredColumnTestTable("orders", false)
-	if keep := dataDiffKeepColumns(nil, tbl, []string{"amount"}, []string{"lock_version"}); len(keep) != 1 || !keep["amount"] {
+	if keep := dataDiffKeepColumns(nil, tbl, []string{"amount"}, nil, []string{"lock_version"}); len(keep) != 1 || !keep["amount"] {
 		t.Fatalf("nil target table must yield effective columns only: %v", keep)
 	}
-	if keep := dataDiffKeepColumns(tbl, nil, []string{"amount"}, []string{"lock_version"}); keep["lock_version"] {
+	if keep := dataDiffKeepColumns(tbl, nil, []string{"amount"}, nil, []string{"lock_version"}); keep["lock_version"] {
 		t.Fatalf("nil source table must exclude ignored columns: %v", keep)
 	}
 }

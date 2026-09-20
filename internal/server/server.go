@@ -16,6 +16,7 @@ import (
 	pkgconfig "github.com/jacktea/data-smith/pkg/config"
 	"github.com/jacktea/data-smith/pkg/conn"
 	"github.com/jacktea/data-smith/pkg/db"
+	"github.com/jacktea/data-smith/pkg/logger"
 )
 
 // request body cap: exec-sql scripts may be large, everything else is small.
@@ -54,7 +55,16 @@ func New(dataDir string) (*Server, error) {
 	}
 	s.openAdapter = db.NewDBAdapterContext
 	s.routes()
+	s.sweepOrphanVersionMetaAtStartup()
 	return s, nil
+}
+
+// sweepOrphanVersionMetaAtStartup 在启动时执行一次 store 一致性自检，把
+// 已无任何脚本文件的孤儿版本登记清掉并输出告警（修复历史遗留不一致）。
+func (s *Server) sweepOrphanVersionMetaAtStartup() {
+	for libID, versions := range s.SweepOrphanVersionMeta() {
+		logger.Warnf("脚本库 %s 清理孤儿版本登记(已无对应脚本文件): %s", libID, strings.Join(versions, ", "))
+	}
 }
 
 // Close releases background resources (janitor, in-flight job contexts).

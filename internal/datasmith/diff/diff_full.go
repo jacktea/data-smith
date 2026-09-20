@@ -170,7 +170,7 @@ func importMigrationVersion(diffDir, migrateDir, version, title string) (string,
 	if err := os.MkdirAll(migrateDir, 0o755); err != nil {
 		return "", "", fmt.Errorf("create migration directory: %w", err)
 	}
-	existing, err := local.ScanMigrations(migrateDir)
+	existing, _, err := local.ScanMigrations(migrateDir)
 	if err != nil {
 		return "", "", fmt.Errorf("scan migration directory: %w", err)
 	}

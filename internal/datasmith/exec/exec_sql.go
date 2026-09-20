@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/jacktea/data-smith/pkg/consts"
 	"github.com/jacktea/data-smith/pkg/db"
 	"github.com/jacktea/data-smith/pkg/logger"
+	"github.com/jacktea/data-smith/pkg/utils"
 	"github.com/lib/pq"
 	"github.com/spf13/cobra"
 )
@@ -262,9 +264,9 @@ func ExecuteSQLContext(ctx context.Context, adapter conn.DBAdapter, sqlContent s
 			_ = tx.Rollback()
 		}()
 
-		if _, err := tx.ExecContext(ctx, sqlContent); err != nil {
+		if err := execSQLInTx(ctx, tx, "模拟执行 SQL 失败，已回滚", sqlContent, scan); err != nil {
 			_ = tx.Rollback()
-			return executionError("模拟执行 SQL 失败，已回滚", err, sqlContent, scan)
+			return err
 		}
 		if err := tx.Rollback(); err != nil {
 			return fmt.Errorf("模拟执行 SQL 成功但回滚失败: %w", err)
@@ -281,9 +283,9 @@ func ExecuteSQLContext(ctx context.Context, adapter conn.DBAdapter, sqlContent s
 			return fmt.Errorf("开启事务失败: %w", err)
 		}
 
-		if _, err := tx.ExecContext(ctx, sqlContent); err != nil {
+		if err := execSQLInTx(ctx, tx, "事务执行 SQL 失败，已回滚", sqlContent, scan); err != nil {
 			_ = tx.Rollback()
-			return executionError("事务执行 SQL 失败，已回滚", err, sqlContent, scan)
+			return err
 		}
 
 		if err := tx.Commit(); err != nil {
@@ -303,13 +305,36 @@ func ExecuteSQLContext(ctx context.Context, adapter conn.DBAdapter, sqlContent s
 	return nil
 }
 
+// execSQLInTx 在事务内执行 SQL。扫描成功时逐条执行扫描出的语句——任一失败
+// 即返回「第 i/N 条语句 + 文本预览」的定位错误，不依赖驱动位置信息；扫描
+// 结果不可用（空/仅注释）时退回整文件执行。两条路径都保持整文件原子：
+// 失败由调用方回滚整个事务。
+func execSQLInTx(ctx context.Context, tx *sql.Tx, prefix, sqlText string, scan sqlScan) error {
+	if len(scan.statements) == 0 {
+		if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+			return executionError(prefix, err, sqlText, scan)
+		}
+		return nil
+	}
+	for i, statement := range scan.statements {
+		text := sqlText[statement.start:statement.end]
+		if _, err := tx.ExecContext(ctx, text); err != nil {
+			preview := utils.StatementPreview(text)
+			return fmt.Errorf("%s (第 %d/%d 条语句，起始于脚本第 %d 行第 %d 列: %s): %w",
+				prefix, i+1, len(scan.statements), statement.startLine, statement.startColumn, preview, err)
+		}
+	}
+	return nil
+}
+
 func executionError(prefix string, driverErr error, sqlText string, scan sqlScan) error {
 	if position := postgresErrorPosition(driverErr); position > 0 {
 		if offset, ok := characterPositionToByteOffset(sqlText, position); ok {
 			line, column := sqlLineColumn(sqlText, offset)
 			for i, statement := range scan.statements {
 				if offset >= statement.start && offset < statement.end {
-					return fmt.Errorf("%s (第 %d 条语句，脚本第 %d 行第 %d 列): %w", prefix, i+1, line, column, driverErr)
+					preview := utils.StatementPreview(sqlText[statement.start:statement.end])
+					return fmt.Errorf("%s (第 %d 条语句，脚本第 %d 行第 %d 列: %s): %w", prefix, i+1, line, column, preview, driverErr)
 				}
 			}
 			return fmt.Errorf("%s (驱动位置：脚本第 %d 行第 %d 列): %w", prefix, line, column, driverErr)
@@ -324,7 +349,8 @@ func executionError(prefix string, driverErr error, sqlText string, scan sqlScan
 		return fmt.Errorf("%s (未扫描到可执行语句): %w", prefix, driverErr)
 	case 1:
 		statement := scan.statements[0]
-		return fmt.Errorf("%s (第 1 条语句，起始于脚本第 %d 行第 %d 列): %w", prefix, statement.startLine, statement.startColumn, driverErr)
+		preview := utils.StatementPreview(sqlText[statement.start:statement.end])
+		return fmt.Errorf("%s (第 1 条语句，起始于脚本第 %d 行第 %d 列: %s): %w", prefix, statement.startLine, statement.startColumn, preview, driverErr)
 	default:
 		first := scan.statements[0]
 		last := scan.statements[len(scan.statements)-1]

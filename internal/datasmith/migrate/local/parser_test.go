@@ -24,7 +24,7 @@ func TestScanMigrationsIncludesUpDownPairs(t *testing.T) {
 	writeMigration(t, dir, "v1.2.0__add_index.sql")
 	writeMigration(t, dir, "README.txt")
 
-	files, err := ScanMigrations(dir)
+	files, skipped, err := ScanMigrations(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +50,35 @@ func TestScanMigrationsIncludesUpDownPairs(t *testing.T) {
 	if files[3].Version != "v1.2.0" {
 		t.Fatalf("directionless SQL was not retained: %#v", files)
 	}
+	if len(skipped) != 1 || skipped[0] != "README.txt" {
+		t.Fatalf("skipped = %v, want [README.txt]", skipped)
+	}
+}
+
+func TestScanMigrationsReportsNonCompliantFileNames(t *testing.T) {
+	dir := t.TempDir()
+	writeMigration(t, dir, "v1.0.0__create_users.up.sql")
+	// 单下划线：Flyway 风格命名，不满足 V<版本>__<标题> 规范，曾被静默跳过。
+	writeMigration(t, dir, "V1.0.1_update.up.sql")
+	nested := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeMigration(t, nested, " drafts~1.sql")
+
+	files, skipped, err := ScanMigrations(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Version != "v1.0.0" {
+		t.Fatalf("files = %#v, want only v1.0.0", files)
+	}
+	if len(skipped) != 2 {
+		t.Fatalf("skipped = %v, want the two non-compliant files", skipped)
+	}
+	if skipped[0] != "V1.0.1_update.up.sql" || skipped[1] != filepath.Join("notes", " drafts~1.sql") {
+		t.Fatalf("skipped = %v, want sorted relative paths", skipped)
+	}
 }
 
 func TestScanMigrationsRejectsJSON(t *testing.T) {
@@ -57,7 +86,7 @@ func TestScanMigrationsRejectsJSON(t *testing.T) {
 	writeMigration(t, dir, "v1__users.up.sql")
 	writeMigration(t, dir, "v2__users.up.json")
 
-	_, err := ScanMigrations(dir)
+	_, _, err := ScanMigrations(dir)
 	if err == nil || !strings.Contains(err.Error(), "JSON migration is not supported") {
 		t.Fatalf("expected actionable JSON error, got %v", err)
 	}
@@ -68,7 +97,7 @@ func TestScanMigrationsRejectsDuplicateVersions(t *testing.T) {
 	writeMigration(t, dir, "v1__first.up.sql")
 	writeMigration(t, dir, "1__second.sql")
 
-	_, err := ScanMigrations(dir)
+	_, _, err := ScanMigrations(dir)
 	if err == nil || !strings.Contains(err.Error(), "duplicate migration script") {
 		t.Fatalf("expected actionable duplicate version error, got %v", err)
 	}

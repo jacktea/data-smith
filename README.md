@@ -158,6 +158,10 @@ SSH 代理必须配置主机身份验证，二选一使用 `knownHostsPath` 或�
 }
 ```
 
+行身份与无键表：数据比对默认以「主键 → 非空唯一索引」定位行；两者皆缺的
+无键表（如关联表 `air_user_client_role`）可在规则里显式配置
+`comparisonKey` 业务键参与比对——业务键列必须存在于表中且全部 NOT NULL，
+否则报错说明原因。整库通配模式无法携带业务键，仍只展开具有物理行身份的表。
 规则支持省略与通配：表名含 `*` 或 `?` 的条目按模式展开；`--rules` 整个
 省略（或 `rules` 为空数组）时按整库模式比对「全部具有行身份（主键或非空
 唯一索引）的表」。通配条目只允许 `table` 字段。排除清单（配置文件
@@ -214,6 +218,13 @@ PostgreSQL 且存在结构差异时，先把结构正向 DDL 应用在 source �
 ./datasmith exec-sql -c configs/config.yaml -f data_diff.sql -d source --tx
 ```
 
+**multi-statement 单事务语义**：`--tx` 与 `--dry-run` 在单个事务内按扫描出
+的语句逐条执行，整文件原子——全部成功才提交，任一语句失败即回滚整个事务。
+失败时错误信息直接定位到「第 i/N 条语句」并附该语句的文本预览，无需依赖
+驱动位置信息；非事务模式整体发送（PostgreSQL 在隐式事务中执行，驱动给出
+位置时同样附带失败语句预览）。注意 MySQL DDL 会隐式提交，事务模式对
+MySQL DDL 仍会拒绝（无可靠回滚手段）。
+
 ### 5. 数据库版本迁移与重置
 
 脚本文件目录：
@@ -248,6 +259,15 @@ PostgreSQL 且存在结构差异时，先把结构正向 DDL 应用在 source �
 ./datasmith migrate-script -c configs/config.yaml -d data/dbscripts
 # 执行迁移脚本, 模拟执行
 ./datasmith migrate-script -c configs/config.yaml -d data/dbscripts -n
+```
+
+> 文件名不符合 `V<版本>__<标题>[.up|.down].sql` 规范的文件不参与迁移链
+> （如单下划线的 `V1.0.1_update.up.sql`）。扫描发现这类文件时，CLI 与 Web
+> 任务日志会在推进前输出 WARNING 清单，但不会中断合法迁移链。
+> Web 控制台启动时还会对脚本库做一次 store 一致性自检：删除脚本后遗留的
+> 孤儿版本登记会被自动清理并告警；控制台内删除脚本也会同步清理版本登记。
+
+```bash
 # 回退最新一个已应用版本(破坏性操作,必须显式 --yes)
 ./datasmith migrate-rollback -c configs/config.yaml -d data/dbscripts --yes
 # 回退到指定版本:从最新版本起逐个回退,直到该版本成为最新(该版本本身保留)

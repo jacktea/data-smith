@@ -69,7 +69,7 @@ func (s *Server) runMigrate(ctx context.Context, job *Job, libraryID, connection
 	if err := pkgmigrate.EnsureVersionTable(adapter); err != nil {
 		return err
 	}
-	files, err := local.ScanMigrations(libraryDir)
+	files, _, err := local.ScanMigrations(libraryDir)
 	if err != nil {
 		return err
 	}

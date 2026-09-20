@@ -4,11 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 
 	"github.com/jacktea/data-smith/pkg/conn"
 	"github.com/jacktea/data-smith/pkg/consts"
 	"github.com/jacktea/data-smith/pkg/db/base"
+	"github.com/jacktea/data-smith/pkg/utils"
 )
 
 // C5 影子事务两阶段数据比对：
@@ -102,13 +102,10 @@ func (s *shadowTx) rollback() error {
 	return nil
 }
 
-// statementPreview 返回语句的单行短预览，用于失败定位。
+// statementPreview 返回语句的单行短预览，用于失败定位；实现收敛在公共包
+// pkg/utils（exec-sql 失败定位复用同一格式）。
 func statementPreview(statement string) string {
-	preview := strings.Join(strings.Fields(statement), " ")
-	if len(preview) > 120 {
-		return preview[:120] + "..."
-	}
-	return preview
+	return utils.StatementPreview(statement)
 }
 
 // bindSession 把适配器读取通道切换到影子事务会话；适配器不支持会话绑定时

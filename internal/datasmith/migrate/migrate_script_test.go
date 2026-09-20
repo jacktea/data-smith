@@ -109,6 +109,50 @@ func TestRunMigrationsAppliesPendingWithProgress(t *testing.T) {
 	}
 }
 
+// C7：混入不合规文件名（单下划线 V1.0.1_update.up.sql）时，推进前日志可见
+// warning，且不中断合法迁移链。
+func TestRunMigrationsWarnsOnSkippedFileNames(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "1__init.up.sql", "SELECT 1;")
+	writeScript(t, dir, "V1.0.1_update.up.sql", "SELECT 2;")
+	writeScript(t, dir, "README.txt", "not a migration")
+
+	var messages []string
+	progress := func(message string) { messages = append(messages, message) }
+
+	adapter, mock := newScriptMock(t, consts.DBTypePostgres)
+	expectPostgresLedgerSetup(mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT version, checksum FROM schema_migrations WHERE status = 'success'")).
+		WillReturnRows(sqlmock.NewRows([]string{"version", "checksum"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock(hashtext($1))")).WithArgs("data-smith:schema-migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT checksum, status FROM schema_migrations WHERE version = $1")).WithArgs("1").
+		WillReturnRows(sqlmock.NewRows([]string{"checksum", "status"}))
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO schema_migrations (version, title, checksum, status, execution_time, error_summary)")).
+		WithArgs("1", "init", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta("SELECT 1;")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE schema_migrations SET status = 'success', execution_time = $1,")).
+		WithArgs(sqlmock.AnyArg(), "1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_advisory_unlock(hashtext($1))")).WithArgs("data-smith:schema-migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
+
+	if err := RunMigrations(t.Context(), adapter, dir, false, "", progress); err != nil {
+		t.Fatalf("RunMigrations should succeed despite skipped files: %v", err)
+	}
+	joined := strings.Join(messages, "\n")
+	if !strings.Contains(joined, "WARNING: 跳过不合规迁移文件名(不参与迁移链): V1.0.1_update.up.sql") {
+		t.Fatalf("skipped-file warning missing from progress: %q", joined)
+	}
+	if !strings.Contains(joined, "待执行的迁移文件: 1") {
+		t.Fatalf("valid migration chain was interrupted by skipped files: %q", joined)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRollbackLatestAppliesDownScriptWithProgress(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "1__init.up.sql", "SELECT 1;")

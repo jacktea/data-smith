@@ -279,7 +279,8 @@ func (s *Server) handleDeleteScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fileName := r.PathValue("fileName")
-	if _, err := parseScriptName(fileName, true); err != nil {
+	info, err := parseScriptName(fileName, true)
+	if err != nil {
 		respondStoreErr(w, err)
 		return
 	}
@@ -292,7 +293,55 @@ func (s *Server) handleDeleteScript(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "删除脚本失败: %v", err)
 		return
 	}
+	// C8：脚本删掉后该版本可能已无任何文件，登记元数据要同步清理，
+	// 否则 store.json 留下孤儿版本条目。
+	s.removeVersionMetaIfOrphan(dir, r.PathValue("id"), info.Version)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// removeVersionMetaIfOrphan 在删除脚本后检查该版本是否已无任何脚本文件；
+// 是则删除登记元数据。清理是尽力而为：扫描失败时留给启动自检兜底。
+func (s *Server) removeVersionMetaIfOrphan(dir, libID, version string) {
+	scripts, err := listScripts(dir)
+	if err != nil {
+		return
+	}
+	normalized := normalizedVersion(version)
+	for _, script := range scripts {
+		if normalizedVersion(script.Version) == normalized {
+			return
+		}
+	}
+	_ = s.store.DeleteVersionMeta(libID, normalized)
+}
+
+// SweepOrphanVersionMeta 是 store 一致性自检：清理「已无任何脚本文件」的
+// 孤儿版本登记，返回各脚本库被清理的版本（键为脚本库 ID）。Web 控制台
+// 启动时自动执行一次，修复历史遗留的不一致（如旧版本删除脚本未清理元数据）。
+func (s *Server) SweepOrphanVersionMeta() map[string][]string {
+	removed := map[string][]string{}
+	for _, lib := range s.store.ListLibraries() {
+		scripts, err := listScripts(s.libraryDirUnchecked(lib.ID))
+		if err != nil {
+			continue
+		}
+		present := make(map[string]bool, len(scripts))
+		for _, script := range scripts {
+			present[normalizedVersion(script.Version)] = true
+		}
+		for version := range lib.Versions {
+			if present[version] {
+				continue
+			}
+			if err := s.store.DeleteVersionMeta(lib.ID, version); err == nil {
+				removed[lib.ID] = append(removed[lib.ID], version)
+			}
+		}
+	}
+	for libID := range removed {
+		sort.Strings(removed[libID])
+	}
+	return removed
 }
 
 func (s *Server) handleDownloadScript(w http.ResponseWriter, r *http.Request) {
@@ -522,6 +571,9 @@ type migratePlanView struct {
 	Applied       []ledgerRow            `json:"applied"`
 	Pending       []pendingMigrationView `json:"pending"`
 	NextVersion   string                 `json:"nextVersion"`
+	// Warnings 列出扫描脚本库时被跳过的不合规文件名（不参与迁移链），
+	// 前端在推进迁移前展示，避免「迁移缺版本」被静默吞掉。
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (s *Server) handleMigratePlan(w http.ResponseWriter, r *http.Request) {
@@ -574,12 +626,16 @@ func (s *Server) handleMigratePlan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	files, err := local.ScanMigrations(dir)
+	files, skipped, err := local.ScanMigrations(dir)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "扫描脚本库失败: %v", err)
 		return
 	}
 	local.SortMigrations(files)
+	var warnings []string
+	for _, name := range skipped {
+		warnings = append(warnings, fmt.Sprintf("跳过不合规迁移文件名(不参与迁移链): %s", name))
+	}
 	pending := []pendingMigrationView{}
 	for _, f := range files {
 		if f.Direction != "up" {
@@ -601,6 +657,7 @@ func (s *Server) handleMigratePlan(w http.ResponseWriter, r *http.Request) {
 		Applied:       rows,
 		Pending:       pending,
 		NextVersion:   nextLibraryVersion(dir),
+		Warnings:      warnings,
 	})
 }
 

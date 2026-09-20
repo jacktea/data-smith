@@ -332,12 +332,16 @@ func slimTable(tbl *conn.Table, keep map[string]bool) *conn.Table {
 }
 
 // dataDiffKeepColumns 计算数据比对的行读取与 SQL 生成列集:
-// 比对列 ∪ 主键 ∪ 双侧均存在的忽略列。忽略字段不参与比对,但生成的
-// INSERT 必须携带完整行数据(NOT NULL 忽略字段缺列会执行失败);
+// 比对列 ∪ 业务键 ∪ 主键 ∪ 双侧均存在的忽略列。忽略字段不参与比对,但
+// 生成的 INSERT 必须携带完整行数据(NOT NULL 忽略字段缺列会执行失败);
+// 业务键（rules.comparisonKey）是无键表的行身份/行定位键,必须随行读取;
 // 仅单侧存在的忽略列不进入 SQL,维持对两侧结构差异的容错。
-func dataDiffKeepColumns(tgtTable, srcTable *conn.Table, effectiveCols, ignoreColumns []string) map[string]bool {
-	keep := make(map[string]bool, len(effectiveCols)+len(ignoreColumns)+2)
+func dataDiffKeepColumns(tgtTable, srcTable *conn.Table, effectiveCols, businessKey, ignoreColumns []string) map[string]bool {
+	keep := make(map[string]bool, len(effectiveCols)+len(businessKey)+len(ignoreColumns)+2)
 	for _, name := range effectiveCols {
+		keep[name] = true
+	}
+	for _, name := range businessKey {
 		keep[name] = true
 	}
 	if tgtTable == nil {
@@ -421,10 +425,34 @@ func buildPrepareTableFunc(params DataDiffParams, sourceModels, targetModels *ta
 		} else {
 			effectiveCols = rule.ComparisonKey
 		}
-		keep := dataDiffKeepColumns(tgtTable, srcTable, effectiveCols, rule.IgnoreColumns)
+		keep := dataDiffKeepColumns(tgtTable, srcTable, effectiveCols, rule.ComparisonKey, rule.IgnoreColumns)
 		slimTarget := slimTable(tgtTable, keep)
+		// C4a：无键表按显式业务键比对时，把业务键注入裁剪后的 target 模型
+		// 作为行定位键，UPDATE/DELETE 以业务键定位行；否则生成层回退全列
+		// 定位，UPDATE 会退化为空串（变更行被静默丢弃）。
+		applyBusinessKeyIdentity(slimTarget, rule)
 		slimSource := slimTable(srcTable, intersectNames(keep, srcTable))
 		return &tableModels{target: slimTarget, source: slimSource, effectiveCols: effectiveCols}, nil
+	}
+}
+
+// applyBusinessKeyIdentity 在表无任何物理行身份且规则显式配置业务键
+// （rules.comparisonKey）时，把业务键设为裁剪副本的行定位主键。业务键列
+// 缺失或可空时不注入——由比对层的行身份校验显式报错。只操作 slimTable
+// 产生的副本，不影响结构阶段共享的表模型。
+func applyBusinessKeyIdentity(tbl *conn.Table, rule pkgconfig.Rule) {
+	if tbl == nil || tbl.PrimaryKey != nil || len(rule.ComparisonKey) == 0 {
+		return
+	}
+	for _, key := range rule.ComparisonKey {
+		col := tbl.Columns[key]
+		if col == nil || col.Nullable {
+			return
+		}
+	}
+	tbl.PrimaryKey = &conn.PrimaryKey{
+		Name:    "datasmith_business_key",
+		Columns: append([]string(nil), rule.ComparisonKey...),
 	}
 }
 

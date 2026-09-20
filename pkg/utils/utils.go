@@ -97,3 +97,14 @@ func ParseMigrationFile(path string) (title, version, direction, extension strin
 	}
 	return
 }
+
+// StatementPreview 返回 SQL 语句的单行短预览：压缩全部空白为单空格，超过
+// 120 字符截断加省略号。供影子事务 DDL 应用与 exec-sql 执行失败时在错误
+// 信息中定位语句，两侧共用同一格式。
+func StatementPreview(statement string) string {
+	preview := strings.Join(strings.Fields(statement), " ")
+	if len(preview) > 120 {
+		return preview[:120] + "..."
+	}
+	return preview
+}

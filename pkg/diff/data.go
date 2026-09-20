@@ -453,6 +453,56 @@ func RowIdentityColumns(tbl *conn.Table) []string {
 	return nil
 }
 
+// rowIdentityColumns 解析数据比对的行身份：物理身份（主键 → 非空唯一索引）
+// 优先；两者皆缺时回退显式业务键（rules.comparisonKey）——业务键列必须
+// 存在且全部 NOT NULL，NULL 无法稳定定位行。都没有则返回指引性错误，
+// 说明无键表的替代方案。
+func rowIdentityColumns(tbl *conn.Table, rule ICompareRule) ([]string, error) {
+	if pks := RowIdentityColumns(tbl); len(pks) > 0 {
+		return pks, nil
+	}
+	businessKey, ok := rule.(interface{ GetComparisonKey() []string })
+	if !ok {
+		return nil, noRowIdentityError(tbl.Name)
+	}
+	key := dedupeStrings(businessKey.GetComparisonKey())
+	if len(key) == 0 {
+		return nil, noRowIdentityError(tbl.Name)
+	}
+	for _, name := range key {
+		col := tbl.Columns[name]
+		if col == nil {
+			return nil, fmt.Errorf("business key column %q not found on table %s (rules.comparisonKey)", name, tbl.Name)
+		}
+		if col.Nullable {
+			return nil, fmt.Errorf("business key column %q on table %s is nullable; rules.comparisonKey requires NOT NULL columns to identify rows", name, tbl.Name)
+		}
+	}
+	return key, nil
+}
+
+// noRowIdentityError 报告表无可用行身份，并写明业务键替代方案。
+func noRowIdentityError(table string) error {
+	return fmt.Errorf("primary key or not-null unique index required for table %s; to compare a keyless table set rules.comparisonKey to a NOT NULL business key", table)
+}
+
+// dedupeStrings 去重并保持首次出现的顺序。
+func dedupeStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, dup := seen[value]; dup {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 func tableColumnsAndTypes(tbl *conn.Table, rule ICompareRule) ([]string, []string, map[string]string, error) {
 	if tbl == nil {
 		return nil, nil, nil, fmt.Errorf("table %s not found", rule.GetTable())
@@ -485,9 +535,9 @@ func tableColumnsAndTypes(tbl *conn.Table, rule ICompareRule) ([]string, []strin
 		cols = append(cols, name)
 		colTypes[name] = col.DataType
 	}
-	pks := RowIdentityColumns(tbl)
-	if len(pks) == 0 {
-		return nil, nil, nil, fmt.Errorf("primary key or not-null unique index required for table %s", rule.GetTable())
+	pks, err := rowIdentityColumns(tbl, rule)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	// 主键必须参与行读取(可能不在比对列集中)
 	for _, pk := range pks {
