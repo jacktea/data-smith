@@ -55,8 +55,8 @@ func TestRunDataDiffComparesKeylessTableByBusinessKeyOnPostgres(t *testing.T) {
 
 	dir := t.TempDir()
 	result, err := RunDataDiff(context.Background(), DataDiffParams{
-		Source:    srcCfg,
-		Target:    tgtCfg,
+		Source: srcCfg,
+		Target: tgtCfg,
 		Rules: []pkgconfig.Rule{{
 			Table:         "air_user_client_role",
 			Columns:       []string{"note"},
