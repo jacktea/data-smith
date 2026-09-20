@@ -80,7 +80,8 @@
 
 ## 项目功能
 
-- **数据库结构比对**：表、字段、索引、视图等对象的差异检测，自动识别新增、删除、修改。
+- **数据库结构比对**：表、字段、索引、视图等对象的差异检测，自动识别新增、删除、修改。PostgreSQL 额外覆盖函数、存储过程与序列（含 SERIAL 隐式序列），并在产物中先于表 DDL 生成（列默认值 `nextval`/函数依赖可直接解析）。
+- **视图依赖拓扑**：列类型/删除等变更会影响视图时，产物自动按依赖闭包先 DROP 受影响视图，表 DDL 完成后按拓扑序重建；回滚对称。聚合函数与窗口函数暂不支持比对。
 - **表数据比对**：比对两库间表数据，生成 INSERT、DELETE、UPDATE SQL，支持自定义主键和比对规则。
 - **多数据库支持**：驱动架构，现支持 MySQL、PostgreSQL，易于扩展。
 - **自动 SQL 脚本生成**：根据比对结果生成可执行 SQL。
@@ -164,6 +165,8 @@ SSH 代理必须配置主机身份验证，二选一使用 `knownHostsPath` 或�
 ./datasmith diff-schema -c configs/config.yaml
 # 数据比对
 ./datasmith diff-data -c configs/config.yaml -r configs/rules.json
+# 数据比对跳过尚不存在的表(迁移链场景: 晚建表由后续版本轮次同步),并输出 warning 清单
+./datasmith diff-data -c configs/config.yaml -r configs/rules.json --skip-missing-tables
 # 完全对比:一次同时比对结构与数据,产出四份 SQL(结构/数据 × 正向/回滚)
 ./datasmith diff-full -c configs/config.yaml -r configs/rules.json -o output/diff
 # 完全对比并一步生成迁移 up/down 对(仅生成脚本;执行仍需 migrate-script 显式进行)

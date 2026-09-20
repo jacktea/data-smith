@@ -25,8 +25,14 @@
 | 两阶段：预对齐结构→数据比对→撤销 | C5 |
 | source 推进改用 exec-sql（弃用 migrate-script） | C6 |
 
-## 二、已完成的修复（工作区，未提交）
+## 二、已完成的修复与能力（第 1 批，已提交）
 
+- **F1【bug·第 1 批实测】主键背书索引被生成 DROP INDEX**（`15ff479`）
+  - 目标侧已删主键时，前向产物对主键背书索引同时生成 `DROP INDEX` 与
+    `DROP CONSTRAINT`，PG 以 cannot drop index ... because constraint ... requires it
+    拒绝（2.4.1 实测）。修复：索引删除/变更删除跳过 `Primary` 索引，
+    其生命周期唯一跟随 PrimaryKeyChange 的约束删除。
+- **C1/C2/C3 已全部补齐**（`6d6eb99`、`d8ee90b`），实现与验收见下文各条目「完成情况」。
 - **F0【bug】无主键表触发生成层空指针 panic**
   - `pkg/sql/postgres/postgre.go` `GenerateDeleteBatchSql` / `GenerateUpdateSql` 与
     `pkg/sql/mysql/mysql.go` 同名函数直接解引用 `tbl.PrimaryKey.Columns`，
@@ -63,6 +69,14 @@
   4. 产物排序：序列/函数/存储过程先于表 DDL（列默认值依赖）。
 - **验收**：演练库上 2.1.0→3.0.2.5 区间不再需要任何外部补丁即可执行；含存储过程与
   序列增删的构造用例单测覆盖。
+- **完成情况（`6d6eb99`）**：pkg/conn 建模 Routine（prokind f/p，
+  `pg_get_functiondef` 全文 + `pg_get_function_identity_arguments` 身份签名）与
+  Sequence（`pg_sequences` + pg_depend 判定 SERIAL 隐式序列 owned_by）；例程排除
+  扩展对象（deptype='e'）。pkg/diff 新增 RoutineDiff/SequenceDiff。pkg/sql/postgres
+  生成 `CREATE OR REPLACE FUNCTION/PROCEDURE`（补结尾分号）/`CREATE SEQUENCE`/
+  `ALTER SEQUENCE`（参数漂移以 ALTER 对齐，不 DROP 重建）/`DROP ... IF EXISTS ...
+  CASCADE` 及回滚；序列/例程先于表 DDL。**聚合函数（prokind='a'）与窗口函数
+  （prokind='w'）首版明确不支持**（pg_get_functiondef 无法还原），提取阶段排除。
 
 ### C2【P0·阻断】视图依赖的列变更无拓扑排序
 
@@ -72,6 +86,9 @@
 - **方案**：结构产物按依赖排序——受影响视图（依赖闭包）先 DROP，表/列/索引变更，
   之后重建视图；回滚对称。实现可为「视图依赖图 + 拓扑排序」或简化为「整组视图删建」。
 - **验收**：2.4.0 生成的 schema_diff.sql 在含 15 个视图的库上直接可执行。
+- **完成情况（`6d6eb99`）**：CompareSchemas 计算「定义未变但（传递）依赖被变更
+  对象」的双侧视图闭包（SchemaDiff.ViewsAffected，取新态侧定义）；产物按
+  DROP（逆拓扑，CASCADE）→ 表/列 DDL → CREATE（拓扑）编排，回滚对称。
 
 ### C3【P0·阻断】rules 引用不存在的表 → 空模型陷阱
 
@@ -82,6 +99,10 @@
 - **方案**：ExtractTable 对缺失表返回明确错误或 (nil, nil)；diff 层对 rules 中不存在的表
   显式报 `table not found: X`，或按配置跳过并输出 warning 清单。
 - **验收**：错误信息直指表名；提供跳过开关后流水线无需外部过滤。
+- **完成情况（`d8ee90b`）**：PG/MySQL ExtractTable 缺表显式返回
+  `conn.ErrTableNotFound`（信息含 schema.table）；RunDataDiff 新增 SkipMissingTables
+  （默认关闭保持报错），开启后缺表规则跳过、结果 Status=skipped + SkippedTables 清单、
+  产物保持 COMPLETE；CLI 暴露 `--skip-missing-tables`（diff-data/diff-full）。
 
 ### C4【P2·设计决策】无物理主键表的数据比对约束
 
@@ -144,12 +165,15 @@
   但「保守拒绝歧义脚本」策略下能否吃下全部 88 个原脚本未验证。
 - **做法**：能力补齐后，回放通道优先用 exec-sql（--tx），失败脚本清单作为 scanner
   改进输入（预期少量，可个案处理）。
+- **第 1 批实测结论（2026-09-20）**：**88/88 全部经 exec-sql --tx 回放成功，scanner
+  零拒绝**，C10 风险对 PG 链基本解除。唯一注意事项：重复回放已应用脚本会在
+  `DROP TABLE` 处被正确拒绝（事务回滚，无副作用）——符合预期语义。
 
 ## 四、实施顺序
 
 | 批次 | 内容 | 出口标准 |
 |---|---|---|
-| 第 1 批 | F0 提交；C1；C2；C3 | 单测 + 2.1.0→2.4.0 区间纯命令跑通（当前阻断点解除） |
+| 第 1 批 | F0 提交；C1；C2；C3 | ✅ 完成（2026-09-20）。实测超出出口标准：**88 个版本全链 2.1.0→3.7.0.35 纯 datasmith 命令跑通**，末轮结构比对 0 语句、数据比对 0 DML，双闭环为空 |
 | 第 2 批 | C5；C6 | 撤销两阶段预对齐编排，diff-full 单命令出链；账本共存 |
 | 第 3 批 | C4a；C7；C8；C9 | 无键表按配置可比；DX 项完成 |
 | 回归 | C10 + 全链重跑（88 轮） | 闭环 diff 为空；全新回放库经 migrate-script 全链应用成功；回退冒烟通过；登记脚本库 |
@@ -168,9 +192,15 @@
 5. 输出报告：逐版本产物摘要、函数/序列/视图增强清单、Java 迁移（8 个）效果缺口、
    回退对破坏性变更的固有限制。
 
-## 六、当前暂停状态
+## 六、当前状态（第 1 批完成后）
 
-- 演练库：`airedge_mig_src` 停在 2.3.0 应用后状态；`airedge_mig_tgt` 停在 2.4.0 回放后；
-  重跑时一律全量重建，不续用。
-- 临时工作区 `/tmp/airedge-migration/`（外部脚本与产物）仅作缺陷证据留存，能力补齐后删除。
-- data-smith 仓库工作区：F0 修复已提交（`d58cd31`），本计划文档随 docs 提交入库。
+- **全链演练已完成**：postgres14_22 上重建 airedge_mig_src/tgt，88 轮
+  （回放→diff-schema→diff-data --skip-missing-tables --best-effort→exec-sql 推进 source）
+  全部 OK；末轮 diff-schema 0 语句、diff-data 0 DML（闭环收敛）。
+- 视图弹跳在 23 轮触发；例程 DDL 覆盖 2.1.0/2.2.0/2.7.0/3.0.0 等轮；
+  序列增删覆盖 air_ws_items_index_seq_* 等。C5 列漂移在 2.2.0 轮复现一次
+  （air_sys_list_item.parent_id，--best-effort 跳过后下一轮自愈），按计划留待第 2 批。
+- 旧临时工作区 `/tmp/airedge-migration/` 及其外部脚本已废弃；第 1 批演练工作区为
+  `/tmp/ds-acceptance/`（含 run-chain.sh 驱动与逐轮产物）。
+- **下一批（第 2 批）**：C5（diff-full 影子事务两阶段数据比对）+ C6（表排除/通配与
+  账本默认排除）；随后第 3 批 C4a/C7/C8/C9，回归批 C10 已提前大半解除。
