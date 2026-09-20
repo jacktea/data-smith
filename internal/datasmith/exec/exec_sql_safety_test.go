@@ -30,6 +30,43 @@ func TestExecuteSQLContextHonorsDeadline(t *testing.T) {
 	}
 }
 
+func TestExecuteSQLContextRejectsMarkedScriptWithoutTargetIdentity(t *testing.T) {
+	adapter, mock := newExecMockAdapter(t, consts.DBTypePostgres)
+
+	err := ExecuteSQLContext(
+		context.Background(),
+		adapter,
+		"-- DATASMITH EXECUTE-ON: source\nDELETE FROM users;",
+		false,
+		false,
+	)
+	if err == nil || !strings.Contains(err.Error(), "执行目标身份") {
+		t.Fatalf("ExecuteSQLContext() error = %v, want missing target identity rejection", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("marked SQL reached the database without a target identity: %v", err)
+	}
+}
+
+func TestExecuteSQLContextForTargetRejectsInvalidTargetIdentity(t *testing.T) {
+	adapter, mock := newExecMockAdapter(t, consts.DBTypePostgres)
+
+	err := ExecuteSQLContextForTarget(
+		context.Background(),
+		adapter,
+		"DELETE FROM users;",
+		"primary",
+		false,
+		false,
+	)
+	if err == nil || !strings.Contains(err.Error(), "source 或 target") {
+		t.Fatalf("ExecuteSQLContextForTarget() error = %v, want invalid target identity rejection", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("SQL reached the database with an invalid target identity: %v", err)
+	}
+}
+
 type execMockAdapter struct {
 	db  *sql.DB
 	cfg *config.ConnConfig

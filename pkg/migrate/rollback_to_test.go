@@ -61,7 +61,11 @@ func TestPlanRollbackToValidatesDownScriptsBeforeMutation(t *testing.T) {
 
 func TestRollbackToMigrationAlreadyAtTarget(t *testing.T) {
 	adapter, mock := newMockAdapter(t, consts.DBTypePostgres)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock(hashtext($1))")).WithArgs("data-smith:schema-migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
 	expectAppliedStack(mock, "2.0", "1.0")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_advisory_unlock(hashtext($1))")).WithArgs("data-smith:schema-migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
 	rolled, err := RollbackToMigration(adapter, []*MigrationFile{downFile("2.0", "b;")}, "2.0")
 	if err != nil {
 		t.Fatalf("rollback to current version should be a no-op: %v", err)
@@ -76,9 +80,9 @@ func TestRollbackToMigrationAlreadyAtTarget(t *testing.T) {
 
 func TestRollbackToMigrationPostgresRollsBackNewestFirst(t *testing.T) {
 	adapter, mock := newMockAdapter(t, consts.DBTypePostgres)
-	expectAppliedStack(mock, "V3.0", "V2.0", "V1.0")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock(hashtext($1))")).WithArgs("data-smith:schema-migrations").
 		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+	expectAppliedStack(mock, "V3.0", "V2.0", "V1.0")
 	expectPostgresRollbackStep(mock, "V3.0", "DROP TABLE c;")
 	expectPostgresRollbackStep(mock, "V2.0", "DROP TABLE b;")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_advisory_unlock(hashtext($1))")).WithArgs("data-smith:schema-migrations").
@@ -101,11 +105,43 @@ func TestRollbackToMigrationPostgresRollsBackNewestFirst(t *testing.T) {
 	}
 }
 
-func TestRollbackToMigrationEmptyTargetRollsBackSingleStep(t *testing.T) {
+func TestRollbackToMigrationBuildsAuthoritativePlanAfterLock(t *testing.T) {
 	adapter, mock := newMockAdapter(t, consts.DBTypePostgres)
-	expectAppliedStack(mock, "2.0", "1.0")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock(hashtext($1))")).WithArgs("data-smith:schema-migrations").
 		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+	// 4.0 represents a version committed by a concurrent migration before this
+	// rollback acquired the lock. The authoritative plan must observe it.
+	expectAppliedStack(mock, "4.0", "3.0", "2.0", "1.0")
+	expectPostgresRollbackStep(mock, "4.0", "DROP TABLE d;")
+	expectPostgresRollbackStep(mock, "3.0", "DROP TABLE c;")
+	expectPostgresRollbackStep(mock, "2.0", "DROP TABLE b;")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_advisory_unlock(hashtext($1))")).WithArgs("data-smith:schema-migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
+
+	files := []*MigrationFile{
+		downFile("1.0", "DROP TABLE a;"),
+		downFile("2.0", "DROP TABLE b;"),
+		downFile("3.0", "DROP TABLE c;"),
+		downFile("4.0", "DROP TABLE d;"),
+	}
+	rolled, err := RollbackToMigration(adapter, files, "1.0")
+	if err != nil {
+		t.Fatalf("rollback to target should use the locked ledger: %v", err)
+	}
+	want := []string{"4.0", "3.0", "2.0"}
+	if strings.Join(rolled, ",") != strings.Join(want, ",") {
+		t.Fatalf("rolled = %v, want %v", rolled, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRollbackToMigrationEmptyTargetRollsBackSingleStep(t *testing.T) {
+	adapter, mock := newMockAdapter(t, consts.DBTypePostgres)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock(hashtext($1))")).WithArgs("data-smith:schema-migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+	expectAppliedStack(mock, "2.0", "1.0")
 	expectPostgresRollbackStep(mock, "2.0", "DROP TABLE b;")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_advisory_unlock(hashtext($1))")).WithArgs("data-smith:schema-migrations").
 		WillReturnRows(sqlmock.NewRows([]string{"pg_advisory_unlock"}).AddRow(true))
@@ -125,9 +161,9 @@ func TestRollbackToMigrationEmptyTargetRollsBackSingleStep(t *testing.T) {
 
 func TestRollbackToMigrationMySQLRollsBackEachStep(t *testing.T) {
 	adapter, mock := newMockAdapter(t, consts.DBTypeMySQL)
-	expectAppliedStack(mock, "2.0", "1.0")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, 0)")).WithArgs("data-smith:schema-migrations").
 		WillReturnRows(sqlmock.NewRows([]string{"GET_LOCK(?, 0)"}).AddRow(1))
+	expectAppliedStack(mock, "2.0", "1.0")
 	// 回退到 1.0 = 只回退其之上的 2.0,目标版本本身保留
 	mock.ExpectExec(regexp.QuoteMeta("DROP TABLE b;")).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE schema_migrations SET status = 'rolled_back', execution_time = ?,")).
@@ -150,9 +186,9 @@ func TestRollbackToMigrationMySQLRollsBackEachStep(t *testing.T) {
 
 func TestRollbackToMigrationStopsOnFailure(t *testing.T) {
 	adapter, mock := newMockAdapter(t, consts.DBTypePostgres)
-	expectAppliedStack(mock, "3.0", "2.0", "1.0")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock(hashtext($1))")).WithArgs("data-smith:schema-migrations").
 		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+	expectAppliedStack(mock, "3.0", "2.0", "1.0")
 	// 第一步(3.0)执行失败,事务回滚,循环终止
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE schema_migrations SET status = 'rolling_back', error_summary = NULL WHERE version = $1")).

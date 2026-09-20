@@ -116,6 +116,21 @@ func (s *shadowTx) rollback() error {
 	return nil
 }
 
+// finishShadowDataDiff closes the bound read session, explicitly rolls back
+// the shadow transaction, and reports recovery only after rollback succeeds.
+func finishShadowDataDiff(txs *shadowTx, unbind func(), report func(string)) error {
+	if unbind != nil {
+		unbind()
+	}
+	if err := txs.rollback(); err != nil {
+		return err
+	}
+	if report != nil {
+		report("回滚影子事务, source 结构恢复原状")
+	}
+	return nil
+}
+
 // statementPreview 返回语句的单行短预览，用于失败定位；实现收敛在公共包
 // pkg/utils（exec-sql 失败定位复用同一格式）。
 func statementPreview(statement string) string {

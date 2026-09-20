@@ -155,7 +155,7 @@ func applyForward(t *testing.T, ctx context.Context, srcAdapter conn.DBAdapter, 
 	t.Helper()
 	for _, name := range []string{SchemaDiffForwardFile, DataDiffForwardFile} {
 		content := readArtifact(t, dir, name)
-		if err := exec.ExecuteSQLContext(ctx, srcAdapter, content, false, true); err != nil {
+		if err := exec.ExecuteSQLContextForTarget(ctx, srcAdapter, content, "source", false, true); err != nil {
 			t.Fatalf("apply %s in one pass: %v", name, err)
 		}
 	}

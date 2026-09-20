@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +27,12 @@ func newWebCommand() *cobra.Command {
 		Use:   "web",
 		Short: "启动 Web 控制台",
 		Long:  `启动 DataSmith Web 控制台,提供连接管理、结构/数据比对、SQL 执行、重置与版本迁移的图形界面。`,
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if !isLoopbackListenAddress(addr) {
+				cmd.PrintErrf("安全警告: 正在监听非 loopback 地址 %s；当前 Web 控制台不提供远程认证，请仅在受信网络和外部访问控制下使用。\n", addr)
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			srv, err := server.New(dataDir)
 			if err != nil {
@@ -59,9 +67,21 @@ func newWebCommand() *cobra.Command {
 			}
 		},
 	}
-	cmd.Flags().StringVar(&addr, "addr", ":8080", "HTTP 监听地址")
+	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:8080", "HTTP 监听地址")
 	cmd.Flags().StringVar(&dataDir, "data-dir", "./datasmith-web-data", "数据目录(存储连接、方案、脚本库与任务产物)")
 	return cmd
+}
+
+func isLoopbackListenAddress(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Install registers the web subcommand on the root command.

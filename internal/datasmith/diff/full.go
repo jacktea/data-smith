@@ -142,6 +142,11 @@ func RunFullDiff(ctx context.Context, params FullDiffParams, dir string, progres
 	}
 
 	opts := dataPhaseOptions{schemaSnapshot: &phase.tables, shadow: shadow}
+	var (
+		shadowTransaction *shadowTx
+		unbindShadow      func()
+		shadowPending     bool
+	)
 	if shadow {
 		report(fmt.Sprintf("=== 影子结构对齐(事务内, 不落库): 应用 %d 条结构 DDL ===", len(phase.forward)))
 		txs, err := beginShadowTx(ctx, srcDB)
@@ -157,10 +162,14 @@ func RunFullDiff(ctx context.Context, params FullDiffParams, dir string, progres
 		if err != nil {
 			return FullDiffResult{}, errors.Join(err, txs.rollback())
 		}
+		shadowTransaction = txs
+		unbindShadow = unbind
+		shadowPending = true
 		defer func() {
-			unbind()
-			report("回滚影子事务, source 结构恢复原状")
-			_ = txs.rollback()
+			if shadowPending {
+				unbindShadow()
+				_ = shadowTransaction.rollback()
+			}
 		}()
 	}
 
@@ -177,6 +186,16 @@ func RunFullDiff(ctx context.Context, params FullDiffParams, dir string, progres
 		BestEffort:        params.BestEffort,
 		SkipMissingTables: params.SkipMissingTables,
 	}, opts, dir, dataPhaseProgress(report, tableProgress))
+	if shadowPending {
+		shadowPending = false
+		rollbackErr := finishShadowDataDiff(shadowTransaction, unbindShadow, report)
+		if err != nil {
+			return FullDiffResult{}, errors.Join(fmt.Errorf("data diff: %w", err), rollbackErr)
+		}
+		if rollbackErr != nil {
+			return FullDiffResult{}, rollbackErr
+		}
+	}
 	if err != nil {
 		return FullDiffResult{}, fmt.Errorf("data diff: %w", err)
 	}

@@ -114,7 +114,7 @@ func runExecSQL(cmd *cobra.Command, args []string) error {
 	}
 	defer adapter.Close()
 
-	return ExecuteSQLContext(cmd.Context(), adapter, sqlContent, dryRun, useTx)
+	return ExecuteSQLContextForTarget(cmd.Context(), adapter, sqlContent, dbLabel, dryRun, useTx)
 }
 
 const executeOnMarker = "-- DATASMITH EXECUTE-ON:"
@@ -143,12 +143,15 @@ func selectDBChoice(dbChoice string, sourceFlag, targetFlag bool) (string, error
 }
 
 func validateDeclaredDatabase(sqlContent, dbLabel string) error {
-	declared := declaredDatabase(sqlContent)
-	if declared == "" {
+	declared, present := declaredDatabaseMarker(sqlContent)
+	if !present {
 		return nil
 	}
 	if declared != "source" && declared != "target" {
 		return fmt.Errorf("无效的 %s 标记值 %q", executeOnMarker, declared)
+	}
+	if strings.TrimSpace(dbLabel) == "" {
+		return errors.New("脚本声明了 EXECUTE-ON，但执行目标身份未提供")
 	}
 	if declared != strings.ToLower(strings.TrimSpace(dbLabel)) {
 		return fmt.Errorf("脚本声明只能在 %s 数据库执行，当前选择为 %s", declared, dbLabel)
@@ -156,14 +159,24 @@ func validateDeclaredDatabase(sqlContent, dbLabel string) error {
 	return nil
 }
 
-// DeclaredExecuteOn returns the execution target declared in the SQL header
-// ("source"/"target"), or an empty string when no marker is present. The web
-// console uses it to warn when a script is run against an unexpected database.
-func DeclaredExecuteOn(sqlContent string) string {
-	return declaredDatabase(sqlContent)
+// ValidateExecutionTarget requires an explicit source/target identity and
+// checks it against the script's optional DATASMITH EXECUTE-ON marker.
+func ValidateExecutionTarget(sqlContent, targetIdentity string) error {
+	targetIdentity = strings.ToLower(strings.TrimSpace(targetIdentity))
+	if targetIdentity != "source" && targetIdentity != "target" {
+		return errors.New("执行目标身份必须是 source 或 target")
+	}
+	return validateDeclaredDatabase(sqlContent, targetIdentity)
 }
 
-func declaredDatabase(sqlContent string) string {
+// DeclaredExecuteOn returns the execution target declared in the SQL header
+// ("source"/"target"), or an empty string when no marker is present.
+func DeclaredExecuteOn(sqlContent string) string {
+	declared, _ := declaredDatabaseMarker(sqlContent)
+	return declared
+}
+
+func declaredDatabaseMarker(sqlContent string) (string, bool) {
 	const maxHeaderLines = 20
 	for index, line := range strings.Split(sqlContent, "\n") {
 		if index >= maxHeaderLines {
@@ -174,13 +187,13 @@ func declaredDatabase(sqlContent string) string {
 			continue
 		}
 		if len(trimmed) >= len(executeOnMarker) && strings.EqualFold(trimmed[:len(executeOnMarker)], executeOnMarker) {
-			return strings.ToLower(strings.TrimSpace(trimmed[len(executeOnMarker):]))
+			return strings.ToLower(strings.TrimSpace(trimmed[len(executeOnMarker):])), true
 		}
 		if !strings.HasPrefix(trimmed, "--") {
 			break
 		}
 	}
-	return ""
+	return "", false
 }
 
 // resolveDBConfig 解析待操作的数据库配置
@@ -201,8 +214,25 @@ func ExecuteSQL(adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bo
 }
 
 func ExecuteSQLContext(ctx context.Context, adapter conn.DBAdapter, sqlContent string, dryRun bool, useTx bool) error {
+	return executeSQLContext(ctx, adapter, sqlContent, "", dryRun, useTx)
+}
+
+// ExecuteSQLContextForTarget executes SQL after enforcing its optional
+// DATASMITH EXECUTE-ON marker against the caller's explicit source/target
+// identity. Callers that can execute generated artifacts must use this entry.
+func ExecuteSQLContextForTarget(ctx context.Context, adapter conn.DBAdapter, sqlContent, targetIdentity string, dryRun bool, useTx bool) error {
+	if err := ValidateExecutionTarget(sqlContent, targetIdentity); err != nil {
+		return err
+	}
+	return executeSQLContext(ctx, adapter, sqlContent, strings.ToLower(strings.TrimSpace(targetIdentity)), dryRun, useTx)
+}
+
+func executeSQLContext(ctx context.Context, adapter conn.DBAdapter, sqlContent, targetIdentity string, dryRun bool, useTx bool) error {
 	if ctx == nil {
 		return errors.New("SQL execution context is required")
+	}
+	if err := validateDeclaredDatabase(sqlContent, targetIdentity); err != nil {
+		return err
 	}
 	cfg := adapter.GetConfig()
 	options := sqlScannerOptions{nestedBlockComments: true, dollarQuotes: true}

@@ -15,7 +15,13 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, errMsg, type ExecSqlMode, type SqlQueryResult } from "../api";
+import {
+  api,
+  errMsg,
+  type ExecSqlMode,
+  type ExecSqlTargetRole,
+  type SqlQueryResult,
+} from "../api";
 import { useConnections } from "../hooks";
 import SqlEditor from "../components/SqlEditor";
 
@@ -36,6 +42,7 @@ export default function SqlConsolePage() {
   const [result, setResult] = useState<SqlQueryResult | null>(null);
   const [scriptSql, setScriptSql] = useState("");
   const [mode, setMode] = useState<ExecSqlMode>("dryrun");
+  const [targetRole, setTargetRole] = useState<ExecSqlTargetRole>();
   const [submitting, setSubmitting] = useState(false);
 
   const selectedConn = connections.find((c) => c.id === connId);
@@ -59,10 +66,10 @@ export default function SqlConsolePage() {
   };
 
   const execScript = async () => {
-    if (!connId) return;
+    if (!connId || !targetRole) return;
     setSubmitting(true);
     try {
-      await api.createJobExecSql({ connectionId: connId, content: scriptSql, mode });
+      await api.createJobExecSql({ connectionId: connId, content: scriptSql, mode, targetRole });
       message.success("脚本任务已提交,正在跳转任务列表");
       setScriptSql("");
       navigate("/jobs");
@@ -74,9 +81,9 @@ export default function SqlConsolePage() {
   };
 
   const confirmScript = () => {
-    if (!connId) return;
+    if (!connId || !targetRole) return;
     modal.confirm({
-      title: `确认以「${MODE_LABEL[mode]}」方式执行脚本?`,
+      title: `确认以「${MODE_LABEL[mode]}」方式执行脚本到 ${targetRole}?`,
       icon: <ExclamationCircleOutlined />,
       content: "脚本将对所选连接的库执行写操作/DDL,请再次核对连接与脚本内容。",
       okText: "执行",
@@ -180,6 +187,24 @@ export default function SqlConsolePage() {
           description="三态说明 —— 试跑(dry-run):事务中执行后回滚,仅做验证(MySQL DDL 不支持试跑,将被引擎拒绝);事务执行(tx):成功提交、失败整体回滚;直接执行(direct):逐条提交,失败不回滚。引擎会校验脚本头部 EXECUTE-ON 标记与所选库的一致性,不一致即拒绝执行。"
         />
         <div style={{ marginBottom: 12, flexShrink: 0 }}>
+          <Space wrap>
+            <Typography.Text strong>连接角色:</Typography.Text>
+            <Radio.Group
+              value={targetRole}
+              onChange={(e) => setTargetRole(e.target.value as ExecSqlTargetRole)}
+              optionType="button"
+              buttonStyle="solid"
+              options={[
+                { value: "source", label: "source" },
+                { value: "target", label: "target" },
+              ]}
+            />
+            <Typography.Text type="secondary">
+              必须与脚本头部 DATASMITH EXECUTE-ON 标记一致。
+            </Typography.Text>
+          </Space>
+        </div>
+        <div style={{ marginBottom: 12, flexShrink: 0 }}>
           <Radio.Group
             value={mode}
             onChange={(e) => setMode(e.target.value as ExecSqlMode)}
@@ -203,7 +228,7 @@ export default function SqlConsolePage() {
               "可包含多条语句,支持 -- 注释。\n按 Cmd+Enter (Ctrl+Enter) 可快速触发确认并提交。\n将以任务方式异步执行,请到「任务列表」查看日志与产物。"
             }
             onExecute={() => {
-              if (connId && scriptSql.trim() && !submitting) {
+              if (connId && targetRole && scriptSql.trim() && !submitting) {
                 confirmScript();
               }
             }}
@@ -214,7 +239,7 @@ export default function SqlConsolePage() {
             type="primary"
             danger={mode !== "dryrun"}
             loading={submitting}
-            disabled={!connId || !scriptSql.trim()}
+            disabled={!connId || !targetRole || !scriptSql.trim()}
             onClick={confirmScript}
           >
             执行脚本
@@ -253,7 +278,7 @@ export default function SqlConsolePage() {
             />
             {connId && (
               <Typography.Text type="secondary">
-                所选库即执行目标(source 语义:将被变更)。
+                所选连接是物理执行目标；执行写入脚本时还必须显式选择其 source/target 角色。
               </Typography.Text>
             )}
             <Button size="small" onClick={() => void reload()} loading={connsLoading}>
@@ -272,4 +297,3 @@ export default function SqlConsolePage() {
     </Card>
   );
 }
-

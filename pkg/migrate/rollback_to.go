@@ -16,7 +16,13 @@ import (
 // stack: rolling back means popping entries from the front until the target
 // version is on top.
 func AppliedSuccessVersions(db conn.DBAdapter) ([]string, error) {
-	rows, err := db.GetConn().Query(`SELECT version FROM schema_migrations WHERE status = 'success' ORDER BY id DESC`)
+	return appliedSuccessVersions(context.Background(), db.GetConn())
+}
+
+func appliedSuccessVersions(ctx context.Context, connection interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}) ([]string, error) {
+	rows, err := connection.QueryContext(ctx, `SELECT version FROM schema_migrations WHERE status = 'success' ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -46,6 +52,10 @@ func PlanRollbackTo(db conn.DBAdapter, files []*MigrationFile, targetVersion str
 	if err != nil {
 		return nil, fmt.Errorf("read applied migration versions: %w", err)
 	}
+	return planRollbackToPrepared(files, stack, targetVersion)
+}
+
+func planRollbackToPrepared(files []*MigrationFile, stack []string, targetVersion string) ([]string, error) {
 	if len(stack) == 0 {
 		return nil, errors.New("no applied migration to roll back")
 	}
@@ -83,17 +93,21 @@ func PlanRollbackTo(db conn.DBAdapter, files []*MigrationFile, targetVersion str
 // interrupted run (MySQL DDL auto-commits) can resume from the new current
 // version. It returns the rolled-back versions in execution order.
 func RollbackToMigration(db conn.DBAdapter, files []*MigrationFile, targetVersion string) ([]string, error) {
-	planned, err := PlanRollbackTo(db, files, targetVersion)
-	if err != nil {
+	if err := PrepareMigrationFiles(files); err != nil {
 		return nil, err
-	}
-	if len(planned) == 0 {
-		return []string{}, nil
 	}
 	downs := downScriptsByVersion(files)
 
-	rolled := make([]string, 0, len(planned))
+	rolled := []string{}
 	if err := withMigrationLock(db, func(ctx context.Context, connection *sql.Conn) error {
+		stack, err := appliedSuccessVersions(ctx, connection)
+		if err != nil {
+			return fmt.Errorf("read applied migration versions: %w", err)
+		}
+		planned, err := planRollbackToPrepared(files, stack, targetVersion)
+		if err != nil {
+			return err
+		}
 		for _, version := range planned {
 			down := downs[normalizeVersion(version)]
 			switch db.GetConfig().Type {

@@ -32,10 +32,10 @@ func TestRollbackToAppliesDownScriptsUntilTargetWithProgress(t *testing.T) {
 	progress := func(message string) { messages = append(messages, message) }
 
 	adapter, mock := newScriptMock(t, consts.DBTypePostgres)
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT version FROM schema_migrations WHERE status = 'success' ORDER BY id DESC")).
-		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("3").AddRow("2").AddRow("1"))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock(hashtext($1))")).WithArgs("data-smith:schema-migrations").
 		WillReturnRows(sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(true))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT version FROM schema_migrations WHERE status = 'success' ORDER BY id DESC")).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("3").AddRow("2").AddRow("1"))
 	// 回退到 1:依次回退 3、2,目标版本 1 保留
 	expectPostgresRollbackStepOnScriptMock(mock, "3", "DROP INDEX i3;")
 	expectPostgresRollbackStepOnScriptMock(mock, "2", "DROP TABLE b;")

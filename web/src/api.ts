@@ -313,11 +313,13 @@ export interface DiffFullJobInput {
 }
 
 export type ExecSqlMode = "dryrun" | "tx" | "direct";
+export type ExecSqlTargetRole = "source" | "target";
 
 export interface ExecSqlJobInput {
   connectionId: string;
   content: string;
   mode: ExecSqlMode;
+  targetRole: ExecSqlTargetRole;
 }
 
 export interface MigrateJobInput {
