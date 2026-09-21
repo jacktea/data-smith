@@ -394,6 +394,22 @@ export interface MigratePlan {
   nextVersion: string;
 }
 
+export interface DeleteLedgerRecordInput {
+  libraryId: string;
+  connectionId: string;
+  /** 账本版本号,容忍 V 前缀与大小写 */
+  version: string;
+  confirmed: true;
+}
+
+export interface DeleteLedgerRecordResult {
+  ok: boolean;
+  /** 实际删除的账本精确版本号 */
+  version: string;
+  /** 删除前的提示(缺 up 脚本/回退栈序/MySQL 残留) */
+  warnings: string[];
+}
+
 // ---------------- 下载地址(浏览器直接 <a> 访问) ----------------
 
 export const artifactFileUrl = (jobId: string, name: string): string =>
@@ -495,4 +511,9 @@ export const api = {
     }),
   migratePlan: (libraryId: string, connectionId: string) =>
     request<MigratePlan>(`/migrate/plan${qs({ libraryId, connectionId })}`),
+  deleteMigrateLedgerRecord: (body: DeleteLedgerRecordInput) =>
+    request<DeleteLedgerRecordResult>("/migrate/ledger/delete", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 };

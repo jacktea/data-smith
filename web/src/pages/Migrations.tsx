@@ -382,6 +382,7 @@ function RunTab() {
   const [targetVersion, setTargetVersion] = useState("");
   const [dryRun, setDryRun] = useState(false);
   const [executing, setExecuting] = useState(false);
+  const [removingRecord, setRemovingRecord] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -428,6 +429,30 @@ function RunTab() {
       message.error(errMsg(e));
     } finally {
       setExecuting(false);
+    }
+  };
+
+  // 删除账本记录:仅 failed/rolled_back 行可见;引擎拒绝其余状态。
+  // 删除后同版本修正脚本可重新迁移,不影响数据库本身。
+  const removeLedgerRecord = async (version: string) => {
+    if (!libId || !connId) return;
+    setRemovingRecord(version);
+    try {
+      const r = await api.deleteMigrateLedgerRecord({
+        libraryId: libId,
+        connectionId: connId,
+        version,
+        confirmed: true,
+      });
+      message.success(`已删除版本 ${r.version} 的账本记录,修正脚本后可重新迁移`);
+      for (const w of r.warnings) {
+        message.warning(w, 6);
+      }
+      await loadPlan();
+    } catch (e) {
+      message.error(errMsg(e));
+    } finally {
+      setRemovingRecord(null);
     }
   };
 
@@ -539,6 +564,25 @@ function RunTab() {
                 dataIndex: "errorSummary",
                 ellipsis: true,
                 render: (v: string) => (v ? <Typography.Text type="danger">{v}</Typography.Text> : "-"),
+              },
+              {
+                title: "操作",
+                key: "actions",
+                width: 110,
+                render: (_, r) =>
+                  r.status === "failed" || r.status === "rolled_back" ? (
+                    <Popconfirm
+                      title="确认删除该账本记录?"
+                      description="仅删除登记记录,不变更数据库;删除后同版本修正脚本可重新迁移。"
+                      okText="删除"
+                      okButtonProps={{ danger: true }}
+                      onConfirm={() => void removeLedgerRecord(r.version)}
+                    >
+                      <Button size="small" danger icon={<DeleteOutlined />} loading={removingRecord === r.version}>
+                        删除记录
+                      </Button>
+                    </Popconfirm>
+                  ) : null,
               },
             ]}
           />

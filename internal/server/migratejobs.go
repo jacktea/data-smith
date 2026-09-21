@@ -226,3 +226,53 @@ func (s *Server) runRollback(ctx context.Context, job *Job, libraryID, connectio
 	job.Logf("已依次回退 %d 个版本, 当前版本 %s", len(rolled), targetVersion)
 	return nil
 }
+
+type deleteLedgerRecordRequest struct {
+	LibraryID    string `json:"libraryId"`
+	ConnectionID string `json:"connectionId"`
+	Version      string `json:"version"`
+	Confirmed    *bool  `json:"confirmed"`
+}
+
+// handleMigrateLedgerDelete synchronously deletes one schema_migrations record
+// so a revised script can re-migrate under the same version. The engine only
+// allows failed/rolled_back records; CLI (migrate-remove) and this endpoint
+// share migratelogic.RemoveMigrationRecord, which also emits advisory warnings
+// (missing up script, rollback-stack reordering, MySQL partial-DDL residue).
+func (s *Server) handleMigrateLedgerDelete(w http.ResponseWriter, r *http.Request) {
+	var req deleteLedgerRecordRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "%s", err.Error())
+		return
+	}
+	if req.Confirmed == nil || !*req.Confirmed {
+		writeError(w, http.StatusBadRequest, "删除账本记录为破坏性操作,必须显式确认(confirmed=true)")
+		return
+	}
+	dir, err := s.libraryDir(req.LibraryID)
+	if err != nil {
+		respondStoreErr(w, err)
+		return
+	}
+	stored, ok := s.store.GetConnection(req.ConnectionID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "连接不存在")
+		return
+	}
+	adapter, err := s.openAdapter(r.Context(), stored.ConnConfig())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "连接数据库失败: %v", err)
+		return
+	}
+	defer adapter.Close()
+
+	deleted, warnings, err := migratelogic.RemoveMigrationRecord(r.Context(), adapter, dir, req.Version, nil)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "%s", err.Error())
+		return
+	}
+	if warnings == nil {
+		warnings = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": deleted, "warnings": warnings})
+}

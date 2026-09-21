@@ -104,7 +104,7 @@ _Avoid_: 补丁、热修
 _Avoid_: 归属库
 
 **账本 (Ledger)**:
-目标库中记录已成功应用版本(checksum、状态)的表;迁移前先校验全部脚本再写账本,配合 advisory lock 防并发。
+目标库中记录已成功应用版本(checksum、状态)的表;迁移前先校验全部脚本再写账本,配合 advisory lock 防并发。failed/rolled_back 记录可显式删除(`migrate-remove`),使同版本修正脚本可重新迁移;success/running 记录一律拒绝删除。
 _Avoid_: 历史表
 
 **重置 (Reset)**:

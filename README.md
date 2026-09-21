@@ -300,6 +300,24 @@ Web 控制台通过 `./datasmith web` 启动，默认仅监听 `127.0.0.1:8080`�
 ./datasmith migrate-rollback -c configs/config.yaml -d data/dbscripts --target 1.0.0 --dry-run
 ```
 
+删除账本记录（修复 checksum drift 的逃生舱）：
+
+```bash
+# 预览:显示记录状态/checksum 与警告,不执行删除
+./datasmith migrate-remove -c configs/config.yaml -d data/dbscripts -v 1.0.1 --dry-run
+# 真实删除必须显式 --yes
+./datasmith migrate-remove -c configs/config.yaml -d data/dbscripts -v 1.0.1 --yes
+```
+
+> `migrate-remove` 只删除 `schema_migrations` 中 **failed / rolled_back** 状态的
+> 记录（success 与真实库结构绑定、running/rolling_back 可能有活跃迁移，一律拒
+> 绝），本身不执行任何变更 SQL。删除后同版本号的修正脚本可重新迁移并重新登记
+> checksum——这是修复「同版本内容修改后 checksum drift 拒绝迁移」的正规通道。
+> 删除前 CLI 与 Web 端都会输出提示：脚本库缺该版本 up 脚本（删除后无法重跑）、
+> 存在更新的已成功版本（重跑后该版本排到回退栈顶）、MySQL failed 记录可能有
+> 半途自动提交的 DDL 残留（修正脚本应写成幂等）。Web 控制台在「迁移管理 → 执
+> 行计划」的账本表格中对 failed/已回退行提供同样的删除入口。
+
 ---
 
 ## 扩展与开发规范

@@ -28,7 +28,7 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 ./scripts/check-coverage.sh
 ```
 
-CLI 子命令：`diff-schema`、`diff-data`、`diff-full`（一次比对结构+数据，可经 `--migrate-dir` 一步生成迁移 up/down）、`exec-sql`、`reset-db`、`migrate-script`、`migrate-rollback`（回退最新或 `--target` 指定版本）、`web`（Web 控制台，`--addr`/`--data-dir`；示例配置在 `configs/`）。
+CLI 子命令：`diff-schema`、`diff-data`、`diff-full`（一次比对结构+数据，可经 `--migrate-dir` 一步生成迁移 up/down）、`exec-sql`、`reset-db`、`migrate-script`、`migrate-rollback`（回退最新或 `--target` 指定版本）、`migrate-remove`（删除 failed/rolled_back 账本记录，需 `--yes`）、`web`（Web 控制台，`--addr`/`--data-dir`；示例配置在 `configs/`）。
 
 ## 架构
 

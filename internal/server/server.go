@@ -124,6 +124,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/jobs/reset", s.handleResetSubmit)
 	m.HandleFunc("POST /api/jobs/migrate", s.handleMigrateSubmit)
 	m.HandleFunc("POST /api/jobs/rollback", s.handleRollbackSubmit)
+	m.HandleFunc("POST /api/migrate/ledger/delete", s.handleMigrateLedgerDelete)
 	m.HandleFunc("GET /api/jobs", s.handleListJobs)
 	m.HandleFunc("GET /api/jobs/{id}", s.handleGetJob)
 	m.HandleFunc("POST /api/jobs/{id}/cancel", s.handleCancelJob)
