@@ -388,6 +388,213 @@ func (s *Server) handleDownloadScript(w http.ResponseWriter, r *http.Request) {
 	serveFileAttachment(w, r, path, fileName)
 }
 
+// --- copy --------------------------------------------------------------------
+
+// copyLibraryDir copies every regular file from srcDir to dstDir. A missing
+// source directory counts as an empty library; subdirectories are not part of
+// the library model and are skipped.
+func copyLibraryDir(srcDir, dstDir string) error {
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return fmt.Errorf("创建脚本库目录: %w", err)
+	}
+	entries, err := os.ReadDir(srcDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("读取源脚本目录: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("读取文件信息 %s: %w", entry.Name(), err)
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(srcDir, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("读取脚本 %s: %w", entry.Name(), err)
+		}
+		if err := os.WriteFile(filepath.Join(dstDir, entry.Name()), raw, info.Mode().Perm()); err != nil {
+			return fmt.Errorf("写入脚本 %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
+
+func (s *Server) handleCopyLibrary(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	unlock := s.lockLibrary(id)
+	defer unlock()
+	src, ok := s.store.GetLibrary(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "脚本库不存在")
+		return
+	}
+	var req libraryRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "%s", err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		writeError(w, http.StatusBadRequest, "脚本库名称不能为空")
+		return
+	}
+	// Clone 深拷贝 Versions：复制库沿用源库的版本登记元数据（含
+	// ExpectedConnectionID），语义与源库完全一致。
+	lib := &LibraryMeta{
+		ID:        newID("lib"),
+		Name:      req.Name,
+		CreatedAt: time.Now(),
+		Versions:  src.Clone().Versions,
+	}
+	// 先复制脚本文件再登记；任一步失败回滚新目录，不留半成品脚本库。
+	dstDir := s.libraryDirUnchecked(lib.ID)
+	if err := copyLibraryDir(s.libraryDirUnchecked(id), dstDir); err != nil {
+		_ = os.RemoveAll(dstDir)
+		writeError(w, http.StatusInternalServerError, "复制脚本文件失败: %v", err)
+		return
+	}
+	if err := s.store.PutLibrary(lib); err != nil {
+		_ = os.RemoveAll(dstDir)
+		respondStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, lib)
+}
+
+type copyScriptsRequest struct {
+	TargetLibraryID string   `json:"targetLibraryId"`
+	FileNames       []string `json:"fileNames"`
+}
+
+func (s *Server) handleCopyScripts(w http.ResponseWriter, r *http.Request) {
+	srcID := r.PathValue("id")
+	var req copyScriptsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "%s", err.Error())
+		return
+	}
+	targetID := strings.TrimSpace(req.TargetLibraryID)
+	if targetID == "" {
+		writeError(w, http.StatusBadRequest, "目标脚本库不能为空")
+		return
+	}
+	if targetID == srcID {
+		writeError(w, http.StatusBadRequest, "目标脚本库不能与源脚本库相同")
+		return
+	}
+	names := make([]string, 0, len(req.FileNames))
+	seen := make(map[string]bool, len(req.FileNames))
+	for _, name := range req.FileNames {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		writeError(w, http.StatusBadRequest, "请选择要复制的脚本")
+		return
+	}
+
+	// 双库加锁按 ID 升序进行：并发「A→B 与 B→A」时两把锁的获取顺序一致，
+	// 不会互相等待成环。
+	first, second := srcID, targetID
+	if first > second {
+		first, second = second, first
+	}
+	unlockFirst := s.lockLibrary(first)
+	defer unlockFirst()
+	unlockSecond := s.lockLibrary(second)
+	defer unlockSecond()
+
+	srcDir, err := s.libraryDir(srcID)
+	if err != nil {
+		respondStoreErr(w, err)
+		return
+	}
+	dstDir, err := s.libraryDir(targetID)
+	if err != nil {
+		respondStoreErr(w, err)
+		return
+	}
+	if s.beforeLibraryMutation != nil {
+		s.beforeLibraryMutation(targetID, "copy-scripts")
+	}
+
+	srcScripts, err := listScripts(srcDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取源脚本目录失败: %v", err)
+		return
+	}
+	// 只允许复制源库清单里实际存在的脚本：文件名取自扫描结果而非请求方
+	// 拼接，路径穿越与不合规文件名在这里被一并挡下（up/down/json 忠实复制）。
+	srcByName := make(map[string]scriptInfo, len(srcScripts))
+	for _, script := range srcScripts {
+		srcByName[script.FileName] = script
+	}
+	pending := make([]scriptInfo, 0, len(names))
+	for _, name := range names {
+		script, ok := srcByName[name]
+		if !ok {
+			writeError(w, http.StatusBadRequest, "脚本不存在: %s", name)
+			return
+		}
+		pending = append(pending, script)
+	}
+
+	dstScripts, err := listScripts(dstDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取目标脚本目录失败: %v", err)
+		return
+	}
+	dstByName := make(map[string]scriptInfo, len(dstScripts))
+	for _, script := range dstScripts {
+		dstByName[script.FileName] = script
+	}
+	// 冲突预检：任一冲突整批拒绝，目标库不会出现半批复制结果。
+	var conflicts []string
+	for _, script := range pending {
+		if _, ok := dstByName[script.FileName]; ok {
+			conflicts = append(conflicts, fmt.Sprintf("脚本 %s 已存在于目标库", script.FileName))
+		}
+		// 同版本不同标题会让同一迁移链出现两个版本条目；同版本同标题的
+		// up/down 互为配套，属于合法补齐。
+		for _, existing := range dstScripts {
+			if normalizedVersion(existing.Version) != normalizedVersion(script.Version) {
+				continue
+			}
+			if existing.Title != script.Title {
+				conflicts = append(conflicts, fmt.Sprintf("版本 %s 在目标库已被 %s 占用", script.Version, existing.FileName))
+			}
+		}
+	}
+	if len(conflicts) > 0 {
+		sort.Strings(conflicts)
+		writeError(w, http.StatusBadRequest, "目标脚本库存在冲突,未复制任何脚本: %s", strings.Join(conflicts, "; "))
+		return
+	}
+
+	for _, script := range pending {
+		raw, err := os.ReadFile(filepath.Join(srcDir, script.FileName))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "读取脚本 %s 失败: %v", script.FileName, err)
+			return
+		}
+		if err := os.WriteFile(filepath.Join(dstDir, script.FileName), raw, 0o644); err != nil {
+			writeError(w, http.StatusInternalServerError, "写入脚本 %s 失败: %v", script.FileName, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"copied": len(pending)})
+}
+
 // --- version registration ---------------------------------------------------
 
 type registerVersionRequest struct {

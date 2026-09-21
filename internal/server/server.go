@@ -143,7 +143,9 @@ func (s *Server) routes() {
 	m.HandleFunc("PUT /api/libraries/{id}/scripts/{fileName}", s.handlePutScript)
 	m.HandleFunc("DELETE /api/libraries/{id}/scripts/{fileName}", s.handleDeleteScript)
 	m.HandleFunc("GET /api/libraries/{id}/scripts/{fileName}/download", s.handleDownloadScript)
+	m.HandleFunc("POST /api/libraries/{id}/scripts/copy", s.handleCopyScripts)
 
+	m.HandleFunc("POST /api/libraries/{id}/copy", s.handleCopyLibrary)
 	m.HandleFunc("POST /api/libraries/{id}/versions", s.handleRegisterVersion)
 	m.HandleFunc("GET /api/migrate/plan", s.handleMigratePlan)
 

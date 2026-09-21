@@ -1,4 +1,5 @@
 import {
+  CopyOutlined,
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
@@ -28,6 +29,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { Key } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   api,
@@ -58,6 +60,13 @@ function LibraryTab() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [upload, setUpload] = useState({ fileName: "", content: "" });
   const [savingUpload, setSavingUpload] = useState(false);
+  const [selectedKeys, setSelectedKeys] = useState<Key[]>([]);
+  const [copyLibOpen, setCopyLibOpen] = useState(false);
+  const [copyLibName, setCopyLibName] = useState("");
+  const [copyingLib, setCopyingLib] = useState(false);
+  const [copyScriptsOpen, setCopyScriptsOpen] = useState(false);
+  const [copyTargetId, setCopyTargetId] = useState<string>();
+  const [copyingScripts, setCopyingScripts] = useState(false);
 
   const loadLibs = useCallback(async () => {
     try {
@@ -91,6 +100,11 @@ function LibraryTab() {
   useEffect(() => {
     void refreshScripts();
   }, [refreshScripts]);
+
+  // 切换脚本库后清空脚本勾选,避免残留别的库的文件名。
+  useEffect(() => {
+    setSelectedKeys([]);
+  }, [libId]);
 
   const createLib = async () => {
     const name = newLibName.trim();
@@ -191,6 +205,57 @@ function LibraryTab() {
     }
   };
 
+  const openCopyLib = () => {
+    const cur = libs.find((l) => l.id === libId);
+    setCopyLibName(cur ? `${cur.name}-副本` : "");
+    setCopyLibOpen(true);
+  };
+
+  const submitCopyLib = async () => {
+    if (!libId) return;
+    const name = copyLibName.trim();
+    if (!name) {
+      message.warning("请输入脚本库名称");
+      return;
+    }
+    setCopyingLib(true);
+    try {
+      const l = await api.copyLibrary(libId, { name });
+      message.success(`脚本库「${l.name}」已复制(连带脚本)`);
+      setCopyLibOpen(false);
+      setSelectedKeys([]);
+      await loadLibs();
+      setLibId(l.id);
+    } catch (e) {
+      message.error(errMsg(e));
+    } finally {
+      setCopyingLib(false);
+    }
+  };
+
+  const submitCopyScripts = async () => {
+    if (!libId) return;
+    if (!copyTargetId) {
+      message.warning("请选择目标脚本库");
+      return;
+    }
+    setCopyingScripts(true);
+    try {
+      const r = await api.copyScripts(libId, {
+        targetLibraryId: copyTargetId,
+        fileNames: selectedKeys.map(String),
+      });
+      const target = libs.find((l) => l.id === copyTargetId);
+      message.success(`已复制 ${r.copied} 个脚本到「${target?.name ?? ""}」`);
+      setCopyScriptsOpen(false);
+      setSelectedKeys([]);
+    } catch (e) {
+      message.error(errMsg(e));
+    } finally {
+      setCopyingScripts(false);
+    }
+  };
+
   const downloadHref = (fileName: string) =>
     `/api/libraries/${libId}/scripts/${encodeURIComponent(fileName)}/download`;
 
@@ -248,6 +313,9 @@ function LibraryTab() {
         <Button icon={<PlusOutlined />} onClick={() => setNewLibOpen(true)}>
           新建脚本库
         </Button>
+        <Button icon={<CopyOutlined />} disabled={!libId} onClick={openCopyLib}>
+          复制脚本库
+        </Button>
         <Popconfirm
           title="删除脚本库?"
           description="将连带删除库内全部脚本,不可恢复。"
@@ -268,6 +336,16 @@ function LibraryTab() {
         >
           上传脚本
         </Button>
+        <Button
+          icon={<CopyOutlined />}
+          disabled={!libId || selectedKeys.length === 0}
+          onClick={() => {
+            setCopyTargetId(undefined);
+            setCopyScriptsOpen(true);
+          }}
+        >
+          复制到其他库
+        </Button>
       </Space>
       {libId ? (
         <Table
@@ -277,6 +355,7 @@ function LibraryTab() {
           dataSource={scripts}
           loading={loadingScripts}
           pagination={false}
+          rowSelection={{ selectedRowKeys: selectedKeys, onChange: (keys) => setSelectedKeys(keys) }}
         />
       ) : (
         <Empty description="请选择或新建脚本库" />
@@ -294,6 +373,48 @@ function LibraryTab() {
           value={newLibName}
           onChange={(e) => setNewLibName(e.target.value)}
         />
+      </Modal>
+      <Modal
+        title="复制脚本库"
+        open={copyLibOpen}
+        onCancel={() => setCopyLibOpen(false)}
+        onOk={() => void submitCopyLib()}
+        confirmLoading={copyingLib}
+        okText="复制"
+        cancelText="取消"
+      >
+        <Space direction="vertical" style={{ width: "100%" }} size="middle">
+          <Typography.Text type="secondary">
+            将复制当前脚本库的全部脚本与版本登记信息,生成一个全新脚本库。
+          </Typography.Text>
+          <Input
+            placeholder="新脚本库名称"
+            value={copyLibName}
+            onChange={(e) => setCopyLibName(e.target.value)}
+          />
+        </Space>
+      </Modal>
+      <Modal
+        title="复制脚本到其他库"
+        open={copyScriptsOpen}
+        onCancel={() => setCopyScriptsOpen(false)}
+        onOk={() => void submitCopyScripts()}
+        confirmLoading={copyingScripts}
+        okText="复制"
+        cancelText="取消"
+      >
+        <Space direction="vertical" style={{ width: "100%" }} size="middle">
+          <Typography.Text type="secondary">
+            已选择 {selectedKeys.length} 个脚本;目标库存在同名或同版本不同标题的脚本时,将整批拒绝。
+          </Typography.Text>
+          <Select
+            style={{ width: "100%" }}
+            placeholder="选择目标脚本库"
+            value={copyTargetId}
+            onChange={(v) => setCopyTargetId(v)}
+            options={libs.filter((l) => l.id !== libId).map((l) => ({ value: l.id, label: l.name }))}
+          />
+        </Space>
       </Modal>
       <Modal
         title={`编辑脚本:${editor?.fileName ?? ""}`}

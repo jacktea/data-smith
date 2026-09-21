@@ -502,6 +502,13 @@ export const api = {
     }),
   deleteScript: (libId: string, fileName: string) =>
     request<void>(`/libraries/${enc(libId)}/scripts/${enc(fileName)}`, { method: "DELETE" }),
+  copyLibrary: (id: string, body: { name: string }) =>
+    request<Library>(`/libraries/${enc(id)}/copy`, { method: "POST", body: JSON.stringify(body) }),
+  copyScripts: (libId: string, body: { targetLibraryId: string; fileNames: string[] }) =>
+    request<{ copied: number }>(`/libraries/${enc(libId)}/scripts/copy`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   // 增量版本登记与迁移计划
   registerVersion: (libId: string, body: RegisterVersionInput) =>
