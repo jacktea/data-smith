@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"sort"
 
 	"github.com/jacktea/data-smith/pkg/chunk"
 	"github.com/jacktea/data-smith/pkg/conn"
+	"github.com/jacktea/data-smith/pkg/rowloc"
 )
 
 type DetailedDiffHandler func(diffType DiffType, srcRow, tgtRow conn.Record, diffCols []string)
@@ -423,34 +423,7 @@ func chunkHashColumns(cols []string, rule ICompareRule) []string {
 // NOT NULL 的唯一索引（确定性取名顺序）。无行身份返回 nil。数据比对的
 // 校验与「全部有行身份的表」通配展开共用该判定。
 func RowIdentityColumns(tbl *conn.Table) []string {
-	if tbl == nil {
-		return nil
-	}
-	if tbl.PrimaryKey != nil && len(tbl.PrimaryKey.Columns) > 0 {
-		return tbl.PrimaryKey.Columns
-	}
-	// 回退查找非空唯一索引
-	indexNames := make([]string, 0, len(tbl.Indexes))
-	for name := range tbl.Indexes {
-		indexNames = append(indexNames, name)
-	}
-	sort.Strings(indexNames)
-	for _, name := range indexNames {
-		idx := tbl.Indexes[name]
-		if idx != nil && idx.Unique && len(idx.Columns) > 0 && idx.Where == nil && idx.Expression == nil {
-			allNotNull := true
-			for _, colName := range idx.Columns {
-				if c := tbl.Columns[colName]; c == nil || c.Nullable {
-					allNotNull = false
-					break
-				}
-			}
-			if allNotNull {
-				return idx.Columns
-			}
-		}
-	}
-	return nil
+	return rowloc.IdentityColumns(tbl)
 }
 
 // rowIdentityColumns 解析数据比对的行身份：物理身份（主键 → 非空唯一索引）

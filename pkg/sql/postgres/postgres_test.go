@@ -192,3 +192,25 @@ func TestPostgreDialect_NoPrimaryKeyDataSQL(t *testing.T) {
 		t.Fatalf("update without primary key should be a no-op, got: %s", got)
 	}
 }
+
+func TestPostgreDialect_UniqueRowIdentityDataSQL(t *testing.T) {
+	dialect := NewPostgreDialect()
+	table := &conn.Table{
+		Name: "items", Schema: "custom",
+		Columns: map[string]*conn.Column{
+			"tenant": {Name: "tenant", DataType: "text", Nullable: false},
+			"code":   {Name: "code", DataType: "text", Nullable: false},
+			"note":   {Name: "note", DataType: "text", Nullable: true},
+		},
+		Indexes: map[string]*conn.Index{
+			"uq_items": {Name: "uq_items", Unique: true, Columns: []string{"tenant", "code"}},
+		},
+	}
+	row := conn.Record{"tenant": "acme", "code": "A", "note": "new"}
+	if got, want := dialect.GenerateDeleteSql(table, row), `DELETE FROM "custom"."items" WHERE "tenant" = 'acme' AND "code" = 'A';`; got != want {
+		t.Fatalf("delete by unique identity\ngot:  %s\nwant: %s", got, want)
+	}
+	if got, want := dialect.GenerateUpdateSql(table, row, []string{"note"}), `UPDATE "custom"."items" SET "note" = 'new' WHERE "tenant" = 'acme' AND "code" = 'A';`; got != want {
+		t.Fatalf("update by unique identity\ngot:  %s\nwant: %s", got, want)
+	}
+}

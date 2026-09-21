@@ -13,9 +13,9 @@
 **结构 0 语句、数据 0 DML**；账本 88/88 success；88 对产物已登记 airedge 脚本库。
 全程 0 外部脚本加工、0 psql 回退、0 `--best-effort` / `--skip-missing-tables`。
 
-同时如实记录：本轮闭环 diff 计数出现一处**良性的「修改 1 张表」报告口径问题**，并
-新发现 **3 项能力缺口**（CHECK 约束、视图注释、报告口径），已回填计划文档
-（C11/C12/C13，待下一批实施，均不阻断链收敛）。
+原回归批发现的 CHECK 约束、视图注释和「修改 1 张表」口径（C11/C12/C13）
+已在收尾批全部修复并以双库 fixture、airedge 终态闭环和回退往返复核：当前结果为
+**新增 0 / 删除 0 / 修改 0**，产物为空。本文以下只保留修复后的当前结论。
 
 ## 二、验收标准逐项结果
 
@@ -23,7 +23,7 @@
 |---|---|
 | 1. reset-db 重建三个一次性库 | ✅ src/tgt `reset-db --dry-run` 审阅后 `--yes`（`DROP SCHEMA public CASCADE`），verify 新建空库 |
 | 2. 每轮 exec-sql → diff-full → migrate-script | ✅ 88/88 轮零失败，12 分钟跑完 |
-| 3a. 末轮 diff 为空 | ✅ 结构 0 语句、数据 0 DML（残留差异见「四」，均不生成 SQL） |
+| 3a. 末轮 diff 为空 | ✅ 收尾复核为新增 0 / 删除 0 / 修改 0，结构 0 语句、数据 0 DML |
 | 3b. verify 从零 migrate-script 全链应用后与 target diff 为空 | ✅ 88/88 success，结构 0 语句、数据 0 DML（194 表参与比对） |
 | 3c. 回退冒烟（最近版本往返） | ✅ V3.7.0.35 down 回退（账本 `rolled_back`）→ 再推进（`success`）→ 复跑闭环仍为空 |
 | 4. 产物登记脚本库 + store.json | ✅ 88 对 176 文件（40MB）入 `lib_8989e9f44806929e`，store.json 88 条版本元数据一致（见「六」） |
@@ -49,28 +49,13 @@
 经该路径回放成功：**零拒绝、零错拆**，任一失败会带「第 i/N 条语句 + 行列 +
 预览」定位，实际未触发。C10 风险正式关闭。
 
-## 四、闭环的残留差异与「修改 1 张表」口径说明
+## 四、闭环残差收尾结论
 
-末轮/verify/复原三轮闭环的 diff 产物均为空（结构 0 语句、数据 0 DML），但
-diff-schema 汇总行报「修改 1 张表」——为 `air_inst_checklist_item`：其主键背书
-索引名两侧不同（source `air_inst_checklist_item_pkey`，target
-`air_inst_checklist_item_rev_copy1_pkey`，原脚本系整表复制建出）。`equalIndex`
-按名称判异 → 计入 TablesModified；而按 F1 语义主键背书索引随 PrimaryKeyChange
-生命周期、主键列相同 → 不生成语句。**语义无害，属报告口径问题**（C13）。
-
-catalog 级复核发现的真实残留差异（引擎不建模、因此产物为空，**不阻断收敛**）：
-
-1. **CHECK 约束不参与比对（C11）**：target 侧 `air_inst_bug`、
-   `air_inst_testconfig` 各有 `delete_flag` CHECK 约束（原脚本内联创建），
-   source/verify 侧缺失。引擎未建模 CHECK，比对与生成均不覆盖。
-2. **视图注释不参与比对（C12）**：4 个视图
-   （`air_inst_draw_tab_whereused`、`air_inst_view_part_tab_drawusd`、
-   `air_inst_view_requiremnt_tab_subrequirement`、
-   `air_inst_view_testset_tab_subtestset`）在 target 有 COMMENT（原脚本
-   `COMMENT ON VIEW`），source/verify 缺失；`compareTable` 对视图按定义短路，
-   不比注释，生成层亦无 `COMMENT ON VIEW`。
-3. **列序差异（固有，不立项）**：`air_inst_risk_rev` 等 source 侧 ALTER 追加列
-   位于表尾、target 侧位于原位；PG 无法 ALTER 调序，功能等价，不处理。
+C11/C12/C13 收尾批已让 CHECK 约束和视图注释进入比对/生成，并忽略生命周期
+跟随主键约束的背书索引名称差异。airedge 第 1 轮检出 3 条 CHECK 与 4 个视图
+注释，执行 7 条语句后第 2 轮为**新增 0 / 删除 0 / 修改 0**；down 后残差重现，
+再次推进后复归 0/0/0，重新生成的 up/down 逐字节一致。仍不处理 PostgreSQL
+无法 ALTER 调序的列序差异；它不进入结构语义比较。
 
 ## 五、逐版本产物摘要（88 对）
 
@@ -233,8 +218,9 @@ V3_0_1 → V3_2_0_99 → 0_1/0_2/0_4 → 0_5 → V3_1_0_1（0_3 随 0_1 重写�
    结构变更轮回退完整，但含数据清理的轮次不保证）。
 2. **多轮链只能逐版本回退**：down 把库还原到「上一版本 applied 后的状态」，
    依赖后续版本补偿性变更的情形（A 轮改名、B 轮再改名）需按链序整段回退。
-3. **不建模对象不回退**：CHECK 约束、视图注释（本轮 C11/C12 所列）从未进产物，
-   回退自然不覆盖。
+3. **未建模对象不回退**：trigger、分区、generated/identity column、用户定义
+   类型等未声明支持的对象不进入产物，回退自然不覆盖；CHECK 与视图注释现已
+   建模并有正反向测试。
 4. **列序与重命名类差异**：ADD COLUMN 追加在表尾，回退再推进后列序可能与原库
    不同；`equalIndex` 忽略主键背书索引名，回退不会恢复原索引命名。
 5. **语义时钟类对象**：序列当前值、`pg_get_functiondef` 重建的函数属性以产物
@@ -248,21 +234,33 @@ V3_0_1 → V3_2_0_99 → 0_1/0_2/0_4 → 0_5 → V3_1_0_1（0_3 随 0_1 重写�
 - `store.json`：`versions` 重写为 88 条 `{expectedConnectionId: conn_4c67f13084395838}`
   （沿用原登记的预期连接，同方言守卫仅告警、异方言硬拒）。
 - 清理：原手工样例 `V3.7.0__update.*`（与链版本 3.7.0 冲突，已由链产物
-  `V3.7.0__upgradesql.*` 取代）；已知孤儿条目 `3.7.1`（C8 自检语义，无文件即清理）。
+  `V3.7.0__upgradesql.*` 取代）；已知孤儿条目 `3.7.1`。C8 当前以 up 可执行
+  入口为版本元数据生命周期：无 up 即清理，down 不单独维持登记。
 - 一致性复核：88 版本 up+down 齐全、无孤儿元数据、无未登记文件、无不合规文件名；
   Web 启动 `SweepOrphanVersionMeta` 幂等。
 
 ## 十、遗留与下一批
 
 - **C11** CHECK 约束建模、**C12** 视图注释比对、**C13** TablesModified 口径
-  ——✅ **已完成（收尾批，2026-09-20）**，实现与验收见计划文档各条目
+  均已完成（收尾批，2026-09-20），实现与验收见计划文档各条目
   「完成情况」及「九」。 airedge 终态双库闭环已复核为「新增 0 / 删除 0 /
   修改 0」且产物为空；本报告「四」所列残差（3 条 CHECK——含抽查未列的
   `air_inst_testset`、4 个视图注释）已全部对齐，「八·3」回退限制中
   「不建模对象不回退」一项相应消解。
-- ~~`--data-diff-mode` 与影子机制仍仅 CLI 暴露，Web 走引擎默认 auto（自动受益，
-  无独立开关）~~ ✅ **已完成（2026-09-20）**：Web 完全比对页新增数据比对模式
-  独立开关（auto/shadow/direct，默认 auto），引擎语义零重写，验收见计划
-  文档「十」。
+- Web 完全比对页已提供 auto/shadow/direct 开关。阶段 4 后任务参数保留
+  requested mode，任务 API 摘要、`summary.json` 和日志同时记录 requested 与
+  effective（shadow/direct），不再把 auto 误称为生效模式。
 - 8 个 Java 迁移缺口如需闭合，按「七」建议顺序以 PL/pgSQL 等效重写后，
   以 `exec-sql` 补入链轮并重跑闭环。
+
+## 十一、阶段 4 一致性回归（2026-09-21）
+
+- C8：删 up 留 down、删 down 留 up、删除最后脚本、隐式 up、目录扫描失败、
+  `DeleteVersionMeta` 失败与重复清理均由 server 回归测试覆盖。
+- 模式记录：auto→shadow、auto→direct、显式 shadow/direct 的任务参数、API 摘要、
+  `summary.json` 与日志一致。
+- 行定位：主键、普通非空唯一索引和无可靠身份三类策略在 MySQL/PostgreSQL
+  等价测试中通过；反引号/双引号和值渲染仍保持方言差异。
+- 完整 gate 通过，覆盖率 overall 74.9%（6090/8128），db/diff/sql/migrate/exec
+  分别为 78.9%/78.5%/76.3%/75.9%/89.1%；双库集成测试使用 MySQL 8.4.3 与
+  PostgreSQL 17.2。

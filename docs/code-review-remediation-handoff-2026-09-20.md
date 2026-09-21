@@ -11,11 +11,13 @@
 - 阶段 1（O1、O2、O3、S2）已于 2026-09-20 完成，起始提交为 `0742d0efdd671251047feb0d50dcf9c1ce755705`。
 - 阶段 2（SP1、SP2、S3、S4）已于 2026-09-20 完成，实际起始提交为 `6e09e2a33556f0b2419de1926c7275b7a9b73165`，起始工作树干净。
 - 阶段 3（S1、S5、SP3、SP4）已于 2026-09-21 从 `accf91b` 开始完成，起始工作树干净。
+- 阶段 4（S6、SP5、SP6、SP7、S7）已于 2026-09-21 从 `b1b6555` 开始完成，起始工作树干净。
 - 完整门禁已通过：gofmt、单测、race、vet、staticcheck v0.8.1、govulncheck v1.1.4、前端/Go 构建、MySQL/PostgreSQL 双库集成测试和覆盖率 gate。
 - 阶段 2 覆盖率：overall 74.4%（5768/7754）、db 78.9%、diff 78.6%、sql 74.4%、migrate 75.9%、exec 89.1%。
 - 阶段 3 覆盖率：overall 74.9%（6074/8108）、db 78.9%（674/854）、diff 78.6%（1773/2257）、sql 76.9%（1268/1648）、migrate 75.9%（480/632）、exec 89.1%（376/422）。
+- 阶段 4 覆盖率：overall 74.9%（6090/8128）、db 78.9%（674/854）、diff 78.5%（1767/2251）、sql 76.3%（1236/1620）、migrate 75.9%（480/632）、exec 89.1%（376/422）。
 - Web 远程认证/授权/Origin/CSRF 仍是需要产品决策的独立设计项；当前默认仅监听 loopback，显式非 loopback 会清晰告警。
-- 下一阶段：阶段 4（S6、SP5、SP6、SP7、S7）；阶段 3 未提前处理这些事项。
+- 评审整改阶段 1–4 已完成；远程 Web 认证设计和未建模数据库对象仍不在本轮范围。
 
 ## 开始前
 
@@ -112,10 +114,10 @@
 - 统一对象依赖 DAG 的节点为类型 + schema + identity + 操作步骤，边统一为 dependent → prerequisite；创建正拓扑、删除逆拓扑，稳定键保证重复生成字节一致。原 view 依赖闭包已接入该 Module，不再使用 view 专用排序阶段。
 - SQL/PLpgSQL 静态依赖发现覆盖复合返回表类型、表引用和 routine 调用；table 默认值、view→routine/table、sequence ownership 与外键附着/解除均进入图。动态 SQL `EXECUTE`、非 SQL/PLpgSQL 语言、重载歧义和依赖环失败关闭并输出对象链。
 - 单元测试覆盖 ownership 正反向、函数返回新增表、routine→routine、view→routine/table、删除逆序、外键解除、环与不可可靠提取；真实 PostgreSQL 测试执行 forward 后结构 diff 为空，rollback 后恢复结构、SERIAL ownership 与 `OWNED BY NONE`。
-- 未扩展 trigger、分区、generated column、identity 或用户定义类型；阶段 4 保持未开始。
+- 未扩展 trigger、分区、generated column、identity 或用户定义类型；阶段 4 见下节。
 - 完整门禁通过：gofmt、相关最小测试、`go test ./...`、race、vet、staticcheck v0.8.1、govulncheck v1.1.4、`pnpm --dir web build`、MySQL/PostgreSQL 双库集成测试和覆盖率 gate。覆盖率为 overall 74.9%（6074/8108）、db 78.9%（674/854）、diff 78.6%（1773/2257）、sql 76.9%（1268/1648）、migrate 75.9%（480/632）、exec 89.1%（376/422）。
 
-## 阶段 4：元数据与文档一致性
+## 阶段 4：元数据与文档一致性（已完成 2026-09-21）
 
 范围：报告中的 S6、SP5、SP6、SP7、S7。
 
@@ -126,6 +128,22 @@
 5. 在行为稳定后提取共享行定位策略，保持方言引用和 SQL 文本差异在 dialect 层。
 
 阶段完成标准：文档、API 响应、任务日志和实际行为对同一场景给出一致结论。
+
+完成记录：
+
+- C8 以 up（含隐式 up）为 `LibraryMeta.Versions` 生命周期依据；删 up 留 down
+  清理，删 down 留 up 保留，无 up 的重复清理幂等。
+- 删除接口、全库 sweep 与启动自检不再吞目录扫描或元数据持久化错误；HTTP
+  以非 2xx 明确报告“脚本已删除、元数据清理失败”。
+- `DataDiffModeSelection` 同时保存 requested/effective；任务参数、API 摘要、
+  `summary.json` 与日志一致，覆盖 auto→shadow/direct 与两个显式模式。
+- `pkg/rowloc` 统一物理行身份选择与方言无关定位信息；引用、值渲染和最终 SQL
+  留在 MySQL/PostgreSQL dialect，主键/唯一身份/无身份文本均由等价测试固定。
+- README、CONTEXT、能力计划、回归报告和评审报告已统一为当前实现；未扩展远程
+  Web 认证、trigger、分区、generated column、identity 或用户定义类型。
+- 相关最小测试、gofmt、全量单测、race、vet、staticcheck v0.8.1、
+  govulncheck v1.1.4、前端构建、MySQL 8.4.3/PostgreSQL 17.2 双库集成测试与
+  覆盖率 gate 全部通过；覆盖率见“当前进度”。
 
 ## 每阶段验证
 
@@ -145,16 +163,8 @@ pnpm --dir web build
 
 修改 Web 前端或 embed 产物时，使用仓库既有构建脚本保持 `internal/server/webfs/dist` 与源码同步。
 
-## 新 Session 启动提示词
+## 后续范围
 
-复制下面内容到新的 Codex session：
-
-```text
-请在当前 data-smith 仓库继续修复 2026-09-20 代码评审问题。
-
-先完整阅读 AGENTS.md、CONTEXT.md、docs/code-review-2026-09-20.md 和 docs/code-review-remediation-handoff-2026-09-20.md。确认当前 commit 和工作树状态，不要覆盖用户已有改动。
-
-使用 $codebase-design 先确定统一对象依赖 DAG 接口，再使用 $tdd 执行交接文档的“阶段 3：PostgreSQL 非表对象闭环”。每个缺陷先写能失败的回归测试，再做最小修复；维持 AGENTS.md 的所有数据库操作安全红线。不要顺带扩展 trigger、分区、generated column 等新对象能力。
-
-阶段 3 全部完成后运行相关测试、go test、race、vet、staticcheck、govulncheck、双库集成测试、覆盖率 gate 和前端构建。更新评审/交接文档中的状态，并汇报修改文件、关键设计决定、验证结果和尚未完成的后续阶段。持续推进，不要只停在分析。
-```
+代码评审阶段 1–4 已全部闭环。后续若继续，应另行立项 8 个 Java 迁移效果缺口
+或远程 Web 认证设计；trigger、分区、generated/identity column、用户定义类型等
+数据库对象扩展也不属于本轮整改。

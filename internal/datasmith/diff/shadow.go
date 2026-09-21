@@ -32,6 +32,14 @@ const (
 	DataDiffModeDirect = "direct"
 )
 
+// DataDiffModeSelection keeps the caller's requested mode separate from the
+// mode actually selected after schema diff. Requested may be auto; Effective
+// is always shadow or direct.
+type DataDiffModeSelection struct {
+	Requested string `json:"requested"`
+	Effective string `json:"effective"`
+}
+
 // ValidateDataDiffMode 校验 --data-diff-mode 取值；空串视为默认 auto
 // （编程调用可省略该字段）。
 func ValidateDataDiffMode(mode string) error {
@@ -49,7 +57,7 @@ func IsValidDataDiffMode(mode string) bool {
 }
 
 // NormalizeDataDiffMode 把空串归一为引擎默认 auto，供调用方持久化与展示
-// 生效模式；其余值原样返回。
+// 请求模式；最终生效模式由 resolveDataDiffMode 在结构比对后决定。
 func NormalizeDataDiffMode(mode string) string {
 	if mode == "" {
 		return DataDiffModeAuto
@@ -61,18 +69,32 @@ func NormalizeDataDiffMode(mode string) string {
 // source 为 PostgreSQL 且结构 forward 非空时启用。影子事务依赖事务性 DDL，
 // 强制 shadow 而 source 非 PostgreSQL 属配置错误——MySQL 的 DDL 会隐式提交，
 // 事务内应用会直接污染 source 库。
-func decideShadowDataDiff(mode string, sourceType consts.DBType, forwardStatements []string) (bool, error) {
-	switch mode {
+func resolveDataDiffMode(mode string, sourceType consts.DBType, forwardStatements []string) (DataDiffModeSelection, bool, error) {
+	requested := NormalizeDataDiffMode(mode)
+	selection := DataDiffModeSelection{Requested: requested}
+	switch requested {
 	case DataDiffModeShadow:
 		if sourceType != consts.DBTypePostgres {
-			return false, fmt.Errorf("data-diff-mode=shadow requires a PostgreSQL source (MySQL DDL auto-commits and cannot run inside the shadow transaction)")
+			return DataDiffModeSelection{}, false, fmt.Errorf("data-diff-mode=shadow requires a PostgreSQL source (MySQL DDL auto-commits and cannot run inside the shadow transaction)")
 		}
-		return true, nil
+		selection.Effective = DataDiffModeShadow
+		return selection, true, nil
 	case DataDiffModeDirect:
-		return false, nil
+		selection.Effective = DataDiffModeDirect
+		return selection, false, nil
 	default:
-		return sourceType == consts.DBTypePostgres && len(forwardStatements) > 0, nil
+		shadow := sourceType == consts.DBTypePostgres && len(forwardStatements) > 0
+		selection.Effective = DataDiffModeDirect
+		if shadow {
+			selection.Effective = DataDiffModeShadow
+		}
+		return selection, shadow, nil
 	}
+}
+
+func decideShadowDataDiff(mode string, sourceType consts.DBType, forwardStatements []string) (bool, error) {
+	_, shadow, err := resolveDataDiffMode(mode, sourceType, forwardStatements)
+	return shadow, err
 }
 
 // sessionBinder 由 base 驱动适配器实现，影子事务借它把行读取收敛到事务会话。

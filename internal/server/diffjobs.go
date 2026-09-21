@@ -355,18 +355,18 @@ func (s *Server) handleDiffFullSubmit(w http.ResponseWriter, r *http.Request) {
 	dataDiffMode := difflogic.NormalizeDataDiffMode(req.DataDiffMode)
 
 	params := map[string]any{
-		"sourceId":      source.ID,
-		"targetId":      target.ID,
-		"includeTables": req.IncludeTables,
-		"excludeTables": req.ExcludeTables,
-		"schemeId":      req.SchemeID,
-		"tables":        tables,
-		"batchSize":     batchSize,
-		"chunkSize":     chunkSize,
-		"dmlBatchSize":  dmlBatchSize,
-		"chunkHash":     req.ChunkHash,
-		"bestEffort":    req.BestEffort,
-		"dataDiffMode":  dataDiffMode,
+		"sourceId":              source.ID,
+		"targetId":              target.ID,
+		"includeTables":         req.IncludeTables,
+		"excludeTables":         req.ExcludeTables,
+		"schemeId":              req.SchemeID,
+		"tables":                tables,
+		"batchSize":             batchSize,
+		"chunkSize":             chunkSize,
+		"dmlBatchSize":          dmlBatchSize,
+		"chunkHash":             req.ChunkHash,
+		"bestEffort":            req.BestEffort,
+		"requestedDataDiffMode": dataDiffMode,
 	}
 	if req.Register != nil {
 		params["register"] = map[string]any{
@@ -406,10 +406,10 @@ func (s *Server) runDiffFull(ctx context.Context, job *Job, sourceID, targetID s
 		return errBad("请选择数据表或比对方案")
 	}
 	job.SetProgressTotal(len(rules))
-	job.Logf("开始完全比对: source=%s(%s) target=%s(%s), 结构范围 %d 张表, 数据 %d 张表, 数据比对模式 %s",
+	job.Logf("开始完全比对: source=%s(%s) target=%s(%s), 结构范围 %d 张表, 数据 %d 张表, requested data diff mode=%s",
 		source.Name, source.ID, target.Name, target.ID, len(includeTables)+len(excludeTables), len(rules), dataDiffMode)
 
-	result, err := difflogic.RunFullDiff(ctx, difflogic.FullDiffParams{
+	result, err := s.runFullDiffEngine(ctx, difflogic.FullDiffParams{
 		Source:        source.ConnConfig(),
 		Target:        target.ConnConfig(),
 		IncludeTables: includeTables,
@@ -443,6 +443,7 @@ func (s *Server) runDiffFull(ctx context.Context, job *Job, sourceID, targetID s
 		"tables":        result.Data.Tables,
 		"skippedTables": result.SkippedTables,
 		"files":         files,
+		"dataDiffMode":  result.DataDiffMode,
 	}
 	job.Summary(summary)
 	job.Logf("完全比对完成: complete=%v", result.Data.Complete)
@@ -461,6 +462,7 @@ func (s *Server) runDiffFull(ctx context.Context, job *Job, sourceID, targetID s
 			"registeredVersion": version,
 			"upFile":            upFile,
 			"downFile":          downFile,
+			"dataDiffMode":      result.DataDiffMode,
 		})
 		job.Logf("已登记为迁移版本 %s (%s, %s)", version, upFile, downFile)
 	}

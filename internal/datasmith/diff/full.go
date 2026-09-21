@@ -34,9 +34,10 @@ type FullDiffParams struct {
 // SkippedTables lists explicit source-only data rules skipped because schema
 // DROP fully covers them. Target-only rules always participate in data diff.
 type FullDiffResult struct {
-	Schema        SchemaDiffSummary `json:"schema"`
-	Data          DataDiffResult    `json:"data"`
-	SkippedTables []string          `json:"skippedTables"`
+	Schema        SchemaDiffSummary     `json:"schema"`
+	Data          DataDiffResult        `json:"data"`
+	SkippedTables []string              `json:"skippedTables"`
+	DataDiffMode  DataDiffModeSelection `json:"dataDiffMode"`
 }
 
 // FullDiffFileNames lists the artifact names produced by RunFullDiff.
@@ -121,10 +122,12 @@ func RunFullDiff(ctx context.Context, params FullDiffParams, dir string, progres
 	}
 	result.Schema = phase.summary
 
-	shadow, err := decideShadowDataDiff(params.DataDiffMode, params.Source.Type, phase.forward)
+	modeSelection, shadow, err := resolveDataDiffMode(params.DataDiffMode, params.Source.Type, phase.forward)
 	if err != nil {
 		return FullDiffResult{}, err
 	}
+	result.DataDiffMode = modeSelection
+	report(fmt.Sprintf("数据比对模式: requested=%s effective=%s", modeSelection.Requested, modeSelection.Effective))
 	if len(phase.forward) > 0 && !shadow {
 		report("数据比对模式: direct — 数据差异跑在未对齐结构上(仅公共列/主键列集容错); 影子两阶段仅支持 PostgreSQL source")
 	}

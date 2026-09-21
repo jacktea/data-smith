@@ -3,8 +3,8 @@
 > 背景：以「把 airedge 的 88 个 Flyway 迁移脚本改造为 datasmith 迁移链」作为能力探针，
 > 逐版本回放原脚本到演练库 target，用 datasmith 的 diff-schema / diff-data / exec-sql /
 > migrate-script 生成并应用 up/down 对。本文记录实测暴露的工具缺陷、已完成的修复、
-> 待补齐的 feature 与实施顺序。**能力补齐（第 1–3 批）与回归批均已完成，
-> 遗留项滚动至「八」。**
+> 当前能力与实施顺序。**能力补齐（第 1–3 批）、回归批、C11–C13 收尾和
+> 代码评审阶段 4 均已完成；当前只保留明确缓置的 Java 迁移缺口。**
 >
 > 实测窗口：2026-09-20。环境：本机 Docker PG 14.22，一次性库
 > `airedge_mig_src`（落后一版）/ `airedge_mig_tgt`（领先一版）。
@@ -212,16 +212,13 @@
 - `internal/server/libraries.go` `handleDeleteScript` 删文件不清理
   `LibraryMeta.Versions`（现网 store.json 已有 3.7.1 孤儿条目）。
 - **方案**：删除 up 文件时同步清理版本元数据；提供 store 一致性自检命令。
-- **完成情况（第 3 批）**：①`handleDeleteScript` 删除脚本后经
-  `removeVersionMetaIfOrphan` 检查：该版本已无任何脚本文件（up/down 均无）
-  时同步删除版本登记（`Store.DeleteVersionMeta`，幂等清理语义，不重写
-  任何安全逻辑）；②`SweepOrphanVersionMeta` 一致性自检：扫描各脚本库
-  目录，清理「已无对应脚本文件」的孤儿版本登记并返回清单，
-  `server.New` 启动时自动执行一次并以 `logger.Warn` 告警——现网
-  store.json 的 3.7.1 孤儿条目在下次启动 Web 控制台时即被修复。
-  单测：`TestDeleteScriptCleansOrphanVersionMeta`、
-  `TestSweepOrphanVersionMetaRemovesEntriesWithoutScripts`、
-  `TestServerNewRunsOrphanVersionSweep`。
+- **完成情况（阶段 4 最终口径）**：up（含省略方向、解析为 up 的旧式文件）
+  是版本可执行入口，也是 `LibraryMeta.Versions` 生命周期依据。删除 up 时即使
+  down 仍保留也清理登记；只删 down 且 up 仍在则保留；无 up 时重复清理幂等。
+  `handleDeleteScript` 的目录扫描与 `DeleteVersionMeta` 错误向 HTTP 传播，并以
+  非 2xx 明确表示“脚本已删除、元数据清理失败”；`SweepOrphanVersionMeta`
+  返回 `(removed, error)`，启动扫描失败由 `server.New` 返回。测试覆盖删 up 留
+  down、删 down 留 up、删除最后脚本、隐式 up、扫描失败、持久化失败与重复清理。
 
 ### C9【P3·可选】exec-sql 失败定位增强
 
@@ -342,6 +339,7 @@
 | 第 3 批 | C4a；C7；C8；C9 | ✅ 完成（2026-09-20）。无键表按 comparisonKey 业务键可比（物理身份基线不变）；迁移文件名跳过清单 CLI/Web 告警；Web 删除脚本同步清理版本登记 + 启动 store 自检；exec-sql 事务模式逐条执行并定位失败语句（整文件原子语义不变） |
 | 回归 | C10 + 全链重跑（88 轮） | ✅ 完成（2026-09-20）。闭环 diff 产物为空；verify 从零 migrate-script 全链应用成功；回退冒烟通过；88 对产物登记脚本库。详见 `docs/migration-chain-regression-report.md` |
 | 收尾 | C11；C12；C13 | ✅ 完成（2026-09-20）。CHECK 约束/视图注释进入比对与产物（双库 fixture 集成用例验证闭环与回滚对称）；主键背书索引不再计入表修改，airedge 终态闭环「新增 0 / 删除 0 / 修改 0」。见「九」 |
+| 评审阶段 4 | S6；SP5；SP6；SP7；S7 | ✅ 完成（2026-09-21）。C8 生命周期与错误传播统一；任务记录 requested/effective mode；文档状态消歧；共享行定位策略落入 `pkg/rowloc` |
 
 ## 五、回归计划（能力补齐后的重跑）
 
@@ -374,9 +372,8 @@
 - 第 1 批演练工作区 `/tmp/ds-acceptance/` 保留作对照；第 2 批迁移脚本库在
   `/tmp/ds-acceptance-batch2/migrations/`（88 对 up/down，40MB，尚未登记
   脚本库，留回归批）。
-- **未竟事项（如实）**：airedge 有 8 个 Java 迁移无法 SQL 回放，效果缺口
-  报告留回归批；`--data-diff-mode` 与影子机制当前仅 CLI，Web 完全比对走
-  引擎默认 auto（行为自动受益），无独立开关。
+- **当前遗留**：airedge 的 8 个 Java 迁移效果缺口仍缓置；Web 已有
+  auto/shadow/direct 开关，任务现分别记录 requested/effective mode。
 - **下一批（第 3 批）**：C4a（无键表按配置可比）+ C7（迁移文件名静默跳过
   告警）+ C8（Web 删除脚本孤儿版本清理）+ C9（exec-sql 失败定位增强）；
   随后回归批：全链重跑 + verify 库 migrate-script 全链应用 + 回退冒烟 +
@@ -396,8 +393,8 @@
   文本预览——回归批的 88 轮 `exec-sql --tx` 回放将首次走该路径，等于
   对 scanner 语句边界做一次全链验证（39 轮影子对齐已按同粒度逐条应用过
   生成的 forward）。
-- 未竟事项不变：8 个 Java 迁移效果缺口报告留回归批；88 对 up/down 迁移
-  脚本库登记留回归批；`--data-diff-mode` 与影子机制仍仅 CLI 暴露。
+- 当前仅余 8 个 Java 迁移效果缺口；88 对 up/down 已登记脚本库，Web 已有
+  data diff mode 开关并分别记录 requested/effective mode。
 - **下一批（回归批）**：全链重跑（88 轮 exec-sql 回放 → diff-full 单命令
   → migrate-script 推进）+ verify 库从零全链应用 + 最近版本回退冒烟 +
   产物登记 `datasmith-web-data/libraries/lib_8989e9f44806929e/` 并同步
@@ -421,16 +418,12 @@
 - **登记**：88 对 176 文件（40MB）入 `lib_8989e9f44806929e`，store.json 88 条
   版本元数据（expectedConnectionId 沿用），清理旧样例 `V3.7.0__update.*` 与
   孤儿条目 `3.7.1`，一致性复核通过。
-- **新发现（已列 C11/C12/C13，均不阻断收敛，留下一批）**：CHECK 约束不参与
-  比对（target 侧 2 条 delete_flag 检查链上缺失）、视图注释不参与比对
-  （4 个视图 COMMENT 缺失）、TablesModified 计数含零语句差异表（闭环报
-  「修改 1 张表」而产物为空，`air_inst_checklist_item` 主键背书索引名）。
+- **C11/C12/C13 当前结论**：CHECK 约束与视图注释已进入比对/产物，主键背书
+  索引名称差异不再计入 TablesModified；airedge 收尾复核为 0/0/0 且产物为空。
 - **Java 迁移缺口**：8 个跳过；V3_0_1（链断级）与 V3_2_0_99（登录不可用）
   为最高优先，全部原则上可 PL/pgSQL 等效重写，建议顺序与影响分级见报告「七」。
-- **未竟事项（如实）**：C11/C12/C13 未实施；`--data-diff-mode` 与影子机制仍仅
-  CLI 暴露；Java 缺口未闭合。
-- **下一批建议**：C11 → C12 → C13（各带单测 + 集成用例），随后可选重跑一次
-  闭环验证「修改 0 张表」；如需闭合 Java 缺口，按报告「七」顺序 PL/pgSQL 重写。
+- **未竟事项（如实）**：仅 8 个 Java 迁移缺口仍缓置；如需闭合，按报告
+  「七」顺序以 PL/pgSQL 等效重写并重跑闭环。
 
 ## 九、当前状态（C11/C12/C13 收尾批完成后，2026-09-20）
 
@@ -457,21 +450,20 @@
   4 视图注释补齐），原残差不再存在；`airedge_mig_verify` 未动。
 - **未竟事项（如实）**：8 个 Java 迁移缺口仍缓置（其中 V3_2_0_99 涉及配置数据
   与 DDL、V3_0_1 含 2 条列默认值 ALTER，链产物与真实 Flyway 升级库在这几处
-  不一致，见「八」「七」）；`--data-diff-mode` 与影子机制仍仅 CLI 暴露，Web 无
-  独立开关。
+  不一致，见「八」「七」）。Web 已有模式开关并记录 requested/effective。
 - **下一批建议**：如闭合 Java 缺口，按报告「七」顺序（V3_0_1 → V3_2_0_99 →
   0_1/0_2/0_4 → 0_5 → V3_1_0_1）以 PL/pgSQL 等效重写后经 `exec-sql` 补链并
   重跑闭环；否则迁移链能力线已收口。
 
 ## 十、当前状态（Web 数据比对模式开关完成后，2026-09-20）
 
-**「--data-diff-mode 与影子机制仅 CLI 暴露」的遗留项已闭合**，Web 控制台
-完全比对具备独立开关，引擎语义零重写：
+Web 控制台完全比对具备独立 data diff mode 开关，引擎语义零重写：
 
 - **Server**（`internal/server/diffjobs.go`）：diff-full 任务请求新增
   `dataDiffMode` 字段，经引擎 `IsValidDataDiffMode` 提交期校验（非法值 400）、
-  `NormalizeDataDiffMode` 归一（空串 → auto），透传 `FullDiffParams`；生效
-  模式记入任务参数并写进任务日志（「开始完全比对: … 数据比对模式 X」）。
+  `NormalizeDataDiffMode` 归一（空串 → auto），透传 `FullDiffParams`。任务参数
+  保存 `requestedDataDiffMode`；引擎用 `DataDiffModeSelection` 决策后，任务 API
+  摘要、`summary.json` 和日志统一记录 requested 与 effective（shadow/direct）。
   diff-data 任务不涉及影子机制，不设开关（与 CLI 一致）。
 - **前端**（`web/src/pages/DiffFull.tsx`）：高级参数区新增「数据比对模式」
   单选（自动(推荐) / 强制影子事务 / 直接比对），每个选项带行为说明（含
@@ -480,7 +472,9 @@
 - **引擎**（`internal/datasmith/diff/shadow.go`）：新增附加 helper
   `IsValidDataDiffMode` / `NormalizeDataDiffMode`，校验与决策逻辑不变。
 - **验收**：①单测 `TestDiffFullSubmitValidatesDataDiffMode`（非法值 400；
-  shadow/direct/缺省三形态的参数归一与日志可见）；②API 驱动的 Web E2E
+  shadow/direct/缺省三形态的参数归一与日志可见）及
+  `TestDiffFullTaskModeIsConsistentAcrossAPIArtifactAndLog`（auto→shadow/direct、
+  显式 shadow/direct 的 API/摘要/日志一致）；②API 驱动的 Web E2E
   `TestWebFullDiffDataDiffMode`（真实双库 fixture + 内嵌 server）：PG
   auto/shadow 走影子两阶段、PG direct 走直接比对并告警、MySQL auto 回退
   直接比对、MySQL 强制 shadow 执行期被引擎拒绝——五形态全部通过。另实测
@@ -489,3 +483,17 @@
 - 全部 CI gate 通过；覆盖率 overall 73.7%（各组 ≥ 70%）。
 - **未竟事项（如实）**：仅剩 8 个 Java 迁移缺口（用户缓置，闭合方案见
   报告「七」）。
+
+## 十一、当前状态（代码评审阶段 4 完成后，2026-09-21）
+
+- C8 版本元数据统一以 up 可执行入口为生命周期依据，错误传播与幂等场景均有
+  HTTP/sweep 回归测试。
+- diff-full 用 `DataDiffModeSelection` 记录 requested/effective，任务 API 摘要、
+  `summary.json` 与日志在四种决策场景中一致。
+- `pkg/rowloc` 统一主键、非空唯一身份与无可靠身份的定位策略；MySQL/PostgreSQL
+  引用和值渲染保持各自方言，最终 SQL 等价测试通过。
+- 完整 gate 通过：overall 74.9%（6090/8128），db 78.9%、diff 78.5%、sql
+  76.3%、migrate 75.9%、exec 89.1%；MySQL 8.4.3/PostgreSQL 17.2 双库集成
+  测试、race、vet、staticcheck v0.8.1、govulncheck v1.1.4 和前端构建均通过。
+- 当前仅余 8 个已缓置 Java 迁移效果缺口；远程 Web 认证和其他数据库对象扩展
+  不属于本阶段。

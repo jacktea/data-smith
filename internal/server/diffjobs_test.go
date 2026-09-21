@@ -1,12 +1,17 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	difflogic "github.com/jacktea/data-smith/internal/datasmith/diff"
 )
 
 // putWebDiffConnection registers a connection whose database lives nowhere;
@@ -32,10 +37,11 @@ func putWebDiffConnection(t *testing.T, srv *Server, id, name, typ string) {
 }
 
 type webJobView struct {
-	Status string         `json:"status"`
-	Error  string         `json:"error"`
-	Log    []string       `json:"log"`
-	Params map[string]any `json:"params"`
+	Status  string         `json:"status"`
+	Error   string         `json:"error"`
+	Log     []string       `json:"log"`
+	Params  map[string]any `json:"params"`
+	Summary map[string]any `json:"summary"`
 }
 
 // waitWebJobTerminal 轮询任务直至进入终态（succeeded/failed/cancelled）。
@@ -128,12 +134,12 @@ func TestDiffFullSubmitValidatesDataDiffMode(t *testing.T) {
 		if want == "" {
 			want = "auto"
 		}
-		if got, _ := view.Params["dataDiffMode"].(string); got != want {
-			t.Fatalf("mode %q: params.dataDiffMode = %v, want %q", mode, view.Params["dataDiffMode"], want)
+		if got, _ := view.Params["requestedDataDiffMode"].(string); got != want {
+			t.Fatalf("mode %q: params.requestedDataDiffMode = %v, want %q", mode, view.Params["requestedDataDiffMode"], want)
 		}
 		found := false
 		for _, line := range view.Log {
-			if strings.Contains(line, "数据比对模式 "+want) {
+			if strings.Contains(line, "requested data diff mode="+want) {
 				found = true
 			}
 		}
@@ -144,4 +150,80 @@ func TestDiffFullSubmitValidatesDataDiffMode(t *testing.T) {
 			t.Fatalf("job against an unreachable DB must fail, got %s (error: %s)", view.Status, view.Error)
 		}
 	}
+}
+
+func TestDiffFullTaskModeIsConsistentAcrossAPIArtifactAndLog(t *testing.T) {
+	srv, front := newTestServer(t)
+	putWebDiffConnection(t, srv, "conn-src", "src", "postgres")
+	putWebDiffConnection(t, srv, "conn-tgt", "tgt", "postgres")
+
+	tests := []struct {
+		name      string
+		requested string
+		effective string
+	}{
+		{name: "auto to shadow", requested: "auto", effective: "shadow"},
+		{name: "auto to direct", requested: "auto", effective: "direct"},
+		{name: "explicit shadow", requested: "shadow", effective: "shadow"},
+		{name: "explicit direct", requested: "direct", effective: "direct"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv.runFullDiffEngine = func(_ context.Context, _ difflogic.FullDiffParams, _ string, progress func(string), _ func(difflogic.TableProgress)) (difflogic.FullDiffResult, error) {
+				progress("数据比对模式: requested=" + tt.requested + " effective=" + tt.effective)
+				return difflogic.FullDiffResult{DataDiffMode: difflogic.DataDiffModeSelection{Requested: tt.requested, Effective: tt.effective}}, nil
+			}
+			status, respBody := postWebJSON(t, front.URL, "/api/jobs/diff-full", map[string]any{
+				"sourceId": "conn-src", "targetId": "conn-tgt",
+				"tables": []map[string]any{{"table": "t_item"}}, "dataDiffMode": tt.requested,
+			})
+			if status != http.StatusOK {
+				t.Fatalf("submit status=%d body=%s", status, respBody)
+			}
+			var created struct {
+				Job struct {
+					ID string `json:"id"`
+				} `json:"job"`
+			}
+			if err := json.Unmarshal([]byte(respBody), &created); err != nil {
+				t.Fatal(err)
+			}
+			view := waitWebJobTerminal(t, front.URL, created.Job.ID)
+			if view.Status != "succeeded" {
+				t.Fatalf("status=%s error=%s log=%v", view.Status, view.Error, view.Log)
+			}
+			if got := view.Params["requestedDataDiffMode"]; got != tt.requested {
+				t.Fatalf("params.requestedDataDiffMode=%v, want %s", got, tt.requested)
+			}
+			mode, _ := view.Summary["dataDiffMode"].(map[string]any)
+			if mode["requested"] != tt.requested || mode["effective"] != tt.effective {
+				t.Fatalf("API summary mode=%v, want requested=%s effective=%s", mode, tt.requested, tt.effective)
+			}
+			job := srv.jobs.Get(created.Job.ID)
+			raw, err := os.ReadFile(filepath.Join(job.Dir(), summaryJSONFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted difflogic.FullDiffResult
+			if err := json.Unmarshal(raw, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			if persisted.DataDiffMode.Requested != tt.requested || persisted.DataDiffMode.Effective != tt.effective {
+				t.Fatalf("persisted mode=%+v, want requested=%s effective=%s", persisted.DataDiffMode, tt.requested, tt.effective)
+			}
+			wantLog := "requested=" + tt.requested + " effective=" + tt.effective
+			if !logContains(view.Log, wantLog) {
+				t.Fatalf("log must contain %q, got %v", wantLog, view.Log)
+			}
+		})
+	}
+}
+
+func logContains(lines []string, want string) bool {
+	for _, line := range lines {
+		if strings.Contains(line, want) {
+			return true
+		}
+	}
+	return false
 }

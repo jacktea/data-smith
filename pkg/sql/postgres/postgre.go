@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jacktea/data-smith/pkg/conn"
+	"github.com/jacktea/data-smith/pkg/rowloc"
 	"github.com/jacktea/data-smith/pkg/sql/ident"
 )
 
@@ -70,20 +71,6 @@ func (d *postgreDialect) GenerateDeleteSql(tbl *conn.Table, row conn.Record) str
 	return d.GenerateDeleteBatchSql(tbl, []conn.Record{row})
 }
 
-// rowKeyColumns 返回行定位列: 有主键用主键; 无主键表回退为行内全部列
-// (与全列比对的行身份语义一致), 排序保证生成 SQL 确定性。
-func rowKeyColumns(tbl *conn.Table, row conn.Record) []string {
-	if tbl.PrimaryKey != nil && len(tbl.PrimaryKey.Columns) > 0 {
-		return tbl.PrimaryKey.Columns
-	}
-	keys := make([]string, 0, len(row))
-	for k := range row {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
 func (d *postgreDialect) GenerateDeleteBatchSql(tbl *conn.Table, rows []conn.Record) string {
 	if len(rows) == 0 {
 		return ""
@@ -91,17 +78,11 @@ func (d *postgreDialect) GenerateDeleteBatchSql(tbl *conn.Table, rows []conn.Rec
 	predicates := make([]string, 0, len(rows))
 	for _, row := range rows {
 		var where []string
-		for _, k := range rowKeyColumns(tbl, row) {
-			col := tbl.Columns[k]
-			val := row[k]
-			var colType string
-			if col != nil {
-				colType = col.DataType
-			}
-			if val == nil {
-				where = append(where, fmt.Sprintf("%s IS NULL", ident.Quote(ident.DoubleQuote, k)))
+		for _, field := range rowloc.Build(tbl, row).Fields {
+			if field.Value == nil {
+				where = append(where, fmt.Sprintf("%s IS NULL", ident.Quote(ident.DoubleQuote, field.Column)))
 			} else {
-				where = append(where, fmt.Sprintf("%s = %s", ident.Quote(ident.DoubleQuote, k), d.escapedValue(colType, val)))
+				where = append(where, fmt.Sprintf("%s = %s", ident.Quote(ident.DoubleQuote, field.Column), d.escapedValue(field.DataType, field.Value)))
 			}
 		}
 		predicates = append(predicates, "("+strings.Join(where, " AND ")+")")
@@ -114,12 +95,16 @@ func (d *postgreDialect) GenerateDeleteBatchSql(tbl *conn.Table, rows []conn.Rec
 
 func (d *postgreDialect) GenerateUpdateSql(tbl *conn.Table, row conn.Record, updateCols []string) string {
 	var set, where []string
-	pks := rowKeyColumns(tbl, row)
+	location := rowloc.Build(tbl, row)
+	if !location.Reliable() {
+		return ""
+	}
+	keys := location.Columns()
 	if len(updateCols) == 0 {
 		updateCols = tbl.GetColumns()
 	}
 	for _, c := range updateCols {
-		if slices.Contains(pks, c) {
+		if slices.Contains(keys, c) {
 			continue
 		}
 		col := tbl.Columns[c]
@@ -132,17 +117,11 @@ func (d *postgreDialect) GenerateUpdateSql(tbl *conn.Table, row conn.Record, upd
 	if len(set) == 0 {
 		return ""
 	}
-	for _, k := range pks {
-		col := tbl.Columns[k]
-		val := row[k]
-		var colType string
-		if col != nil {
-			colType = col.DataType
-		}
-		if val == nil {
-			where = append(where, fmt.Sprintf("%s IS NULL", ident.Quote(ident.DoubleQuote, k)))
+	for _, field := range location.Fields {
+		if field.Value == nil {
+			where = append(where, fmt.Sprintf("%s IS NULL", ident.Quote(ident.DoubleQuote, field.Column)))
 		} else {
-			where = append(where, fmt.Sprintf("%s = %s", ident.Quote(ident.DoubleQuote, k), d.escapedValue(colType, val)))
+			where = append(where, fmt.Sprintf("%s = %s", ident.Quote(ident.DoubleQuote, field.Column), d.escapedValue(field.DataType, field.Value)))
 		}
 	}
 	return fmt.Sprintf("UPDATE %s SET %s WHERE %s;", postgresTableName(tbl), strings.Join(set, ", "), strings.Join(where, " AND "))

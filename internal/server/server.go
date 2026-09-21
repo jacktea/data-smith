@@ -12,6 +12,7 @@ import (
 	"path"
 	"strings"
 
+	difflogic "github.com/jacktea/data-smith/internal/datasmith/diff"
 	"github.com/jacktea/data-smith/internal/server/webfs"
 	pkgconfig "github.com/jacktea/data-smith/pkg/config"
 	"github.com/jacktea/data-smith/pkg/conn"
@@ -30,6 +31,12 @@ type Server struct {
 	webFS   fs.FS
 	mux     *http.ServeMux
 
+	// Internal seams replace local dependencies in tests; production uses the
+	// filesystem, JSON store, and full-diff engine adapters below.
+	listLibraryScripts func(string) ([]scriptInfo, error)
+	deleteVersionMeta  func(string, string) error
+	runFullDiffEngine  func(context.Context, difflogic.FullDiffParams, string, func(string), func(difflogic.TableProgress)) (difflogic.FullDiffResult, error)
+
 	// openAdapter creates a DB adapter for a stored connection config. Tests
 	// override it with a stub; production uses the pkg/db factory.
 	openAdapter func(ctx context.Context, cfg *pkgconfig.ConnConfig) (conn.DBAdapter, error)
@@ -47,24 +54,35 @@ func New(dataDir string) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{
-		dataDir: dataDir,
-		store:   store,
-		jobs:    registry,
-		webFS:   webfs.Dist(),
-		mux:     http.NewServeMux(),
+		dataDir:            dataDir,
+		store:              store,
+		jobs:               registry,
+		webFS:              webfs.Dist(),
+		mux:                http.NewServeMux(),
+		listLibraryScripts: listScripts,
+		deleteVersionMeta:  store.DeleteVersionMeta,
+		runFullDiffEngine:  difflogic.RunFullDiff,
 	}
 	s.openAdapter = db.NewDBAdapterContext
 	s.routes()
-	s.sweepOrphanVersionMetaAtStartup()
+	if err := s.sweepOrphanVersionMetaAtStartup(); err != nil {
+		registry.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
 // sweepOrphanVersionMetaAtStartup 在启动时执行一次 store 一致性自检，把
-// 已无任何脚本文件的孤儿版本登记清掉并输出告警（修复历史遗留不一致）。
-func (s *Server) sweepOrphanVersionMetaAtStartup() {
-	for libID, versions := range s.SweepOrphanVersionMeta() {
-		logger.Warnf("脚本库 %s 清理孤儿版本登记(已无对应脚本文件): %s", libID, strings.Join(versions, ", "))
+// 已无 up 可执行入口的孤儿版本登记清掉并输出告警（修复历史遗留不一致）。
+func (s *Server) sweepOrphanVersionMetaAtStartup() error {
+	removed, err := s.SweepOrphanVersionMeta()
+	for libID, versions := range removed {
+		logger.Warnf("脚本库 %s 清理孤儿版本登记(已无 up 可执行入口): %s", libID, strings.Join(versions, ", "))
 	}
+	if err != nil {
+		return fmt.Errorf("清理孤儿版本登记: %w", err)
+	}
+	return nil
 }
 
 // Close releases background resources (janitor, in-flight job contexts).

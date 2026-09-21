@@ -206,6 +206,33 @@ func TestDecideShadowDataDiff(t *testing.T) {
 	}
 }
 
+func TestResolveDataDiffModeRecordsRequestedAndEffectiveModes(t *testing.T) {
+	pg := consts.DBTypePostgres
+	forward := []string{"CREATE TABLE x(id int);"}
+	tests := []struct {
+		name      string
+		requested string
+		forward   []string
+		want      DataDiffModeSelection
+	}{
+		{name: "auto to shadow", requested: DataDiffModeAuto, forward: forward, want: DataDiffModeSelection{Requested: DataDiffModeAuto, Effective: DataDiffModeShadow}},
+		{name: "auto to direct", requested: DataDiffModeAuto, want: DataDiffModeSelection{Requested: DataDiffModeAuto, Effective: DataDiffModeDirect}},
+		{name: "explicit shadow", requested: DataDiffModeShadow, want: DataDiffModeSelection{Requested: DataDiffModeShadow, Effective: DataDiffModeShadow}},
+		{name: "explicit direct", requested: DataDiffModeDirect, forward: forward, want: DataDiffModeSelection{Requested: DataDiffModeDirect, Effective: DataDiffModeDirect}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := resolveDataDiffMode(tt.requested, pg, tt.forward)
+			if err != nil {
+				t.Fatalf("resolveDataDiffMode(): %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("selection = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStatementPreviewCollapsesWhitespace(t *testing.T) {
 	preview := statementPreview("ALTER TABLE\n  air_sys_list_item\n  ADD COLUMN parent_id bigint;")
 	if strings.ContainsAny(preview, "\n\t") {
