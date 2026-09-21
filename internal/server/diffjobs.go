@@ -495,6 +495,11 @@ func (s *Server) validateRegisterRequest(reg diffFullRegisterRequest) error {
 // registerJobVersion imports the finished diff job's four artifacts into the
 // library as one V{version}__{title} up/down pair.
 func (s *Server) registerJobVersion(job *Job, reg *diffFullRegisterRequest) (version, upFile, downFile string, err error) {
+	if s.beforeLibraryMutation != nil {
+		s.beforeLibraryMutation(reg.LibraryID, "register-job-version")
+	}
+	unlock := s.lockLibrary(reg.LibraryID)
+	defer unlock()
 	dir, err := s.libraryDir(reg.LibraryID)
 	if err != nil {
 		return "", "", "", err

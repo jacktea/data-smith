@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	difflogic "github.com/jacktea/data-smith/internal/datasmith/diff"
 )
 
 // C8：up 是迁移版本的可执行入口；删除 up 后即使 down 仍保留，也必须
@@ -116,6 +119,89 @@ func TestDeleteScriptReportsVersionMetadataPersistenceFailure(t *testing.T) {
 		t.Fatalf("response must expose partial success and persistence failure, got %s", got)
 	}
 	assertVersionMeta(t, srv, libID, "3.7.1", true)
+}
+
+func TestDeleteAndConcurrentRegistrationSerializeVersionMetadataPerLibrary(t *testing.T) {
+	srv, front := newTestServer(t)
+	libID, jobID := createLibraryAndJob(t, srv, front, map[string]string{
+		difflogic.SchemaDiffForwardFile:  regSchemaForward,
+		difflogic.SchemaDiffRollbackFile: regSchemaRollback,
+	})
+	dir := srv.libraryDirUnchecked(libID)
+	oldUp := "V1.0.0__old.up.sql"
+	writeLibScript(t, dir, oldUp, "-- DATASMITH EXECUTE-ON: source\nSELECT 1;")
+	if err := srv.store.SetVersionMeta(libID, "1.0.0", VersionMeta{ExpectedConnectionID: "conn-old"}); err != nil {
+		t.Fatal(err)
+	}
+
+	deleteScanned := make(chan struct{})
+	allowDelete := make(chan struct{})
+	srv.listLibraryScripts = func(dir string) ([]scriptInfo, error) {
+		scripts, err := listScripts(dir)
+		close(deleteScanned)
+		<-allowDelete
+		return scripts, err
+	}
+	registerAttempted := make(chan struct{})
+	srv.beforeLibraryMutation = func(id, operation string) {
+		if id == libID && operation == "register-version" {
+			close(registerAttempted)
+		}
+	}
+
+	type response struct {
+		status int
+		body   []byte
+	}
+	deleteResult := make(chan response, 1)
+	go func() {
+		status, body := doRequest(t, front, http.MethodDelete, "/api/libraries/"+libID+"/scripts/"+oldUp, nil)
+		deleteResult <- response{status: status, body: body}
+	}()
+	select {
+	case <-deleteScanned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delete did not reach the post-delete metadata scan barrier")
+	}
+
+	registerResult := make(chan response, 1)
+	go func() {
+		status, body := doRequest(t, front, http.MethodPost, "/api/libraries/"+libID+"/versions", map[string]any{
+			"sourceJobId": jobID, "includeSchema": true, "version": "1.0.0", "title": "new",
+			"expectedConnectionId": "conn-new",
+		})
+		registerResult <- response{status: status, body: body}
+	}()
+	select {
+	case <-registerAttempted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("registration did not reach the per-library lock barrier")
+	}
+	select {
+	case got := <-registerResult:
+		t.Fatalf("registration bypassed the delete lock: status=%d body=%s", got.status, got.body)
+	default:
+	}
+
+	close(allowDelete)
+	for name, results := range map[string]<-chan response{"delete": deleteResult, "register": registerResult} {
+		select {
+		case got := <-results:
+			if got.status != http.StatusOK {
+				t.Fatalf("%s status=%d body=%s", name, got.status, got.body)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s request did not finish", name)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "V1.0.0__new.up.sql")); err != nil {
+		t.Fatalf("new up script missing after serialized registration: %v", err)
+	}
+	lib, ok := srv.store.GetLibrary(libID)
+	if !ok || lib.Versions["1.0.0"].ExpectedConnectionID != "conn-new" {
+		t.Fatalf("new up script must retain its version metadata: %+v", lib)
+	}
 }
 
 // C8：store 一致性自检——「现网 store.json 孤儿条目」由启动自检清理，

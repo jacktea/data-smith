@@ -2,11 +2,13 @@ package diff
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type atomicOutputFile interface {
@@ -60,8 +62,26 @@ type fullOutputTransaction struct {
 	ops        atomicOutputOps
 }
 
+const (
+	fullOutputJournalName = ".datasmith-full-output-transaction.json"
+	fullOutputCommitName  = ".datasmith-full-output-committed"
+)
+
+type fullOutputJournal struct {
+	StagingDir string                   `json:"stagingDir"`
+	Outputs    []fullOutputJournalEntry `json:"outputs"`
+}
+
+type fullOutputJournalEntry struct {
+	Name    string `json:"name"`
+	Existed bool   `json:"existed"`
+}
+
 func beginFullOutputTransaction(finalDir string, ops atomicOutputOps) (*fullOutputTransaction, error) {
 	finalDir = filepath.Clean(finalDir)
+	if err := recoverFullOutputTransaction(finalDir, ops); err != nil {
+		return nil, fmt.Errorf("recover interrupted full-diff publication: %w", err)
+	}
 	stagingDir, err := os.MkdirTemp(finalDir, ".datasmith-full-*")
 	if err != nil {
 		return nil, fmt.Errorf("create full-diff staging directory: %w", err)
@@ -82,10 +102,9 @@ func (t *fullOutputTransaction) commit() error {
 			label: name,
 		})
 	}
-	if err := commitStagedOutputs(outputs, t.ops); err != nil {
+	if err := commitFullStagedOutputs(t.finalDir, t.stagingDir, outputs, t.ops); err != nil {
 		return err
 	}
-	_ = os.RemoveAll(t.stagingDir)
 	return nil
 }
 
@@ -229,6 +248,236 @@ func commitStagedOutputs(outputs []stagedFinal, ops atomicOutputOps) error {
 		}
 	}
 	return nil
+}
+
+// commitFullStagedOutputs publishes the fixed-name diff-full artifact set with
+// a durable journal. POSIX does not provide an atomic multi-file rename, so an
+// interrupted publication is completed as one logical generation by
+// recoverFullOutputTransaction at the next transaction boundary.
+func commitFullStagedOutputs(finalDir, stagingDir string, outputs []stagedFinal, ops atomicOutputOps) error {
+	if len(outputs) == 0 {
+		return fmt.Errorf("full-diff publication requires at least one output")
+	}
+	journal := fullOutputJournal{StagingDir: filepath.Base(stagingDir)}
+	for _, output := range outputs {
+		if filepath.Dir(output.final) != finalDir || filepath.Dir(output.temp) != stagingDir {
+			return fmt.Errorf("full-diff outputs must stay in their transaction directories")
+		}
+		_, err := ops.stat(output.final)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("inspect previous %s: %w", output.label, err)
+		}
+		journal.Outputs = append(journal.Outputs, fullOutputJournalEntry{
+			Name:    filepath.Base(output.final),
+			Existed: err == nil,
+		})
+	}
+	if err := writeFullOutputControlFile(finalDir, fullOutputJournalName, journal, ops); err != nil {
+		return fmt.Errorf("persist full-diff publication journal: %w", err)
+	}
+
+	fail := func(err error) error {
+		return errors.Join(err, recoverFullOutputTransaction(finalDir, ops))
+	}
+	for _, entry := range journal.Outputs {
+		if !entry.Existed {
+			continue
+		}
+		if err := ops.rename(filepath.Join(finalDir, entry.Name), fullOutputBackupPath(finalDir, entry.Name)); err != nil {
+			return fail(fmt.Errorf("backup previous %s: %w", entry.Name, err))
+		}
+	}
+	if err := syncOutputDirs(ops, filepath.Join(finalDir, journal.Outputs[0].Name)); err != nil {
+		return fail(fmt.Errorf("sync full-diff backups: %w", err))
+	}
+	for _, output := range outputs {
+		if err := ops.rename(output.temp, output.final); err != nil {
+			return fail(fmt.Errorf("publish %s: %w", output.label, err))
+		}
+	}
+	if err := syncOutputDirs(ops, finalPathsForOutputs(outputs)...); err != nil {
+		return fail(err)
+	}
+	if err := syncOutputDirs(ops, filepath.Join(stagingDir, ".sync")); err != nil {
+		return fail(fmt.Errorf("sync full-diff staging directory: %w", err))
+	}
+	if err := writeFullOutputControlFile(finalDir, fullOutputCommitName, map[string]bool{"committed": true}, ops); err != nil {
+		return fail(fmt.Errorf("persist full-diff commit marker: %w", err))
+	}
+	return cleanupFullOutputTransaction(finalDir, stagingDir, ops)
+}
+
+func recoverFullOutputTransaction(finalDir string, ops atomicOutputOps) error {
+	journalPath := filepath.Join(finalDir, fullOutputJournalName)
+	raw, err := os.ReadFile(journalPath)
+	if os.IsNotExist(err) {
+		// Cleanup removes the commit marker before the journal, so a marker
+		// without a journal cannot represent a live transaction.
+		if err := removeIfExists(ops, filepath.Join(finalDir, fullOutputCommitName)); err != nil {
+			return fmt.Errorf("remove orphan full-diff commit marker: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var journal fullOutputJournal
+	if err := json.Unmarshal(raw, &journal); err != nil {
+		return fmt.Errorf("parse publication journal: %w", err)
+	}
+	if err := validateFullOutputJournal(journal); err != nil {
+		return err
+	}
+	stagingDir := filepath.Join(finalDir, journal.StagingDir)
+	committed := false
+	if _, err := ops.stat(filepath.Join(finalDir, fullOutputCommitName)); err == nil {
+		committed = true
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect full-diff commit marker: %w", err)
+	}
+
+	if committed {
+		for _, entry := range journal.Outputs {
+			if err := validateFullOutputJournalEntry(entry); err != nil {
+				return err
+			}
+			if _, err := ops.stat(filepath.Join(finalDir, entry.Name)); err != nil {
+				return fmt.Errorf("committed full-diff output %s is unavailable: %w", entry.Name, err)
+			}
+		}
+		return cleanupFullOutputTransaction(finalDir, stagingDir, ops)
+	}
+
+	for _, entry := range journal.Outputs {
+		if err := validateFullOutputJournalEntry(entry); err != nil {
+			return err
+		}
+		finalPath := filepath.Join(finalDir, entry.Name)
+		backupPath := fullOutputBackupPath(finalDir, entry.Name)
+		if !entry.Existed {
+			if err := removeIfExists(ops, finalPath); err != nil {
+				return fmt.Errorf("remove interrupted output %s: %w", entry.Name, err)
+			}
+			continue
+		}
+		if _, err := ops.stat(backupPath); err == nil {
+			if err := removeIfExists(ops, finalPath); err != nil {
+				return fmt.Errorf("remove interrupted output %s: %w", entry.Name, err)
+			}
+			if err := ops.rename(backupPath, finalPath); err != nil {
+				return fmt.Errorf("restore previous output %s: %w", entry.Name, err)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect previous output %s: %w", entry.Name, err)
+		} else if _, err := ops.stat(finalPath); err != nil {
+			return fmt.Errorf("previous output %s is unavailable: %w", entry.Name, err)
+		}
+	}
+	if err := syncOutputDirs(ops, filepath.Join(finalDir, fullOutputJournalName)); err != nil {
+		return fmt.Errorf("sync recovered full-diff outputs: %w", err)
+	}
+	return cleanupFullOutputTransaction(finalDir, stagingDir, ops)
+}
+
+func validateFullOutputJournalEntry(entry fullOutputJournalEntry) error {
+	if filepath.Base(entry.Name) != entry.Name || entry.Name == "." {
+		return fmt.Errorf("invalid publication output name %q", entry.Name)
+	}
+	return nil
+}
+
+func validateFullOutputJournal(journal fullOutputJournal) error {
+	if filepath.Base(journal.StagingDir) != journal.StagingDir || !strings.HasPrefix(journal.StagingDir, ".datasmith-full-") {
+		return fmt.Errorf("invalid publication staging directory %q", journal.StagingDir)
+	}
+	allowed := make(map[string]bool, len(FullDiffFileNames()))
+	for _, name := range FullDiffFileNames() {
+		allowed[name] = true
+	}
+	if len(journal.Outputs) != len(allowed) {
+		return fmt.Errorf("publication journal has %d outputs, want %d", len(journal.Outputs), len(allowed))
+	}
+	seen := make(map[string]bool, len(journal.Outputs))
+	for _, entry := range journal.Outputs {
+		if err := validateFullOutputJournalEntry(entry); err != nil {
+			return err
+		}
+		if !allowed[entry.Name] || seen[entry.Name] {
+			return fmt.Errorf("invalid publication output name %q", entry.Name)
+		}
+		seen[entry.Name] = true
+	}
+	return nil
+}
+
+func writeFullOutputControlFile(finalDir, name string, value any, ops atomicOutputOps) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	tmp, err := ops.createTemp(finalDir, name+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = tmp.Close()
+			_ = removeIfExists(ops, tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(raw); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := ops.rename(tmpPath, filepath.Join(finalDir, name)); err != nil {
+		return err
+	}
+	if err := syncOutputDirs(ops, filepath.Join(finalDir, name)); err != nil {
+		return err
+	}
+	ok = true
+	return nil
+}
+
+func cleanupFullOutputTransaction(finalDir, stagingDir string, ops atomicOutputOps) error {
+	var result error
+	if err := os.RemoveAll(stagingDir); err != nil {
+		result = errors.Join(result, fmt.Errorf("remove full-diff transaction directory: %w", err))
+	}
+	for _, name := range FullDiffFileNames() {
+		if err := removeIfExists(ops, fullOutputBackupPath(finalDir, name)); err != nil {
+			result = errors.Join(result, fmt.Errorf("remove previous full-diff output %s: %w", name, err))
+		}
+	}
+	if err := removeIfExists(ops, filepath.Join(finalDir, fullOutputCommitName)); err != nil {
+		result = errors.Join(result, fmt.Errorf("remove full-diff commit marker: %w", err))
+	}
+	if err := removeIfExists(ops, filepath.Join(finalDir, fullOutputJournalName)); err != nil {
+		result = errors.Join(result, fmt.Errorf("remove full-diff publication journal: %w", err))
+	}
+	if err := syncOutputDirs(ops, filepath.Join(finalDir, fullOutputJournalName)); err != nil {
+		result = errors.Join(result, err)
+	}
+	return result
+}
+
+func fullOutputBackupPath(baseDir, name string) string {
+	return filepath.Join(baseDir, ".previous-"+name)
+}
+
+func finalPathsForOutputs(outputs []stagedFinal) []string {
+	paths := make([]string, 0, len(outputs))
+	for _, output := range outputs {
+		paths = append(paths, output.final)
+	}
+	return paths
 }
 
 func backupFinal(finalPath string, ops atomicOutputOps) (finalBackup, error) {

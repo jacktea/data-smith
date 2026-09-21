@@ -78,6 +78,8 @@ func (s *Server) handleCreateLibrary(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteLibrary(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	unlock := s.lockLibrary(id)
+	defer unlock()
 	found, err := s.store.DeleteLibrary(id)
 	if err != nil {
 		respondStoreErr(w, err)
@@ -200,7 +202,10 @@ type scriptContentRequest struct {
 }
 
 func (s *Server) handleCreateScript(w http.ResponseWriter, r *http.Request) {
-	dir, err := s.libraryDir(r.PathValue("id"))
+	libID := r.PathValue("id")
+	unlock := s.lockLibrary(libID)
+	defer unlock()
+	dir, err := s.libraryDir(libID)
 	if err != nil {
 		respondStoreErr(w, err)
 		return
@@ -247,7 +252,10 @@ func (s *Server) handleGetScript(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePutScript(w http.ResponseWriter, r *http.Request) {
-	dir, err := s.libraryDir(r.PathValue("id"))
+	libID := r.PathValue("id")
+	unlock := s.lockLibrary(libID)
+	defer unlock()
+	dir, err := s.libraryDir(libID)
 	if err != nil {
 		respondStoreErr(w, err)
 		return
@@ -275,7 +283,13 @@ func (s *Server) handlePutScript(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteScript(w http.ResponseWriter, r *http.Request) {
-	dir, err := s.libraryDir(r.PathValue("id"))
+	libID := r.PathValue("id")
+	if s.beforeLibraryMutation != nil {
+		s.beforeLibraryMutation(libID, "delete-script")
+	}
+	unlock := s.lockLibrary(libID)
+	defer unlock()
+	dir, err := s.libraryDir(libID)
 	if err != nil {
 		respondStoreErr(w, err)
 		return
@@ -297,7 +311,7 @@ func (s *Server) handleDeleteScript(w http.ResponseWriter, r *http.Request) {
 	}
 	// C8：up 是迁移版本的可执行入口；删掉后即使 down 仍保留，版本登记
 	// 也必须同步清理，否则 store.json 会暴露一个无法执行的版本。
-	if err := s.removeVersionMetaIfNoUp(dir, r.PathValue("id"), info.Version); err != nil {
+	if err := s.removeVersionMetaIfNoUp(dir, libID, info.Version); err != nil {
 		writeError(w, http.StatusInternalServerError, "脚本已删除,但清理版本元数据失败: %v", err)
 		return
 	}
@@ -329,8 +343,10 @@ func (s *Server) removeVersionMetaIfNoUp(dir, libID, version string) error {
 func (s *Server) SweepOrphanVersionMeta() (map[string][]string, error) {
 	removed := map[string][]string{}
 	for _, lib := range s.store.ListLibraries() {
+		unlock := s.lockLibrary(lib.ID)
 		scripts, err := s.listLibraryScripts(s.libraryDirUnchecked(lib.ID))
 		if err != nil {
+			unlock()
 			return removed, fmt.Errorf("扫描脚本库 %s: %w", lib.ID, err)
 		}
 		present := make(map[string]bool, len(scripts))
@@ -344,10 +360,12 @@ func (s *Server) SweepOrphanVersionMeta() (map[string][]string, error) {
 				continue
 			}
 			if err := s.deleteVersionMeta(lib.ID, version); err != nil {
+				unlock()
 				return removed, fmt.Errorf("删除脚本库 %s 版本 %s 元数据: %w", lib.ID, version, err)
 			}
 			removed[lib.ID] = append(removed[lib.ID], version)
 		}
+		unlock()
 	}
 	for libID := range removed {
 		sort.Strings(removed[libID])
@@ -384,6 +402,11 @@ type registerVersionRequest struct {
 
 func (s *Server) handleRegisterVersion(w http.ResponseWriter, r *http.Request) {
 	libID := r.PathValue("id")
+	if s.beforeLibraryMutation != nil {
+		s.beforeLibraryMutation(libID, "register-version")
+	}
+	unlock := s.lockLibrary(libID)
+	defer unlock()
 	dir, err := s.libraryDir(libID)
 	if err != nil {
 		respondStoreErr(w, err)

@@ -294,6 +294,102 @@ func TestFullOutputTransactionPublishFailureRestoresAllFourFinals(t *testing.T) 
 	assertNoTemporaryOutputs(t, dir)
 }
 
+func TestFullOutputTransactionRecoversInterruptedPublicationToCompleteOldGeneration(t *testing.T) {
+	dir := t.TempDir()
+	writeOldFullFinals(t, dir)
+	tx, journal := prepareInterruptedFullOutputTransaction(t, dir)
+
+	// Simulate SIGKILL after every old file was backed up and only half of the
+	// new fixed-name files were published. No in-process error path runs.
+	for _, entry := range journal.Outputs {
+		if err := os.Rename(filepath.Join(dir, entry.Name), fullOutputBackupPath(dir, entry.Name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range FullDiffFileNames()[:2] {
+		if err := os.Rename(filepath.Join(tx.stagingDir, name), filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	next, err := beginFullOutputTransaction(dir, defaultAtomicOutputOps)
+	if err != nil {
+		t.Fatalf("recover interrupted publication: %v", err)
+	}
+	assertOldFullFinals(t, dir)
+	if err := next.abort(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoTemporaryOutputs(t, dir)
+}
+
+func TestFullOutputTransactionRecoversCommittedPublicationToCompleteNewGeneration(t *testing.T) {
+	dir := t.TempDir()
+	writeOldFullFinals(t, dir)
+	tx, journal := prepareInterruptedFullOutputTransaction(t, dir)
+
+	// Simulate SIGKILL after the durable commit marker but before journal and
+	// backup cleanup. Recovery must retain the complete new generation.
+	for _, entry := range journal.Outputs {
+		if err := os.Rename(filepath.Join(dir, entry.Name), fullOutputBackupPath(dir, entry.Name)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(tx.stagingDir, entry.Name), filepath.Join(dir, entry.Name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeFullOutputControlFile(dir, fullOutputCommitName, map[string]bool{"committed": true}, defaultAtomicOutputOps); err != nil {
+		t.Fatal(err)
+	}
+
+	next, err := beginFullOutputTransaction(dir, defaultAtomicOutputOps)
+	if err != nil {
+		t.Fatalf("recover committed publication: %v", err)
+	}
+	for _, name := range FullDiffFileNames() {
+		assertFileContent(t, filepath.Join(dir, name), "new "+name)
+	}
+	if err := next.abort(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoTemporaryOutputs(t, dir)
+}
+
+func TestFullOutputTransactionRemovesOrphanCommitMarkerBeforeStarting(t *testing.T) {
+	dir := t.TempDir()
+	writeOldFullFinals(t, dir)
+	if err := writeFullOutputControlFile(dir, fullOutputCommitName, map[string]bool{"committed": true}, defaultAtomicOutputOps); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := beginFullOutputTransaction(dir, defaultAtomicOutputOps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertOldFullFinals(t, dir)
+	if err := tx.abort(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoTemporaryOutputs(t, dir)
+}
+
+func prepareInterruptedFullOutputTransaction(t *testing.T, dir string) (*fullOutputTransaction, fullOutputJournal) {
+	t.Helper()
+	tx, err := beginFullOutputTransaction(dir, defaultAtomicOutputOps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := fullOutputJournal{StagingDir: filepath.Base(tx.stagingDir)}
+	for _, name := range FullDiffFileNames() {
+		writeArtifact(t, tx.stagingDir, name, "new "+name)
+		journal.Outputs = append(journal.Outputs, fullOutputJournalEntry{Name: name, Existed: true})
+	}
+	if err := writeFullOutputControlFile(dir, fullOutputJournalName, journal, defaultAtomicOutputOps); err != nil {
+		t.Fatal(err)
+	}
+	return tx, journal
+}
+
 func writeOldFullFinals(t *testing.T, dir string) {
 	t.Helper()
 	for _, name := range FullDiffFileNames() {
@@ -342,7 +438,7 @@ func assertNoTemporaryOutputs(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if strings.Contains(entry.Name(), ".tmp-") || strings.Contains(entry.Name(), ".backup-") || strings.Contains(entry.Name(), ".datasmith-full-") {
+		if strings.Contains(entry.Name(), ".tmp-") || strings.Contains(entry.Name(), ".backup-") || strings.Contains(entry.Name(), ".previous-") || strings.Contains(entry.Name(), ".datasmith-full-") {
 			t.Fatalf("temporary output was not cleaned up: %s", entry.Name())
 		}
 	}

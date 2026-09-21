@@ -487,12 +487,12 @@ Web 控制台完全比对具备独立 data diff mode 开关，引擎语义零重
 ## 十一、当前状态（代码评审阶段 4 完成后，2026-09-21）
 
 - C8 版本元数据统一以 up 可执行入口为生命周期依据，错误传播与幂等场景均有
-  HTTP/sweep 回归测试。
+  HTTP/sweep 回归测试；同一脚本库的文件与元数据变更按库串行化，并有受控交错并发测试。
 - diff-full 用 `DataDiffModeSelection` 记录 requested/effective，任务 API 摘要、
   `summary.json` 与日志在四种决策场景中一致。
 - `pkg/rowloc` 统一主键、非空唯一身份与无可靠身份的定位策略；MySQL/PostgreSQL
   引用和值渲染保持各自方言，最终 SQL 等价测试通过。
-- 完整 gate 通过：overall 74.9%（6090/8128），db 78.9%、diff 78.5%、sql
+- 完整 gate 通过：overall 74.8%（6206/8296），db 78.9%、diff 77.8%、sql
   76.3%、migrate 75.9%、exec 89.1%；MySQL 8.4.3/PostgreSQL 17.2 双库集成
   测试、race、vet、staticcheck v0.8.1、govulncheck v1.1.4 和前端构建均通过。
 - 当前仅余 8 个已缓置 Java 迁移效果缺口；远程 Web 认证和其他数据库对象扩展

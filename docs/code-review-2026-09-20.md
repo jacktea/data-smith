@@ -57,7 +57,7 @@ schema 正反向文件在数据阶段开始前已经发布。数据比对失败�
 
 建议四个文件统一写入暂存目录；全部生成并校验成功后再一次性发布。
 
-整改：`diff-full` 在最终目录同文件系统的 staging 目录中生成结构/数据四产物，全部存在后统一备份并发布；生成、写盘、目录同步或任一 rename 失败会恢复上一整组。失败注入覆盖数据阶段、写盘和第三个文件发布失败。
+整改：`diff-full` 在最终目录同文件系统的 staging 目录中生成结构/数据四产物，全部存在后统一备份并发布；生成、写盘、目录同步或任一 rename 失败会恢复上一整组。最终复审补充持久化发布日志与提交标记：SIGKILL/主机重启留下的未提交事务在下一次运行恢复旧组，已提交事务保留并校验新组。测试覆盖数据阶段、写盘、第三个文件发布失败及两类中断状态。
 
 ### S5【P2｜已修复 2026-09-21】序列 ownership 建模后没有进入相等判断和 SQL
 
@@ -170,7 +170,7 @@ effective 仅为 shadow/direct。任务 API 摘要、`summary.json` 与日志统
 
 CLI 在打开连接前校验 source/target 标记；Web 只记录警告，然后调用不接收数据库角色的执行引擎。这与前端描述和 AGENTS.md 安全红线不一致。
 
-整改：新增 CLI/Web 共用的目标身份校验入口；Web 写入脚本必须显式选择 `source` 或 `target`，请求入队前和数据库执行前均硬校验。匹配、冲突、非法/空标记、无标记及缺少角色均有回归测试。
+整改：新增 CLI/Web 共用的目标身份校验入口；Web 写入脚本必须显式选择 `source` 或 `target`，请求入队前和数据库执行前均硬校验。最终复审补充连接切换状态约束：物理连接变化会清空旧角色，必须重新选择。匹配、冲突、非法/空标记、无标记、缺少角色及连接切换均有回归测试。
 
 ### O3【P1｜已修复 2026-09-20】RollbackTo 在取得迁移锁前生成计划
 
@@ -261,6 +261,6 @@ pnpm --dir web build
 
 阶段 3 覆盖率结果：overall 74.9%（6074/8108）、db 78.9%（674/854）、diff 78.6%（1773/2257）、sql 76.9%（1268/1648）、migrate 75.9%（480/632）、exec 89.1%（376/422）。gofmt、相关最小测试、单测、race、vet、staticcheck v0.8.1、govulncheck v1.1.4、前端构建、MySQL/PostgreSQL 双库集成测试和覆盖率 gate 全部通过；真实 PostgreSQL 用例验证跨对象正/逆拓扑、forward 收敛、rollback 恢复结构与 ownership。
 
-阶段 4 覆盖率结果：overall 74.9%（6090/8128）、db 78.9%（674/854）、diff 78.5%（1767/2251）、sql 76.3%（1236/1620）、migrate 75.9%（480/632）、exec 89.1%（376/422）。相关最小测试、gofmt、`go test ./...`、race、vet、staticcheck v0.8.1、govulncheck v1.1.4、`pnpm --dir web build`、MySQL 8.4.3/PostgreSQL 17.2 双库集成测试和覆盖率 gate 全部通过；前端仅有既有大 chunk 警告。
+最终复审覆盖率结果：overall 74.8%（6206/8296）、db 78.9%（674/854）、diff 77.8%（1859/2390）、sql 76.3%（1236/1620）、migrate 75.9%（480/632）、exec 89.1%（376/422）。相关最小测试、gofmt、`go test ./...`、race、vet、staticcheck v0.8.1、govulncheck v1.1.4、`pnpm --dir web build`、MySQL 8.4.3/PostgreSQL 17.2 双库集成测试和覆盖率 gate 全部通过；前端仅有既有大 chunk 警告。
 
 阶段 3 新增统一对象依赖 DAG、sequence ownership 正反向 SQL和真实 PostgreSQL 往返断言。阶段 4 已完成元数据错误传播、C8 生命周期、requested/effective mode 与共享行定位策略，并统一相关文档状态；未扩展远程 Web 认证、trigger、分区、generated column、identity 或用户定义类型。

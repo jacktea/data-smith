@@ -253,14 +253,17 @@ V3_0_1 → V3_2_0_99 → 0_1/0_2/0_4 → 0_5 → V3_1_0_1（0_3 随 0_1 重写�
 - 8 个 Java 迁移缺口如需闭合，按「七」建议顺序以 PL/pgSQL 等效重写后，
   以 `exec-sql` 补入链轮并重跑闭环。
 
-## 十一、阶段 4 一致性回归（2026-09-21）
+## 十一、阶段 4 与最终复审一致性回归（2026-09-21）
 
 - C8：删 up 留 down、删 down 留 up、删除最后脚本、隐式 up、目录扫描失败、
-  `DeleteVersionMeta` 失败与重复清理均由 server 回归测试覆盖。
+  `DeleteVersionMeta` 失败与重复清理均由 server 回归测试覆盖；最终复审增加
+  删除/重新登记受控交错测试，验证 up 存在时版本元数据不会被并发删除。
+- SQL 控制台切换物理连接会清空此前的 source/target 角色；diff-full 的持久化
+  发布日志恢复测试覆盖未提交的半发布旧组恢复与已提交新组保留。
 - 模式记录：auto→shadow、auto→direct、显式 shadow/direct 的任务参数、API 摘要、
   `summary.json` 与日志一致。
 - 行定位：主键、普通非空唯一索引和无可靠身份三类策略在 MySQL/PostgreSQL
   等价测试中通过；反引号/双引号和值渲染仍保持方言差异。
-- 完整 gate 通过，覆盖率 overall 74.9%（6090/8128），db/diff/sql/migrate/exec
-  分别为 78.9%/78.5%/76.3%/75.9%/89.1%；双库集成测试使用 MySQL 8.4.3 与
+- 完整 gate 通过，覆盖率 overall 74.8%（6206/8296），db/diff/sql/migrate/exec
+  分别为 78.9%/77.8%/76.3%/75.9%/89.1%；双库集成测试使用 MySQL 8.4.3 与
   PostgreSQL 17.2。

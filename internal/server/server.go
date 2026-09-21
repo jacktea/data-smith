@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 
 	difflogic "github.com/jacktea/data-smith/internal/datasmith/diff"
 	"github.com/jacktea/data-smith/internal/server/webfs"
@@ -31,11 +32,16 @@ type Server struct {
 	webFS   fs.FS
 	mux     *http.ServeMux
 
+	// libraryLocks serializes script-file and version-metadata mutations per
+	// library without blocking independent libraries.
+	libraryLocks sync.Map
+
 	// Internal seams replace local dependencies in tests; production uses the
 	// filesystem, JSON store, and full-diff engine adapters below.
-	listLibraryScripts func(string) ([]scriptInfo, error)
-	deleteVersionMeta  func(string, string) error
-	runFullDiffEngine  func(context.Context, difflogic.FullDiffParams, string, func(string), func(difflogic.TableProgress)) (difflogic.FullDiffResult, error)
+	listLibraryScripts    func(string) ([]scriptInfo, error)
+	deleteVersionMeta     func(string, string) error
+	runFullDiffEngine     func(context.Context, difflogic.FullDiffParams, string, func(string), func(difflogic.TableProgress)) (difflogic.FullDiffResult, error)
+	beforeLibraryMutation func(string, string)
 
 	// openAdapter creates a DB adapter for a stored connection config. Tests
 	// override it with a stub; production uses the pkg/db factory.
@@ -145,6 +151,13 @@ func (s *Server) routes() {
 
 // Handler returns the root HTTP handler.
 func (s *Server) Handler() http.Handler { return s.mux }
+
+func (s *Server) lockLibrary(id string) func() {
+	value, _ := s.libraryLocks.LoadOrStore(id, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
 
 // setAdapterOpener overrides the adapter factory; used by tests to stub
 // database backends.

@@ -24,6 +24,7 @@ import {
 } from "../api";
 import { useConnections } from "../hooks";
 import SqlEditor from "../components/SqlEditor";
+import { changeSqlConsoleConnection } from "../connectionSelection.js";
 
 const MODE_LABEL: Record<ExecSqlMode, string> = {
   dryrun: "试跑(dry-run)",
@@ -47,6 +48,9 @@ export default function SqlConsolePage() {
 
   const selectedConn = connections.find((c) => c.id === connId);
   const dbType = selectedConn?.type as "mysql" | "postgres" | undefined;
+  const selectedConnIdentity = selectedConn
+    ? `${selectedConn.name} (${selectedConn.host}:${selectedConn.port}/${selectedConn.dbname})`
+    : connId;
 
   const connOptions = connections.map((c) => ({
     value: c.id,
@@ -85,7 +89,7 @@ export default function SqlConsolePage() {
     modal.confirm({
       title: `确认以「${MODE_LABEL[mode]}」方式执行脚本到 ${targetRole}?`,
       icon: <ExclamationCircleOutlined />,
-      content: "脚本将对所选连接的库执行写操作/DDL,请再次核对连接与脚本内容。",
+      content: `物理连接: ${selectedConnIdentity}。脚本将对该连接执行写操作/DDL,请再次核对连接、角色与脚本内容。`,
       okText: "执行",
       okButtonProps: { danger: mode !== "dryrun" },
       cancelText: "取消",
@@ -272,8 +276,13 @@ export default function SqlConsolePage() {
               options={connOptions}
               value={connId}
               onChange={(v) => {
-                setConnId(v);
-                setResult(null);
+                const next = changeSqlConsoleConnection(
+                  { connId, targetRole, result },
+                  v,
+                );
+                setConnId(next.connId);
+                setTargetRole(next.targetRole);
+                setResult(next.result);
               }}
             />
             {connId && (
