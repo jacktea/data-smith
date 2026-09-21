@@ -160,6 +160,47 @@ pre.ds-danger {
   flex-direction: column;
 }
 
+/* CodeMirror 在容器与 .cm-editor 之间还有一层无高度的 .cm-theme 包装；
+   固定高度（或全屏）模式下必须把它纳入 flex 链，否则内容溢出被裁剪且无法滚动 */
+.ds-sql-editor-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ds-sql-editor-fixed .ds-sql-editor-body {
+  flex: 1;
+  min-height: 0;
+}
+
+.ds-sql-editor-fixed .ds-sql-editor-body > div {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 编辑器工具条：自动换行 / 全屏 */
+.ds-sql-editor-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #f0f0f0;
+  background: #fafafa;
+}
+
+/* 全屏：盖过 antd Modal（1000）与 message（2010），占满视口 */
+.ds-sql-editor.ds-editor-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 3050;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  border-radius: 0;
+}
+
 .ds-sql-editor:hover {
   border-color: #4096ff;
 }

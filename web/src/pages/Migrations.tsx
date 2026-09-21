@@ -38,6 +38,7 @@ import {
 } from "../api";
 import { fmtSize, fmtTime } from "../format";
 import { useConnections } from "../hooks";
+import SqlEditor from "../components/SqlEditor";
 
 // 与引擎解析正则一致:版本__标题[.up|.down].sql|json
 const SCRIPT_NAME_RE = /^([vV]\d+(?:\.\d+)*|\d+)__([^.]+)(?:\.(up|down))?\.(sql|json)$/;
@@ -304,11 +305,16 @@ function LibraryTab() {
         okText="保存"
         cancelText="取消"
       >
-        <Input.TextArea
-          rows={18}
-          value={editor?.content}
-          onChange={(e) => setEditor((prev) => (prev ? { ...prev, content: e.target.value } : prev))}
-          style={{ fontFamily: "monospace" }}
+        <SqlEditor
+          value={editor?.content ?? ""}
+          onChange={(v) => setEditor((prev) => (prev ? { ...prev, content: v } : prev))}
+          height="420px"
+          toolbar
+          onExecute={() => {
+            if (editor && !savingEditor) {
+              void saveEditor();
+            }
+          }}
         />
       </Modal>
       <Modal
@@ -337,12 +343,17 @@ function LibraryTab() {
             value={upload.fileName}
             onChange={(e) => setUpload((u) => ({ ...u, fileName: e.target.value }))}
           />
-          <Input.TextArea
-            rows={10}
-            placeholder="脚本内容(SQL);文件名带 .down 或 .json 将被拒绝 —— down/JSON 仅能由版本登记生成"
+          <SqlEditor
             value={upload.content}
-            onChange={(e) => setUpload((u) => ({ ...u, content: e.target.value }))}
-            style={{ fontFamily: "monospace" }}
+            onChange={(v) => setUpload((u) => ({ ...u, content: v }))}
+            height="260px"
+            toolbar
+            placeholder="脚本内容(SQL);文件名带 .down 或 .json 将被拒绝 —— down/JSON 仅能由版本登记生成"
+            onExecute={() => {
+              if (libId && !savingUpload) {
+                void submitUpload();
+              }
+            }}
           />
         </Space>
       </Modal>
