@@ -4,8 +4,10 @@ import (
 	"crypto/ed25519"
 	cryptorand "crypto/rand"
 	"errors"
+	"net"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,17 +17,66 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func testFingerprint(t *testing.T) string {
+func testHostSigner(t *testing.T) (ssh.Signer, string) {
 	t.Helper()
-	public, _, err := ed25519.GenerateKey(cryptorand.Reader)
+	_, private, err := ed25519.GenerateKey(cryptorand.Reader)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	key, err := ssh.NewPublicKey(public)
+	signer, err := ssh.NewSignerFromKey(private)
 	if err != nil {
-		t.Fatalf("SSH public key: %v", err)
+		t.Fatalf("SSH signer: %v", err)
 	}
-	return ssh.FingerprintSHA256(key)
+	return signer, ssh.FingerprintSHA256(signer.PublicKey())
+}
+
+// startTestSSHServer 供 Init 的隧道校验使用:接受任意密码与 direct-tcpip。
+func startTestSSHServer(t *testing.T, signer ssh.Signer) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen test SSH server: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				serverConfig := &ssh.ServerConfig{
+					PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
+						return &ssh.Permissions{}, nil
+					},
+				}
+				serverConfig.AddHostKey(signer)
+				serverConn, channels, requests, err := ssh.NewServerConn(conn, serverConfig)
+				if err != nil {
+					return
+				}
+				defer serverConn.Close()
+				go ssh.DiscardRequests(requests)
+				for newChannel := range channels {
+					channel, channelRequests, err := newChannel.Accept()
+					if err != nil {
+						continue
+					}
+					go ssh.DiscardRequests(channelRequests)
+					go func() {
+						buffer := make([]byte, 1024)
+						for {
+							if _, err := channel.Read(buffer); err != nil {
+								_ = channel.Close()
+								return
+							}
+						}
+					}()
+				}
+			}()
+		}
+	}()
+	return listener.Addr().String()
 }
 
 func TestApplyConnectionSettingsConfiguresPoolLimit(t *testing.T) {
@@ -42,12 +93,15 @@ func TestApplyConnectionSettingsConfiguresPoolLimit(t *testing.T) {
 }
 
 func TestInitClonesConfigBeforeTunnelEndpointMutation(t *testing.T) {
+	signer, fingerprint := testHostSigner(t)
+	proxyHost, proxyPortText, _ := net.SplitHostPort(startTestSSHServer(t, signer))
+	proxyPort, _ := strconv.Atoi(proxyPortText)
 	original := &config.ConnConfig{
 		Host: "database.internal", Port: 5432,
 		Extra: config.DBParams{"search_path": "original"},
 		Proxy: map[any]any{
-			"host": "127.0.0.1", "port": 22, "user": "tester", "type": "pass",
-			"pass": "obvious-placeholder", "hostFingerprint": testFingerprint(t),
+			"host": proxyHost, "port": proxyPort, "user": "tester", "type": "pass",
+			"pass": "obvious-placeholder", "hostFingerprint": fingerprint,
 		},
 	}
 	before := original.Clone()

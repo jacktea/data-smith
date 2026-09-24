@@ -137,6 +137,7 @@ func decodeSSHProxyMap(values map[string]any, proxy *SSHProxy) error {
 		"host": true, "port": true, "user": true, "type": true, "pass": true,
 		"rsaKey": true, "rsaKeyPath": true, "rsaKeyPassword": true,
 		"knownHostsPath": true, "hostFingerprint": true,
+		"allowInsecureHostKey": true,
 	}
 	for key := range values {
 		if !allowed[key] {
@@ -182,6 +183,13 @@ func decodeSSHProxyMap(values map[string]any, proxy *SSHProxy) error {
 		default:
 			return fmt.Errorf("proxy field %q must be an integer, got %T", "port", value)
 		}
+	}
+	if value, ok := values["allowInsecureHostKey"]; ok && value != nil {
+		flag, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("proxy field %q must be a boolean, got %T", "allowInsecureHostKey", value)
+		}
+		proxy.AllowInsecureHostKey = flag
 	}
 	return nil
 }
@@ -285,4 +293,7 @@ type SSHProxy struct {
 	RsaKeyPassword  string `json:"rsaKeyPassword" yaml:"rsaKeyPassword" dc:"RSA私钥密码"`
 	KnownHostsPath  string `json:"knownHostsPath" yaml:"knownHostsPath" dc:"known_hosts文件路径"`
 	HostFingerprint string `json:"hostFingerprint" yaml:"hostFingerprint" dc:"固定的SHA256主机指纹"`
+	// AllowInsecureHostKey 为显式不安全开关:仅在 knownHostsPath 与
+	// hostFingerprint 均未配置时生效,跳过 SSH 主机身份校验。
+	AllowInsecureHostKey bool `json:"allowInsecureHostKey" yaml:"allowInsecureHostKey" dc:"跳过主机校验(不安全)"`
 }

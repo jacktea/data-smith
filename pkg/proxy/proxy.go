@@ -56,9 +56,10 @@ func validateProxy(sshProxy *config.SSHProxy, remote *Endpoint) error {
 		return fmt.Errorf("SSH tunnel remote host and valid port are required")
 	}
 	if strings.TrimSpace(sshProxy.KnownHostsPath) == "" && strings.TrimSpace(sshProxy.HostFingerprint) == "" {
-		return fmt.Errorf("SSH host verification requires knownHostsPath or hostFingerprint")
-	}
-	if sshProxy.KnownHostsPath != "" && sshProxy.HostFingerprint != "" {
+		if !sshProxy.AllowInsecureHostKey {
+			return fmt.Errorf("SSH host verification requires knownHostsPath or hostFingerprint")
+		}
+	} else if sshProxy.KnownHostsPath != "" && sshProxy.HostFingerprint != "" {
 		return fmt.Errorf("configure only one SSH host verification method: knownHostsPath or hostFingerprint")
 	}
 	return nil
@@ -107,14 +108,18 @@ func hostKeyCallback(sshProxy *config.SSHProxy) (ssh.HostKeyCallback, error) {
 		}
 		return callback, nil
 	}
+	if strings.TrimSpace(sshProxy.HostFingerprint) == "" {
+		// 显式不安全开关:仅在两项校验均未配置时走到这里(validateProxy 保证)。
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
 	want := strings.TrimSpace(sshProxy.HostFingerprint)
 	digest, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(want, "SHA256:"))
 	if !strings.HasPrefix(want, "SHA256:") || err != nil || len(digest) != 32 {
 		return nil, fmt.Errorf("SSH hostFingerprint must be an SHA256 fingerprint")
 	}
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		if ssh.FingerprintSHA256(key) != want {
-			return fmt.Errorf("SSH host key fingerprint mismatch for %s", hostname)
+		if got := ssh.FingerprintSHA256(key); got != want {
+			return fmt.Errorf("SSH host key fingerprint mismatch for %s: got %s, want %s", hostname, got, want)
 		}
 		return nil
 	}, nil

@@ -17,16 +17,17 @@ import (
 // proxyRequest is the incoming proxy payload; nil secret pointers mean
 // "keep the previously stored value".
 type proxyRequest struct {
-	Host            string  `json:"host"`
-	Port            int     `json:"port"`
-	User            string  `json:"user"`
-	Type            string  `json:"type"`
-	Pass            *string `json:"pass"`
-	RsaKey          *string `json:"rsaKey"`
-	RsaKeyPath      string  `json:"rsaKeyPath"`
-	RsaKeyPassword  *string `json:"rsaKeyPassword"`
-	KnownHostsPath  string  `json:"knownHostsPath"`
-	HostFingerprint string  `json:"hostFingerprint"`
+	Host                 string  `json:"host"`
+	Port                 int     `json:"port"`
+	User                 string  `json:"user"`
+	Type                 string  `json:"type"`
+	Pass                 *string `json:"pass"`
+	RsaKey               *string `json:"rsaKey"`
+	RsaKeyPath           string  `json:"rsaKeyPath"`
+	RsaKeyPassword       *string `json:"rsaKeyPassword"`
+	KnownHostsPath       string  `json:"knownHostsPath"`
+	HostFingerprint      string  `json:"hostFingerprint"`
+	AllowInsecureHostKey bool    `json:"allowInsecureHostKey"`
 }
 
 // connectionRequest is the incoming connection payload; Password nil means
@@ -49,14 +50,15 @@ type connectionRequest struct {
 }
 
 type proxyView struct {
-	Host            string `json:"host"`
-	Port            int    `json:"port"`
-	User            string `json:"user"`
-	Type            string `json:"type"`
-	KnownHostsPath  string `json:"knownHostsPath"`
-	HostFingerprint string `json:"hostFingerprint"`
-	RsaKeyPathSet   bool   `json:"rsaKeyPathSet"`
-	PassSet         bool   `json:"passSet"`
+	Host                 string `json:"host"`
+	Port                 int    `json:"port"`
+	User                 string `json:"user"`
+	Type                 string `json:"type"`
+	KnownHostsPath       string `json:"knownHostsPath"`
+	HostFingerprint      string `json:"hostFingerprint"`
+	AllowInsecureHostKey bool   `json:"allowInsecureHostKey"`
+	RsaKeyPathSet        bool   `json:"rsaKeyPathSet"`
+	PassSet              bool   `json:"passSet"`
 }
 
 type connectionView struct {
@@ -77,13 +79,14 @@ type connectionView struct {
 
 func proxyFromRequest(req *proxyRequest, previous *StoredProxy) *StoredProxy {
 	out := &StoredProxy{
-		Host:            req.Host,
-		Port:            req.Port,
-		User:            req.User,
-		Type:            req.Type,
-		RsaKeyPath:      req.RsaKeyPath,
-		KnownHostsPath:  req.KnownHostsPath,
-		HostFingerprint: req.HostFingerprint,
+		Host:                 req.Host,
+		Port:                 req.Port,
+		User:                 req.User,
+		Type:                 req.Type,
+		RsaKeyPath:           req.RsaKeyPath,
+		KnownHostsPath:       req.KnownHostsPath,
+		HostFingerprint:      req.HostFingerprint,
+		AllowInsecureHostKey: req.AllowInsecureHostKey,
 	}
 	// Secrets absent from the request keep the previously stored values so
 	// clients can round-trip masked views without losing credentials.
@@ -226,14 +229,15 @@ func connectionToView(c *StoredConnection) connectionView {
 	}
 	if c.Proxy != nil {
 		view.Proxy = &proxyView{
-			Host:            c.Proxy.Host,
-			Port:            c.Proxy.Port,
-			User:            c.Proxy.User,
-			Type:            c.Proxy.Type,
-			KnownHostsPath:  c.Proxy.KnownHostsPath,
-			HostFingerprint: c.Proxy.HostFingerprint,
-			RsaKeyPathSet:   c.Proxy.RsaKeyPath != "",
-			PassSet:         c.Proxy.Pass != "",
+			Host:                 c.Proxy.Host,
+			Port:                 c.Proxy.Port,
+			User:                 c.Proxy.User,
+			Type:                 c.Proxy.Type,
+			KnownHostsPath:       c.Proxy.KnownHostsPath,
+			HostFingerprint:      c.Proxy.HostFingerprint,
+			AllowInsecureHostKey: c.Proxy.AllowInsecureHostKey,
+			RsaKeyPathSet:        c.Proxy.RsaKeyPath != "",
+			PassSet:              c.Proxy.Pass != "",
 		}
 	}
 	return view

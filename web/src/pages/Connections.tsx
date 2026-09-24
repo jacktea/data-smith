@@ -45,13 +45,15 @@ interface ConnFormValues {
   connectTimeoutMs?: number;
   maxOpenConns?: number;
   proxyEnabled?: boolean;
-  proxyType?: string;
+  /** SSH 认证方式(与后端 SSHProxy.Type 一致):pass=密码,rsa=私钥 */
+  proxyAuthType?: "pass" | "rsa";
   proxyHost?: string;
   proxyPort?: number;
   proxyUser?: string;
   proxyPassword?: string;
   proxyKnownHostsPath?: string;
   proxyHostFingerprint?: string;
+  proxyAllowInsecure?: boolean;
   proxyRsaKeyPath?: string;
 }
 
@@ -76,7 +78,8 @@ export default function ConnectionsPage() {
       connectTimeoutMs: 5000,
       maxOpenConns: 10,
       proxyEnabled: false,
-      proxyType: "ssh",
+      proxyAuthType: "pass",
+      proxyAllowInsecure: false,
     });
     setDrawerOpen(true);
   };
@@ -97,12 +100,13 @@ export default function ConnectionsPage() {
       connectTimeoutMs: c.connectTimeoutMs,
       maxOpenConns: c.maxOpenConns,
       proxyEnabled: c.proxy != null,
-      proxyType: c.proxy?.type || "ssh",
+      proxyAuthType: c.proxy?.type === "rsa" ? "rsa" : "pass",
       proxyHost: c.proxy?.host,
       proxyPort: c.proxy?.port,
       proxyUser: c.proxy?.user,
       proxyKnownHostsPath: c.proxy?.knownHostsPath,
       proxyHostFingerprint: c.proxy?.hostFingerprint,
+      proxyAllowInsecure: c.proxy?.allowInsecureHostKey ?? false,
     });
     setDrawerOpen(true);
   };
@@ -150,13 +154,14 @@ export default function ConnectionsPage() {
     const v = (await form.validateFields()) as ConnFormValues;
     const proxy: ProxyInput | null = v.proxyEnabled
       ? {
-          type: v.proxyType || "ssh",
+          type: v.proxyAuthType === "rsa" ? "rsa" : "pass",
           host: v.proxyHost ?? "",
           port: v.proxyPort ?? 22,
           user: v.proxyUser ?? "",
-          ...(v.proxyPassword ? { password: v.proxyPassword } : {}),
+          ...(v.proxyPassword ? { pass: v.proxyPassword } : {}),
           knownHostsPath: v.proxyKnownHostsPath ?? "",
           hostFingerprint: v.proxyHostFingerprint ?? "",
+          allowInsecureHostKey: v.proxyAllowInsecure ?? false,
           ...(v.proxyRsaKeyPath ? { rsaKeyPath: v.proxyRsaKeyPath } : {}),
         }
       : null;
@@ -405,8 +410,13 @@ export default function ConnectionsPage() {
                         getFieldValue("proxyEnabled") ? (
                           <Row gutter={12}>
                             <Col span={12}>
-                              <Form.Item name="proxyType" label="代理类型">
-                                <Select options={[{ value: "ssh", label: "SSH 隧道" }]} />
+                              <Form.Item name="proxyAuthType" label="认证方式">
+                                <Select
+                                  options={[
+                                    { value: "pass", label: "密码" },
+                                    { value: "rsa", label: "私钥" },
+                                  ]}
+                                />
                               </Form.Item>
                             </Col>
                             <Col span={12}>
@@ -436,24 +446,42 @@ export default function ConnectionsPage() {
                                 <Input />
                               </Form.Item>
                             </Col>
-                            <Col span={12}>
-                              <Form.Item
-                                name="proxyPassword"
-                                label="代理密码"
-                                extra={editing?.proxy?.passSet ? "已配置;留空保持原值" : "密码与私钥至少配置一项"}
-                              >
-                                <Input.Password autoComplete="new-password" />
-                              </Form.Item>
-                            </Col>
-                            <Col span={12}>
-                              <Form.Item
-                                name="proxyRsaKeyPath"
-                                label="私钥路径"
-                                extra={editing?.proxy?.rsaKeyPathSet ? "已配置;留空保持原值" : "服务端路径,可选"}
-                              >
-                                <Input />
-                              </Form.Item>
-                            </Col>
+                            <Form.Item
+                              noStyle
+                              shouldUpdate={(p, c) => p.proxyAuthType !== c.proxyAuthType}
+                            >
+                              {({ getFieldValue }) =>
+                                getFieldValue("proxyAuthType") === "rsa" ? (
+                                  <Col span={12}>
+                                    <Form.Item
+                                      name="proxyRsaKeyPath"
+                                      label="私钥路径"
+                                      extra={
+                                        editing?.proxy?.rsaKeyPathSet
+                                          ? "已配置;留空保持原值"
+                                          : "datasmith 所在机器上的私钥文件路径"
+                                      }
+                                    >
+                                      <Input />
+                                    </Form.Item>
+                                  </Col>
+                                ) : (
+                                  <Col span={12}>
+                                    <Form.Item
+                                      name="proxyPassword"
+                                      label="代理密码"
+                                      extra={
+                                        editing?.proxy?.passSet
+                                          ? "已配置;留空保持原值"
+                                          : "跳板机登录密码"
+                                      }
+                                    >
+                                      <Input.Password autoComplete="new-password" />
+                                    </Form.Item>
+                                  </Col>
+                                )
+                              }
+                            </Form.Item>
                             <Col span={12}>
                               <Form.Item name="proxyKnownHostsPath" label="known_hosts 路径">
                                 <Input />
@@ -462,6 +490,16 @@ export default function ConnectionsPage() {
                             <Col span={12}>
                               <Form.Item name="proxyHostFingerprint" label="主机指纹">
                                 <Input />
+                              </Form.Item>
+                            </Col>
+                            <Col span={24}>
+                              <Form.Item
+                                name="proxyAllowInsecure"
+                                label="跳过主机校验(不安全)"
+                                valuePropName="checked"
+                                extra="仅在上两项都留空时生效;跳过后不校验跳板机身份,可能遭遇中间人攻击,仅建议测试环境使用"
+                              >
+                                <Switch checkedChildren="开" unCheckedChildren="关" />
                               </Form.Item>
                             </Col>
                           </Row>

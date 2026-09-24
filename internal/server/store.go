@@ -17,16 +17,17 @@ import (
 // StoredProxy is the persisted SSH proxy configuration. Secret fields are kept
 // in plain text on disk (store.json is 0600) but never serialized in responses.
 type StoredProxy struct {
-	Host            string `json:"host"`
-	Port            int    `json:"port"`
-	User            string `json:"user"`
-	Type            string `json:"type"`
-	Pass            string `json:"pass,omitempty"`
-	RsaKey          string `json:"rsaKey,omitempty"`
-	RsaKeyPath      string `json:"rsaKeyPath,omitempty"`
-	RsaKeyPassword  string `json:"rsaKeyPassword,omitempty"`
-	KnownHostsPath  string `json:"knownHostsPath,omitempty"`
-	HostFingerprint string `json:"hostFingerprint,omitempty"`
+	Host                 string `json:"host"`
+	Port                 int    `json:"port"`
+	User                 string `json:"user"`
+	Type                 string `json:"type"`
+	Pass                 string `json:"pass,omitempty"`
+	RsaKey               string `json:"rsaKey,omitempty"`
+	RsaKeyPath           string `json:"rsaKeyPath,omitempty"`
+	RsaKeyPassword       string `json:"rsaKeyPassword,omitempty"`
+	KnownHostsPath       string `json:"knownHostsPath,omitempty"`
+	HostFingerprint      string `json:"hostFingerprint,omitempty"`
+	AllowInsecureHostKey bool   `json:"allowInsecureHostKey,omitempty"`
 }
 
 // StoredConnection is the persisted connection profile, including secrets.
@@ -77,16 +78,17 @@ func (c *StoredConnection) ConnConfig() *pkgconfig.ConnConfig {
 	cfg.MaxOpenConns = c.MaxOpenConns
 	if c.Proxy != nil {
 		cfg.Proxy = &pkgconfig.SSHProxy{
-			Host:            c.Proxy.Host,
-			Port:            c.Proxy.Port,
-			User:            c.Proxy.User,
-			Type:            c.Proxy.Type,
-			Pass:            c.Proxy.Pass,
-			RsaKey:          c.Proxy.RsaKey,
-			RsaKeyPath:      c.Proxy.RsaKeyPath,
-			RsaKeyPassword:  c.Proxy.RsaKeyPassword,
-			KnownHostsPath:  c.Proxy.KnownHostsPath,
-			HostFingerprint: c.Proxy.HostFingerprint,
+			Host:                 c.Proxy.Host,
+			Port:                 c.Proxy.Port,
+			User:                 c.Proxy.User,
+			Type:                 c.Proxy.Type,
+			Pass:                 c.Proxy.Pass,
+			RsaKey:               c.Proxy.RsaKey,
+			RsaKeyPath:           c.Proxy.RsaKeyPath,
+			RsaKeyPassword:       c.Proxy.RsaKeyPassword,
+			KnownHostsPath:       c.Proxy.KnownHostsPath,
+			HostFingerprint:      c.Proxy.HostFingerprint,
+			AllowInsecureHostKey: c.Proxy.AllowInsecureHostKey,
 		}
 	}
 	return cfg

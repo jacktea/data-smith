@@ -143,6 +143,36 @@ func (tunnel *SSHTunnel) Stop() error {
 	return result
 }
 
+// Verify establishes a throwaway SSH session through the same auth and host
+// verification settings as the tunnel, confirming the handshake and the remote
+// dial before any real traffic depends on the listener. Without it those
+// failures only close the local socket, surfacing to clients as a bare
+// connection reset instead of the underlying SSH error.
+func (tunnel *SSHTunnel) Verify(ctx context.Context) error {
+	dialer := &net.Dialer{Timeout: tunnel.Config.Timeout}
+	rawServerConn, err := dialer.DialContext(ctx, "tcp", tunnel.Server.String())
+	if err != nil {
+		return fmt.Errorf("connect to SSH server %s: %w", tunnel.Server.String(), err)
+	}
+	defer rawServerConn.Close()
+	stopServerClose := context.AfterFunc(ctx, func() { _ = rawServerConn.Close() })
+	defer stopServerClose()
+
+	sshConn, channels, requests, err := ssh.NewClientConn(rawServerConn, tunnel.Server.String(), tunnel.Config)
+	if err != nil {
+		return fmt.Errorf("SSH handshake with %s: %w", tunnel.Server.String(), err)
+	}
+	client := ssh.NewClient(sshConn, channels, requests)
+	defer client.Close()
+
+	remoteConn, err := client.Dial("tcp", tunnel.Remote.String())
+	if err != nil {
+		return fmt.Errorf("SSH remote connection to %s: %w", tunnel.Remote.String(), err)
+	}
+	_ = remoteConn.Close()
+	return nil
+}
+
 func (tunnel *SSHTunnel) forwardConnection(ctx context.Context, localConn net.Conn) {
 	dialer := &net.Dialer{Timeout: tunnel.Config.Timeout}
 	rawServerConn, err := dialer.DialContext(ctx, "tcp", tunnel.Server.String())

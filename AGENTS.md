@@ -83,7 +83,7 @@ pkg/
 2. `exec-sql` 先 `--dry-run` 或 `--tx` 验证；MySQL DDL 与 MySQL migration 的 dry-run 无可靠事务回滚，会被拒绝或要求人工恢复预案。
 3. `reset-db` 先 `--dry-run` 再 `--yes`；系统数据库、空目标、危险 schema 在连接/破坏前直接拒绝。
 4. SQL scanner 是词法扫描器而非完整客户端协议：不支持 MySQL `DELIMITER`、PostgreSQL `COPY ... FROM STDIN`，歧义脚本保守拒绝（保持该行为）。
-5. SSH 代理必须配置 `knownHostsPath` 或 SHA-256 `hostFingerprint`，缺失时在数据库访问前失败。
+5. SSH 代理默认必须配置 `knownHostsPath` 或 SHA-256 `hostFingerprint`，缺失时在数据库访问前失败；仅当显式设置 `allowInsecureHostKey`（Web 表单「跳过主机校验(不安全)」开关，须与两项校验字段不同时使用）才跳过。
 
 ## Agent skills
 

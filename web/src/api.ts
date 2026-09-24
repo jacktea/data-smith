@@ -61,6 +61,7 @@ export interface ProxyView {
   type: string;
   knownHostsPath: string;
   hostFingerprint: string;
+  allowInsecureHostKey: boolean;
   rsaKeyPathSet: boolean;
   passSet: boolean;
 }
@@ -82,14 +83,17 @@ export interface Connection {
 }
 
 export interface ProxyInput {
-  type: string;
+  /** SSH 认证方式(后端仅接受 pass/rsa) */
+  type: "pass" | "rsa";
   host: string;
   port: number;
   user: string;
-  /** PUT/POST 缺省 = 保持原值 */
-  password?: string;
+  /** PUT/POST 缺省 = 保持原值；字段名须与后端 proxyRequest.pass 一致 */
+  pass?: string;
   knownHostsPath?: string;
   hostFingerprint?: string;
+  /** 仅在 knownHostsPath 与 hostFingerprint 均未配置时生效 */
+  allowInsecureHostKey?: boolean;
   /** PUT 缺省 = 保持原值 */
   rsaKeyPath?: string;
 }

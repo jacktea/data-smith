@@ -386,6 +386,9 @@ func (a *PostgresAdapter) queryTables() (map[string]*conn.Table, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	// 先建全部表/视图模型,再每类元数据各发一条 schema 级查询批量填充。
+	// 此前逐表提取(N 表 × 7 条查询)在 SSH 隧道等高 RTT 链路上退化为
+	// 分钟级;批量化后与表数量无关,固定 8 条左右。
 	tables := make(map[string]*conn.Table)
 	for rows.Next() {
 		var name, t string
@@ -394,17 +397,21 @@ func (a *PostgresAdapter) queryTables() (map[string]*conn.Table, error) {
 		}
 		switch conn.ParseTableType(t) {
 		case conn.TableTypeTable:
-			table, err := a.ExtractTable(name)
-			if err != nil {
-				return nil, err
+			tables[name] = &conn.Table{
+				Name:        name,
+				Type:        conn.TableTypeTable,
+				Schema:      a.Cfg.TableSchema,
+				Columns:     map[string]*conn.Column{},
+				Indexes:     map[string]*conn.Index{},
+				ForeignKeys: map[string]*conn.ForeignKey{},
 			}
-			tables[name] = table
 		case conn.TableTypeView:
-			table, err := a.ExtractView(name)
-			if err != nil {
-				return nil, err
+			tables[name] = &conn.Table{
+				Name:    name,
+				Type:    conn.TableTypeView,
+				Schema:  a.Cfg.TableSchema,
+				Columns: map[string]*conn.Column{},
 			}
-			tables[name] = table
 		default:
 			continue
 		}
@@ -412,7 +419,436 @@ func (a *PostgresAdapter) queryTables() (map[string]*conn.Table, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if len(tables) == 0 {
+		return tables, nil
+	}
+	if err := a.extractAllColumns(tables); err != nil {
+		return nil, err
+	}
+	if err := a.extractAllPrimaryKeys(tables); err != nil {
+		return nil, err
+	}
+	if err := a.extractAllIndexes(tables); err != nil {
+		return nil, err
+	}
+	if err := a.extractAllForeignKeys(tables); err != nil {
+		return nil, err
+	}
+	if err := a.extractAllChecks(tables); err != nil {
+		return nil, err
+	}
+	if err := a.extractAllViewDefinitions(tables); err != nil {
+		return nil, err
+	}
+	a.applyAllTableComments(tables)
 	return tables, nil
+}
+
+// extractAllColumns 是 extractColumns 的全 schema 版本:一次查询带回所有
+// 表与视图的列,内存中按表名分组。行序按 table_name, ordinal_position,
+// 各表内部的列序与单表版本一致。
+func (a *PostgresAdapter) extractAllColumns(tables map[string]*conn.Table) error {
+	colRows, err := a.QueryContext(context.Background(), `SELECT
+			c.table_name,
+			c.column_name,
+			c.data_type,
+			c.udt_name,
+			c.is_nullable,
+			c.column_default,
+			pgd.description,
+			c.character_maximum_length,
+			c.numeric_precision,
+			c.numeric_scale,
+			c.ordinal_position
+		FROM
+			information_schema.columns c
+			LEFT JOIN pg_catalog.pg_statio_all_tables as st ON c.table_name = st.relname AND c.table_schema = st.schemaname
+			LEFT JOIN pg_catalog.pg_description pgd ON pgd.objoid=st.relid AND pgd.objsubid=c.ordinal_position
+		WHERE
+			c.table_schema = $1
+		ORDER BY c.table_name, c.ordinal_position`, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer colRows.Close()
+	for colRows.Next() {
+		var tableName string
+		col, err := scanColumnRow(colRows, &tableName)
+		if err != nil {
+			return err
+		}
+		table, ok := tables[tableName]
+		if !ok {
+			continue
+		}
+		table.Columns[col.Name] = col
+	}
+	return colRows.Err()
+}
+
+// extractAllPrimaryKeys 是 extractPrimaryKey 的全 schema 版本。
+func (a *PostgresAdapter) extractAllPrimaryKeys(tables map[string]*conn.Table) error {
+	query := `
+		SELECT
+			t.relname,
+			c.conname,
+			array_agg(a.attname ORDER BY u.attpos) as columns
+		FROM pg_constraint c
+		JOIN pg_namespace n ON n.oid = c.connamespace
+		JOIN pg_class t ON t.oid = c.conrelid
+		JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS u(attnum, attpos) ON true
+		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = u.attnum
+		WHERE n.nspname = $1
+		  AND c.contype = 'p'
+		GROUP BY t.relname, c.conname
+	`
+	rows, err := a.QueryContext(context.Background(), query, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tableName, constraintName string
+		var columns pq.StringArray
+		if err := rows.Scan(&tableName, &constraintName, &columns); err != nil {
+			return err
+		}
+		table, ok := tables[tableName]
+		if !ok {
+			continue
+		}
+		table.PrimaryKey = &conn.PrimaryKey{
+			Name:    constraintName,
+			Columns: columns,
+		}
+	}
+	return rows.Err()
+}
+
+// extractAllIndexes 是 extractIndexes 的全 schema 版本。
+func (a *PostgresAdapter) extractAllIndexes(tables map[string]*conn.Table) error {
+	idxRows, err := a.QueryContext(context.Background(), `
+	SELECT
+			t.relname as table_name,
+			i.relname as index_name,
+			ix.indisunique,
+			ix.indisprimary,
+			am.amname as method,
+			pg_get_expr(ix.indpred, ix.indrelid) as where_clause,
+			pg_get_expr(ix.indexprs, ix.indrelid) as expr,
+			pg_get_indexdef(ix.indexrelid) as index_def,
+			COALESCE(array_agg(a.attname ORDER BY array_position(ix.indkey, a.attnum)) FILTER (WHERE a.attname IS NOT NULL), '{}') as columns
+		FROM pg_index ix
+		JOIN pg_class i ON i.oid = ix.indexrelid
+		JOIN pg_class t ON t.oid = ix.indrelid
+		JOIN pg_namespace n ON n.oid = t.relnamespace
+		JOIN pg_am am ON am.oid = i.relam
+		LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+		WHERE n.nspname = $1
+		GROUP BY t.relname, i.relname, ix.indisunique, ix.indisprimary, am.amname, ix.indpred, ix.indexprs, ix.indrelid, ix.indexrelid
+	`, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer idxRows.Close()
+	for idxRows.Next() {
+		var tableName string
+		var idx conn.Index
+		var whereClause, expr, indexDef sql.NullString
+		var columns pq.StringArray
+		if err := idxRows.Scan(
+			&tableName,
+			&idx.Name,
+			&idx.Unique,
+			&idx.Primary,
+			&idx.Method,
+			&whereClause,
+			&expr,
+			&indexDef,
+			&columns,
+		); err != nil {
+			return err
+		}
+		table, ok := tables[tableName]
+		if !ok {
+			continue
+		}
+		idx.Columns = columns
+		if whereClause.Valid {
+			idx.Where = &whereClause.String
+		}
+		if expr.Valid && expr.String != "" {
+			idx.Expression = &expr.String
+		}
+		if indexDef.Valid {
+			idx.Definition = indexDef.String
+		}
+		table.Indexes[idx.Name] = &idx
+	}
+	return idxRows.Err()
+}
+
+// extractAllForeignKeys 是 extractForeignKeys 的全 schema 版本。
+func (a *PostgresAdapter) extractAllForeignKeys(tables map[string]*conn.Table) error {
+	query := `
+		SELECT
+			t.relname,
+			c.conname,
+			array_agg(a.attname ORDER BY u.attpos) as columns,
+			ref_ns.nspname as referenced_schema,
+			ref_cls.relname as referenced_table,
+			array_agg(ref_a.attname ORDER BY u.attpos) as referenced_columns,
+			CASE c.confdeltype
+				WHEN 'a' THEN 'NO ACTION'
+				WHEN 'r' THEN 'RESTRICT'
+				WHEN 'c' THEN 'CASCADE'
+				WHEN 'n' THEN 'SET NULL'
+				WHEN 'd' THEN 'SET DEFAULT'
+				ELSE 'NO ACTION'
+			END as on_delete,
+			CASE c.confupdtype
+				WHEN 'a' THEN 'NO ACTION'
+				WHEN 'r' THEN 'RESTRICT'
+				WHEN 'c' THEN 'CASCADE'
+				WHEN 'n' THEN 'SET NULL'
+				WHEN 'd' THEN 'SET DEFAULT'
+				ELSE 'NO ACTION'
+			END as on_update
+		FROM pg_constraint c
+		JOIN pg_namespace n ON n.oid = c.connamespace
+		JOIN pg_class t ON t.oid = c.conrelid
+		JOIN pg_class ref_cls ON ref_cls.oid = c.confrelid
+		JOIN pg_namespace ref_ns ON ref_ns.oid = ref_cls.relnamespace
+		JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS u(attnum, confattnum, attpos) ON true
+		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = u.attnum
+		JOIN pg_attribute ref_a ON ref_a.attrelid = ref_cls.oid AND ref_a.attnum = u.confattnum
+		WHERE n.nspname = $1
+		  AND c.contype = 'f'
+		GROUP BY t.relname, c.conname, ref_ns.nspname, ref_cls.relname, c.confdeltype, c.confupdtype
+	`
+	fkRows, err := a.QueryContext(context.Background(), query, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer fkRows.Close()
+	for fkRows.Next() {
+		var tableName string
+		var fk conn.ForeignKey
+		var columns, referencedColumns pq.StringArray
+		if err := fkRows.Scan(
+			&tableName,
+			&fk.Name,
+			&columns,
+			&fk.ReferencedSchema,
+			&fk.ReferencedTable,
+			&referencedColumns,
+			&fk.OnDelete,
+			&fk.OnUpdate,
+		); err != nil {
+			return err
+		}
+		table, ok := tables[tableName]
+		if !ok {
+			continue
+		}
+		fk.Columns = columns
+		fk.ReferencedColumns = referencedColumns
+		table.ForeignKeys[fk.Name] = &fk
+	}
+	return fkRows.Err()
+}
+
+// extractAllChecks 是 extractChecks 的全 schema 版本。与单表版本一致,
+// 每张基础表都以非 nil 的 Checks 映射收尾(即使没有 CHECK 约束)。
+func (a *PostgresAdapter) extractAllChecks(tables map[string]*conn.Table) error {
+	for _, table := range tables {
+		if table.Type == conn.TableTypeTable {
+			table.Checks = make(map[string]*conn.CheckConstraint)
+		}
+	}
+	query := `
+		SELECT
+			t.relname,
+			c.conname,
+			pg_get_constraintdef(c.oid)
+		FROM pg_constraint c
+		JOIN pg_class t ON t.oid = c.conrelid
+		JOIN pg_namespace n ON n.oid = c.connamespace
+		WHERE n.nspname = $1
+		  AND c.contype = 'c'
+		ORDER BY t.relname, c.conname
+	`
+	rows, err := a.QueryContext(context.Background(), query, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tableName string
+		var chk conn.CheckConstraint
+		if err := rows.Scan(&tableName, &chk.Name, &chk.Definition); err != nil {
+			return err
+		}
+		table, ok := tables[tableName]
+		if !ok || table.Type != conn.TableTypeTable {
+			continue
+		}
+		table.Checks[chk.Name] = &chk
+	}
+	return rows.Err()
+}
+
+// extractAllViewDefinitions 是 extractViewDefinition 的全 schema 版本:
+// 视图定义与依赖各一条查询,按视图名分组。
+func (a *PostgresAdapter) extractAllViewDefinitions(tables map[string]*conn.Table) error {
+	views := make(map[string]*conn.Table, len(tables))
+	for name, table := range tables {
+		if table.Type == conn.TableTypeView {
+			views[name] = table
+		}
+	}
+	if len(views) == 0 {
+		return nil
+	}
+
+	defRows, err := a.QueryContext(context.Background(), `
+		SELECT
+			c.relname,
+			pg_get_viewdef(c.oid, true),
+			v.is_updatable,
+			v.check_option
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN information_schema.views v ON v.table_schema = n.nspname AND v.table_name = c.relname
+		WHERE n.nspname = $1 AND c.relkind = 'v'
+	`, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer defRows.Close()
+	for defRows.Next() {
+		var viewName string
+		var viewDef conn.ViewDefinition
+		var isUpdatable, checkOption sql.NullString
+		if err := defRows.Scan(&viewName, &viewDef.SelectStatement, &isUpdatable, &checkOption); err != nil {
+			return err
+		}
+		view, ok := views[viewName]
+		if !ok {
+			continue
+		}
+		viewDef.IsUpdatable = isUpdatable.String == "YES"
+		if checkOption.Valid {
+			viewDef.CheckOption = checkOption.String
+		}
+		view.ViewDefinition = &viewDef
+	}
+	if err := defRows.Err(); err != nil {
+		return err
+	}
+
+	dependencyRows, err := a.QueryContext(context.Background(), `
+		SELECT view_name, table_schema, table_name
+		FROM information_schema.view_table_usage
+		WHERE view_schema = $1
+		ORDER BY view_name, table_schema, table_name`, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer dependencyRows.Close()
+	for dependencyRows.Next() {
+		var viewName, schema, name string
+		if err := dependencyRows.Scan(&viewName, &schema, &name); err != nil {
+			return err
+		}
+		view, ok := views[viewName]
+		if !ok || view.ViewDefinition == nil {
+			continue
+		}
+		view.ViewDefinition.Dependencies = append(view.ViewDefinition.Dependencies, schema+"."+name)
+	}
+	return dependencyRows.Err()
+}
+
+// applyAllTableComments 是 getTableComment 的全 schema 版本。与单表版本
+// 一致,查询失败静默降级为无注释。
+func (a *PostgresAdapter) applyAllTableComments(tables map[string]*conn.Table) {
+	commentRows, err := a.QueryContext(context.Background(), `
+		SELECT pgc.relname, obj_description(pgc.oid)
+		FROM pg_class pgc
+		JOIN pg_namespace pgn ON pgc.relnamespace = pgn.oid
+		WHERE pgn.nspname = $1
+	`, a.Cfg.TableSchema)
+	if err != nil {
+		return
+	}
+	defer commentRows.Close()
+	comments := make(map[string]string)
+	for commentRows.Next() {
+		var name string
+		var comment sql.NullString
+		if err := commentRows.Scan(&name, &comment); err != nil {
+			return
+		}
+		if comment.Valid {
+			comments[name] = comment.String
+		}
+	}
+	if err := commentRows.Err(); err != nil {
+		return
+	}
+	for name, table := range tables {
+		table.Comment = comments[name]
+	}
+}
+
+// scanColumnRow 装配列查询的一行,单表与全 schema 批量两条路径共用,保证
+// 列模型语义一致。tableName 非 nil 时消费批量查询行首的 table_name 列。
+func scanColumnRow(scanner interface{ Scan(dest ...any) error }, tableName *string) (*conn.Column, error) {
+	var col conn.Column
+	var dataType, udtName, nullable string
+	var charMaxLen, numericPrec, numericScale sql.NullInt64
+	dest := make([]any, 0, 11)
+	if tableName != nil {
+		dest = append(dest, tableName)
+	}
+	dest = append(dest,
+		&col.Name,
+		&dataType,
+		&udtName,
+		&nullable,
+		&col.Default,
+		&col.Comment,
+		&charMaxLen,
+		&numericPrec,
+		&numericScale,
+		&col.Position,
+	)
+	if err := scanner.Scan(dest...); err != nil {
+		return nil, err
+	}
+	if dataType == "USER-DEFINED" && udtName != "" {
+		col.DataType = udtName
+	} else if dataType == "ARRAY" && udtName != "" {
+		elemType := strings.TrimPrefix(udtName, "_")
+		col.DataType = elemType + "[]"
+	} else {
+		col.DataType = dataType
+	}
+	if charMaxLen.Valid {
+		maxLen := int(charMaxLen.Int64)
+		col.CharMaxLen = &maxLen
+	}
+	if numericPrec.Valid {
+		prec := int(numericPrec.Int64)
+		col.NumericPrec = &prec
+	}
+	if numericScale.Valid {
+		scale := int(numericScale.Int64)
+		col.NumericScale = &scale
+	}
+	col.Nullable = nullable == "YES"
+	return &col, nil
 }
 
 func (a *PostgresAdapter) extractColumns(table *conn.Table) error {
@@ -440,45 +876,11 @@ func (a *PostgresAdapter) extractColumns(table *conn.Table) error {
 	defer colRows.Close()
 	columns := make(map[string]*conn.Column)
 	for colRows.Next() {
-		var col conn.Column
-		var dataType, udtName, nullable string
-		var charMaxLen, numericPrec, numericScale sql.NullInt64
-		if err := colRows.Scan(
-			&col.Name,
-			&dataType,
-			&udtName,
-			&nullable,
-			&col.Default,
-			&col.Comment,
-			&charMaxLen,
-			&numericPrec,
-			&numericScale,
-			&col.Position,
-		); err != nil {
+		col, err := scanColumnRow(colRows, nil)
+		if err != nil {
 			return err
 		}
-		if dataType == "USER-DEFINED" && udtName != "" {
-			col.DataType = udtName
-		} else if dataType == "ARRAY" && udtName != "" {
-			elemType := strings.TrimPrefix(udtName, "_")
-			col.DataType = elemType + "[]"
-		} else {
-			col.DataType = dataType
-		}
-		if charMaxLen.Valid {
-			maxLen := int(charMaxLen.Int64)
-			col.CharMaxLen = &maxLen
-		}
-		if numericPrec.Valid {
-			prec := int(numericPrec.Int64)
-			col.NumericPrec = &prec
-		}
-		if numericScale.Valid {
-			scale := int(numericScale.Int64)
-			col.NumericScale = &scale
-		}
-		col.Nullable = nullable == "YES"
-		columns[col.Name] = &col
+		columns[col.Name] = col
 	}
 	if err := colRows.Err(); err != nil {
 		return err

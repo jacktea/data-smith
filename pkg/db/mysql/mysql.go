@@ -243,6 +243,8 @@ func (a *MySQLAdapter) queryTables() (map[string]*conn.Table, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	// 先建全部表/视图模型,再每类元数据各发一条 schema 级查询批量填充,
+	// 避免逐表提取(N 表 × 7 条查询)在 SSH 隧道等高 RTT 链路上退化。
 	tables := make(map[string]*conn.Table)
 	for rows.Next() {
 		var name, t string
@@ -251,17 +253,21 @@ func (a *MySQLAdapter) queryTables() (map[string]*conn.Table, error) {
 		}
 		switch conn.ParseTableType(t) {
 		case conn.TableTypeTable:
-			table, err := a.ExtractTable(name)
-			if err != nil {
-				return nil, err
+			tables[name] = &conn.Table{
+				Name:        name,
+				Type:        conn.TableTypeTable,
+				Schema:      a.Cfg.TableSchema,
+				Columns:     map[string]*conn.Column{},
+				Indexes:     map[string]*conn.Index{},
+				ForeignKeys: map[string]*conn.ForeignKey{},
 			}
-			tables[name] = table
 		case conn.TableTypeView:
-			table, err := a.ExtractView(name)
-			if err != nil {
-				return nil, err
+			tables[name] = &conn.Table{
+				Name:    name,
+				Type:    conn.TableTypeView,
+				Schema:  a.Cfg.TableSchema,
+				Columns: map[string]*conn.Column{},
 			}
-			tables[name] = table
 		default:
 			continue
 		}
@@ -269,7 +275,387 @@ func (a *MySQLAdapter) queryTables() (map[string]*conn.Table, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if len(tables) == 0 {
+		return tables, nil
+	}
+	if err := a.extractAllColumns(tables); err != nil {
+		return nil, err
+	}
+	if err := a.extractAllPrimaryKeys(tables); err != nil {
+		return nil, err
+	}
+	if err := a.extractAllIndexes(tables); err != nil {
+		return nil, err
+	}
+	if err := a.extractAllForeignKeys(tables); err != nil {
+		return nil, err
+	}
+	if err := a.extractAllChecks(tables); err != nil {
+		return nil, err
+	}
+	if err := a.extractAllViewDefinitions(tables); err != nil {
+		return nil, err
+	}
+	a.applyAllTableComments(tables)
 	return tables, nil
+}
+
+// scanMySQLColumnRow 装配列查询的一行,单表与全 schema 批量两条路径共用。
+// tableName 非 nil 时消费批量查询行首的 table_name 列。
+func scanMySQLColumnRow(scanner interface{ Scan(dest ...any) error }, tableName *string) (*conn.Column, error) {
+	var col conn.Column
+	var nullable string
+	var charMaxLen, numericPrec, numericScale sql.NullInt64
+	var comment sql.NullString
+	dest := make([]any, 0, 11)
+	if tableName != nil {
+		dest = append(dest, tableName)
+	}
+	dest = append(dest,
+		&col.Name,
+		&col.DataType,
+		&nullable,
+		&col.Default,
+		&comment,
+		&charMaxLen,
+		&numericPrec,
+		&numericScale,
+		&col.Position,
+		&col.Extra,
+	)
+	if err := scanner.Scan(dest...); err != nil {
+		return nil, err
+	}
+	if charMaxLen.Valid {
+		maxLen := int(charMaxLen.Int64)
+		col.CharMaxLen = &maxLen
+	}
+	if numericPrec.Valid {
+		prec := int(numericPrec.Int64)
+		col.NumericPrec = &prec
+	}
+	if numericScale.Valid {
+		scale := int(numericScale.Int64)
+		col.NumericScale = &scale
+	}
+	if comment.Valid {
+		col.Comment = &comment.String
+	}
+	col.Nullable = nullable == "YES"
+	return &col, nil
+}
+
+// extractAllColumns 是 extractColumns 的全 schema 版本:一次查询带回所有
+// 表与视图的列,内存中按表名分组,各表内部列序与单表版本一致。
+func (a *MySQLAdapter) extractAllColumns(tables map[string]*conn.Table) error {
+	colRows, err := a.QueryContext(context.Background(), `SELECT
+			table_name,
+			column_name,
+			data_type,
+			is_nullable,
+			column_default,
+			column_comment,
+			character_maximum_length,
+			numeric_precision,
+			numeric_scale,
+			ordinal_position,
+			extra
+		FROM information_schema.columns
+		WHERE table_schema = ?
+		ORDER BY table_name, ordinal_position`, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer colRows.Close()
+	for colRows.Next() {
+		var tableName string
+		col, err := scanMySQLColumnRow(colRows, &tableName)
+		if err != nil {
+			return err
+		}
+		table, ok := tables[tableName]
+		if !ok {
+			continue
+		}
+		table.Columns[col.Name] = col
+	}
+	return colRows.Err()
+}
+
+// extractAllPrimaryKeys 是 extractPrimaryKey 的全 schema 版本。
+func (a *MySQLAdapter) extractAllPrimaryKeys(tables map[string]*conn.Table) error {
+	query := `
+		SELECT
+			tc.table_name,
+			tc.constraint_name,
+			GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position) as columns
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+		  ON tc.constraint_schema = kcu.constraint_schema
+		 AND tc.table_schema = kcu.table_schema
+		 AND tc.table_name = kcu.table_name
+		 AND tc.constraint_name = kcu.constraint_name
+		WHERE tc.table_schema = ?
+		  AND tc.constraint_type = 'PRIMARY KEY'
+		GROUP BY tc.constraint_schema, tc.table_schema, tc.table_name, tc.constraint_name
+	`
+	rows, err := a.QueryContext(context.Background(), query, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tableName, constraintName, columns string
+		if err := rows.Scan(&tableName, &constraintName, &columns); err != nil {
+			return err
+		}
+		table, ok := tables[tableName]
+		if !ok {
+			continue
+		}
+		table.PrimaryKey = &conn.PrimaryKey{
+			Name:    constraintName,
+			Columns: strings.Split(columns, ","),
+		}
+	}
+	return rows.Err()
+}
+
+// extractAllIndexes 是 extractIndexes 的全 schema 版本。
+func (a *MySQLAdapter) extractAllIndexes(tables map[string]*conn.Table) error {
+	query := `
+		SELECT
+			table_name,
+			index_name,
+			non_unique = 0 as is_unique,
+			index_type as method,
+			GROUP_CONCAT(column_name ORDER BY seq_in_index) as columns
+		FROM information_schema.statistics
+		WHERE table_schema = ? AND index_name != 'PRIMARY'
+		GROUP BY table_name, index_name, non_unique, index_type
+	`
+	idxRows, err := a.QueryContext(context.Background(), query, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer idxRows.Close()
+	for idxRows.Next() {
+		var tableName string
+		var idx conn.Index
+		var columns string
+		if err := idxRows.Scan(&tableName, &idx.Name, &idx.Unique, &idx.Method, &columns); err != nil {
+			return err
+		}
+		table, ok := tables[tableName]
+		if !ok {
+			continue
+		}
+		idx.Columns = strings.Split(columns, ",")
+		table.Indexes[idx.Name] = &idx
+	}
+	return idxRows.Err()
+}
+
+// extractAllForeignKeys 是 extractForeignKeys 的全 schema 版本。
+func (a *MySQLAdapter) extractAllForeignKeys(tables map[string]*conn.Table) error {
+	query := `
+		SELECT
+			tc.table_name,
+			tc.constraint_name,
+			GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position) as columns,
+			kcu.referenced_table_schema as referenced_schema,
+			kcu.referenced_table_name as referenced_table,
+			GROUP_CONCAT(kcu.referenced_column_name ORDER BY kcu.ordinal_position) as referenced_columns,
+			rc.delete_rule,
+			rc.update_rule
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+		  ON tc.constraint_schema = kcu.constraint_schema
+		 AND tc.table_schema = kcu.table_schema
+		 AND tc.table_name = kcu.table_name
+		 AND tc.constraint_name = kcu.constraint_name
+		JOIN information_schema.referential_constraints rc
+		  ON tc.constraint_schema = rc.constraint_schema
+		 AND tc.table_name = rc.table_name
+		 AND tc.constraint_name = rc.constraint_name
+		WHERE tc.table_schema = ?
+		  AND tc.constraint_type = 'FOREIGN KEY'
+		GROUP BY tc.table_name, tc.constraint_name, kcu.referenced_table_schema, kcu.referenced_table_name, rc.delete_rule, rc.update_rule
+	`
+	fkRows, err := a.QueryContext(context.Background(), query, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer fkRows.Close()
+	for fkRows.Next() {
+		var tableName string
+		var fk conn.ForeignKey
+		var columns, referencedColumns string
+		if err := fkRows.Scan(
+			&tableName,
+			&fk.Name,
+			&columns,
+			&fk.ReferencedSchema,
+			&fk.ReferencedTable,
+			&referencedColumns,
+			&fk.OnDelete,
+			&fk.OnUpdate,
+		); err != nil {
+			return err
+		}
+		table, ok := tables[tableName]
+		if !ok {
+			continue
+		}
+		fk.Columns = strings.Split(columns, ",")
+		fk.ReferencedColumns = strings.Split(referencedColumns, ",")
+		table.ForeignKeys[fk.Name] = &fk
+	}
+	return fkRows.Err()
+}
+
+// extractAllChecks 是 extractChecks 的全 schema 版本。与单表版本一致,
+// 每张基础表都以非 nil 的 Checks 映射收尾(即使没有 CHECK 约束)。
+func (a *MySQLAdapter) extractAllChecks(tables map[string]*conn.Table) error {
+	for _, table := range tables {
+		if table.Type == conn.TableTypeTable {
+			table.Checks = make(map[string]*conn.CheckConstraint)
+		}
+	}
+	query := `
+		SELECT
+			tc.table_name,
+			tc.constraint_name,
+			cc.check_clause
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.check_constraints cc
+		  ON tc.constraint_schema = cc.constraint_schema
+		 AND tc.constraint_name = cc.constraint_name
+		WHERE tc.table_schema = ?
+		  AND tc.constraint_type = 'CHECK'
+		ORDER BY tc.table_name, tc.constraint_name
+	`
+	rows, err := a.QueryContext(context.Background(), query, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tableName string
+		var chk conn.CheckConstraint
+		if err := rows.Scan(&tableName, &chk.Name, &chk.Definition); err != nil {
+			return err
+		}
+		table, ok := tables[tableName]
+		if !ok || table.Type != conn.TableTypeTable {
+			continue
+		}
+		table.Checks[chk.Name] = &chk
+	}
+	return rows.Err()
+}
+
+// extractAllViewDefinitions 是 extractViewDefinition 的全 schema 版本:
+// 视图定义与依赖各一条查询,按视图名分组。
+func (a *MySQLAdapter) extractAllViewDefinitions(tables map[string]*conn.Table) error {
+	views := make(map[string]*conn.Table, len(tables))
+	for name, table := range tables {
+		if table.Type == conn.TableTypeView {
+			views[name] = table
+		}
+	}
+	if len(views) == 0 {
+		return nil
+	}
+
+	defRows, err := a.QueryContext(context.Background(), `
+		SELECT
+			table_name,
+			view_definition,
+			is_updatable,
+			check_option
+		FROM information_schema.views
+		WHERE table_schema = ?
+	`, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer defRows.Close()
+	for defRows.Next() {
+		var viewName string
+		var viewDef conn.ViewDefinition
+		var isUpdatable, checkOption sql.NullString
+		if err := defRows.Scan(&viewName, &viewDef.SelectStatement, &isUpdatable, &checkOption); err != nil {
+			return err
+		}
+		view, ok := views[viewName]
+		if !ok {
+			continue
+		}
+		viewDef.IsUpdatable = isUpdatable.String == "YES"
+		if checkOption.Valid {
+			viewDef.CheckOption = checkOption.String
+		}
+		view.ViewDefinition = &viewDef
+	}
+	if err := defRows.Err(); err != nil {
+		return err
+	}
+
+	dependencyRows, err := a.QueryContext(context.Background(), `
+		SELECT view_name, table_schema, table_name
+		FROM information_schema.view_table_usage
+		WHERE view_schema = ?
+		ORDER BY view_name, table_schema, table_name`, a.Cfg.TableSchema)
+	if err != nil {
+		return err
+	}
+	defer dependencyRows.Close()
+	for dependencyRows.Next() {
+		var viewName, schema, name string
+		if err := dependencyRows.Scan(&viewName, &schema, &name); err != nil {
+			return err
+		}
+		view, ok := views[viewName]
+		if !ok || view.ViewDefinition == nil {
+			continue
+		}
+		view.ViewDefinition.Dependencies = append(view.ViewDefinition.Dependencies, schema+"."+name)
+	}
+	return dependencyRows.Err()
+}
+
+// applyAllTableComments 是 getTableComment 的全 schema 版本。视图注释仍按
+// C12 约定跳过(information_schema.tables 的 TABLE_COMMENT 对视图恒为 'VIEW')。
+func (a *MySQLAdapter) applyAllTableComments(tables map[string]*conn.Table) {
+	commentRows, err := a.QueryContext(context.Background(), `
+		SELECT table_name, table_comment
+		FROM information_schema.tables
+		WHERE table_schema = ? AND table_type = 'BASE TABLE'
+	`, a.Cfg.TableSchema)
+	if err != nil {
+		return
+	}
+	defer commentRows.Close()
+	comments := make(map[string]string)
+	for commentRows.Next() {
+		var name string
+		var comment sql.NullString
+		if err := commentRows.Scan(&name, &comment); err != nil {
+			return
+		}
+		if comment.Valid {
+			comments[name] = comment.String
+		}
+	}
+	if err := commentRows.Err(); err != nil {
+		return
+	}
+	for name, table := range tables {
+		if table.Type == conn.TableTypeTable {
+			table.Comment = comments[name]
+		}
+	}
 }
 
 func (a *MySQLAdapter) extractColumns(table *conn.Table) error {

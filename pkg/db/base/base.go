@@ -176,6 +176,13 @@ func (p *BaseAdapter) Init(cfg *config.ConnConfig) error {
 	if err := tunnel.Start(); err != nil {
 		return err
 	}
+	verifyCtx, cancelVerify := context.WithTimeout(context.Background(), tunnel.Config.Timeout)
+	err = tunnel.Verify(verifyCtx)
+	cancelVerify()
+	if err != nil {
+		_ = tunnel.Stop()
+		return err
+	}
 	p.Cfg.Host = local.Host
 	p.Cfg.Port = local.Port
 	p.tunnel = tunnel

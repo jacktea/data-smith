@@ -30,11 +30,49 @@ func testPublicKey(t *testing.T) ssh.PublicKey {
 	return key
 }
 
+func testSigner(t *testing.T) ssh.Signer {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(cryptorand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(private)
+	if err != nil {
+		t.Fatalf("SSH signer: %v", err)
+	}
+	return signer
+}
+
 func TestCreateSSHTunnelRequiresHostVerification(t *testing.T) {
 	proxyConfig := &config.SSHProxy{Host: "bastion.test", Port: 22, User: "user", Type: "pass", Pass: "placeholder"}
 	_, _, err := CreateSSHTunnel(proxyConfig, &Endpoint{Host: "database.test", Port: 5432})
 	if err == nil || !strings.Contains(err.Error(), "requires knownHostsPath or hostFingerprint") {
 		t.Fatalf("got %v, want missing trust error", err)
+	}
+}
+
+func TestCreateSSHTunnelAllowsExplicitInsecureFlag(t *testing.T) {
+	proxyConfig := &config.SSHProxy{
+		Host: "bastion.test", Port: 22, User: "user", Type: "pass", Pass: "placeholder",
+		AllowInsecureHostKey: true,
+	}
+	tunnel, _, err := CreateSSHTunnel(proxyConfig, &Endpoint{Host: "database.test", Port: 5432})
+	if err != nil {
+		t.Fatalf("create with insecure flag: %v", err)
+	}
+	// 开关生效时回调接受任意主机公钥。
+	if err := tunnel.Config.HostKeyCallback("bastion.test", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 22}, testPublicKey(t)); err != nil {
+		t.Fatalf("insecure callback rejected a key: %v", err)
+	}
+	// 校验材料与开关同时提供时,仍按显式校验执行(更严格者优先)。
+	strict := *proxyConfig
+	strict.HostFingerprint = ssh.FingerprintSHA256(testPublicKey(t))
+	tunnel, _, err = CreateSSHTunnel(&strict, &Endpoint{Host: "database.test", Port: 5432})
+	if err != nil {
+		t.Fatalf("create with fingerprint and flag: %v", err)
+	}
+	if err := tunnel.Config.HostKeyCallback("bastion.test", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 22}, testPublicKey(t)); err == nil {
+		t.Fatal("fingerprint verification was skipped despite being configured")
 	}
 }
 
@@ -137,4 +175,127 @@ func TestSSHTunnelStopClosesListenerAndAcceptedConnections(t *testing.T) {
 		_ = connection.Close()
 		t.Fatal("listener accepted a connection after Stop")
 	}
+}
+
+// startTestSSHServer 仅供 Verify 测试:接受任意密码。返回监听地址。
+func startTestSSHServer(t *testing.T, hostKey ssh.Signer, acceptRemote bool) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen test SSH server: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go serveTestSSHConn(conn, hostKey, acceptRemote)
+		}
+	}()
+	return listener.Addr().String()
+}
+
+func serveTestSSHConn(conn net.Conn, hostKey ssh.Signer, acceptRemote bool) {
+	serverConfig := &ssh.ServerConfig{
+		PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
+			return &ssh.Permissions{}, nil
+		},
+	}
+	serverConfig.AddHostKey(hostKey)
+	serverConn, channels, requests, err := ssh.NewServerConn(conn, serverConfig)
+	if err != nil {
+		return
+	}
+	defer serverConn.Close()
+	go ssh.DiscardRequests(requests)
+	for newChannel := range channels {
+		if !acceptRemote {
+			_ = newChannel.Reject(ssh.Prohibited, "remote dial disabled")
+			continue
+		}
+		channel, channelRequests, err := newChannel.Accept()
+		if err != nil {
+			continue
+		}
+		go ssh.DiscardRequests(channelRequests)
+		go func() {
+			buffer := make([]byte, 1024)
+			for {
+				if _, err := channel.Read(buffer); err != nil {
+					_ = channel.Close()
+					return
+				}
+			}
+		}()
+	}
+}
+
+func verifyTestTunnel(t *testing.T, server *Endpoint, pinnedFingerprint string) *SSHTunnel {
+	t.Helper()
+	callback, err := hostKeyCallback(&config.SSHProxy{HostFingerprint: pinnedFingerprint})
+	if err != nil {
+		t.Fatalf("build host key callback: %v", err)
+	}
+	return &SSHTunnel{
+		Local:  &Endpoint{Host: "127.0.0.1", Port: 0},
+		Server: server,
+		Remote: &Endpoint{Host: "database.test", Port: 5432},
+		Config: &ssh.ClientConfig{
+			User:            "user",
+			Auth:            []ssh.AuthMethod{ssh.Password("password")},
+			HostKeyCallback: callback,
+			Timeout:         2 * time.Second,
+		},
+	}
+}
+
+func testEndpoint(addr string) *Endpoint {
+	host, portText, _ := net.SplitHostPort(addr)
+	port := 0
+	for _, c := range portText {
+		port = port*10 + int(c-'0')
+	}
+	return &Endpoint{Host: host, Port: port}
+}
+
+func TestVerifyDialsSSHEagerlyWithSpecificErrors(t *testing.T) {
+	t.Run("connect refused", func(t *testing.T) {
+		tunnel := verifyTestTunnel(t, &Endpoint{Host: "127.0.0.1", Port: 1}, ssh.FingerprintSHA256(testSigner(t).PublicKey()))
+		err := tunnel.Verify(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "connect to SSH server") {
+			t.Fatalf("got %v, want connect error", err)
+		}
+	})
+	t.Run("fingerprint mismatch", func(t *testing.T) {
+		serverKey := testSigner(t)
+		unpinnedKey := testSigner(t)
+		addr := startTestSSHServer(t, serverKey, true)
+		tunnel := verifyTestTunnel(t, testEndpoint(addr), ssh.FingerprintSHA256(unpinnedKey.PublicKey()))
+		err := tunnel.Verify(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "fingerprint mismatch") {
+			t.Fatalf("got %v, want fingerprint mismatch", err)
+		}
+		if !strings.Contains(err.Error(), "got SHA256:") {
+			t.Fatalf("mismatch error %v does not reveal received fingerprint", err)
+		}
+	})
+	t.Run("remote dial rejected", func(t *testing.T) {
+		serverKey := testSigner(t)
+		addr := startTestSSHServer(t, serverKey, false)
+		tunnel := verifyTestTunnel(t, testEndpoint(addr), ssh.FingerprintSHA256(serverKey.PublicKey()))
+		err := tunnel.Verify(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "SSH remote connection") {
+			t.Fatalf("got %v, want remote dial error", err)
+		}
+	})
+	t.Run("success", func(t *testing.T) {
+		serverKey := testSigner(t)
+		addr := startTestSSHServer(t, serverKey, true)
+		tunnel := verifyTestTunnel(t, testEndpoint(addr), ssh.FingerprintSHA256(serverKey.PublicKey()))
+		if err := tunnel.Verify(context.Background()); err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+	})
 }

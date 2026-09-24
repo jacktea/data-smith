@@ -145,6 +145,10 @@ SSH 代理必须配置主机身份验证，二选一使用 `knownHostsPath` 或�
     knownHostsPath: /path/to/known_hosts
 ```
 
+仅在测试环境等无法提供主机验证材料的场景，可显式设置
+`allowInsecureHostKey: true`（须与上述两项均不同时配置）跳过主机身份校验；
+此时不防范中间人攻击，生产环境不建议开启。
+
 ### 2. 配置比对规则
 
 编辑 `configs/rules.json`：
@@ -365,6 +369,6 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 5. `--chunk-hash` 仍是 opt-in 概率优化：只有精确 count/min/max 一致后才允许跳过范围；并发写入不在共享快照中时仍可能让比较失效。
 6. SQL scanner 是词法扫描器，不是完整客户端协议实现；MySQL `DELIMITER` 和 PostgreSQL `COPY ... FROM STDIN` 等客户端格式不受支持，歧义脚本会被保守拒绝。
 7. PostgreSQL 例程依赖提取只承诺 SQL/PLpgSQL 的静态对象引用；动态 SQL、无法判定的重载或其他语言会拒绝生成，不会猜测顺序。trigger、identity/generated column、分区和用户定义类型仍未纳入结构迁移能力。
-8. SSH 必须配置 `knownHostsPath` 或 SHA-256 `hostFingerprint`；不提供主机身份验证材料的连接会失败。
+8. SSH 默认必须配置 `knownHostsPath` 或 SHA-256 `hostFingerprint`；两者均未配置的连接仅在显式设置 `allowInsecureHostKey: true` 时放行（跳过主机校验，不防中间人攻击）。
 
 Session 6 性能基准（Apple M4 Pro，`-benchtime=1x -count=3`）显示：100k 行且 100k 差异时，streaming pipeline 从 110.48–122.14 ms / 85.57 MB alloc/op 降至 67.38–67.86 ms / 46.13–46.17 MB，SQL 输出从 12,477,886 降至 5,285,286 bytes/op，峰值缓冲从 100,000 行降至固定 2,000 引用。10k 行仅 100 差异时会承担 spool 创建/同步/删除的固定延迟，因此不是低差异场景的纯速度优化。

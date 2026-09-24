@@ -63,12 +63,26 @@ func TestSSHProxyConfigRejectsConfiguredInvalidShapes(t *testing.T) {
 		{value: map[string]any{"port": "22"}, want: `field "port" must be an integer`},
 		{value: map[string]any{"unexpected": true}, want: `unknown field "unexpected"`},
 		{value: map[any]any{1: "bad"}, want: "must be a string"},
+		{value: map[string]any{"allowInsecureHostKey": "yes"}, want: `field "allowInsecureHostKey" must be a boolean`},
 	}
 	for _, test := range tests {
 		_, err := (&ConnConfig{Proxy: test.value}).SSHProxyConfig()
 		if err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Fatalf("value %#v: got %v, want error containing %q", test.value, err, test.want)
 		}
+	}
+}
+
+func TestSSHProxyConfigDecodesInsecureHostKeyFlag(t *testing.T) {
+	got, err := (&ConnConfig{Proxy: map[string]any{
+		"host": "bastion", "port": 22, "user": "u", "type": "pass", "pass": "p",
+		"allowInsecureHostKey": true,
+	}}).SSHProxyConfig()
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.AllowInsecureHostKey {
+		t.Fatal("allowInsecureHostKey was not decoded")
 	}
 }
 
