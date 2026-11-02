@@ -1,6 +1,6 @@
 # 迁移链回归批验收报告（airedge 88 版本全链，2026-09-20）
 
-> 对应计划：`docs/migration-chain-capability-plan.md`「五、回归计划」。
+> 对应计划：`migration-chain-capability-plan.md`「五、回归计划」（能力线已收口，计划文档随 2026-11-02 文档清理移出仓库，git 历史可查）。
 > 执行环境：本机 Docker `postgres14_22`（PG 14.22），一次性库
 > `airedge_mig_src` / `airedge_mig_tgt` / `airedge_mig_verify`（全量重建）。
 > 工作区：`/tmp/ds-acceptance-regress/`（configs、chain.log、out/、migrations/、closure/）。

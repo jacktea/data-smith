@@ -75,7 +75,7 @@ pkg/
 - **测试**：核心逻辑（diff/db/sql/migrate/exec）必须有单元测试，默认不依赖 Docker；真实数据库行为放 `integration` tag 的测试里，走 `scripts/integration-test.sh`。
 - **CI gate**（`.github/workflows/ci.yml`）：gofmt 无 diff、单测、race、vet、staticcheck、govulncheck、双库 E2E + 覆盖率 gate 全部必须通过。工具版本固定（staticcheck v0.8.1、govulncheck v1.1.4），升级需同步 CI 与本文档。
 - **提交**：语义化提交；PR 关联 issue 并过 review。目录结构或核心接口变更需团队评审。
-- **进行中整改**：`docs/remediation-plan.md`、`docs/remediation-handoff.md`、`CODE_REVIEW_REPORT.md`。
+- **能力验收记录**：`docs/migration-chain-regression-report.md`（迁移链能力线闭环结论与遗留缺口）；历史评审/整改过程文档已随 2026-11-02 文档清理移出仓库，git 历史可查。
 
 ## 操作安全红线（改动相关代码时必须维持）
 
